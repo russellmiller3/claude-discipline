@@ -1,18 +1,24 @@
 # Engineering Learnings
 
-Lessons learned during development. **Organized by topic — merge new lessons into existing sections, don't append chronologically.** A reader should find "the ECharts gotcha" in one place, not scattered across dated blocks.
+> Durable, cross-session memory. The agent reads this before working and appends to it after solving something non-obvious. Three hooks keep it alive: `learnings-toc-inject` (surfaces the TOC every session), `learnings-error-match` (surfaces the matching bullet the moment a relevant error appears), and `learnings-write-nudge` (blocks stop when you fixed a bug but logged no lesson).
 
-**How to use:**
-- **Before** planning a feature, debugging, or touching an unfamiliar subsystem: scan the TOC, read the matching section.
-- **After** a non-obvious fix, a platform gotcha, or anything that would bite the next developer: write a one-bullet lesson under the right topic.
+## How to maintain this file (read this first)
 
-**Bullet format:**
+**When to READ it:** before planning a feature, before debugging, before touching a subsystem you haven't worked on recently. Scan the TOC, open the matching section.
+
+**When to WRITE to it:** right after you fix a non-obvious bug, hit a platform/tooling gotcha, or learn something that would cost the next person (or the next session) real time. The bar is low — *"will this bite again? probably yes" → write it.*
+
+**WHERE to write it — by topic, not by date.** Find the existing section the lesson belongs to and merge the new bullet in. Only create a new `## Section` when nothing fits. A reader must find "the ECharts gotcha" in one place, never scattered across dated entries. **Never append a chronological log.**
+
+**HOW to write a bullet:**
 ```
-- **<load-bearing one-line claim>.** <Why it happens — the mechanism>. <The fix>. <Optional: date / commit>.
+- **<load-bearing one-line claim>.** <Why it happens — the mechanism>. <The fix>. <Optional: date / commit hash>.
 ```
-The bold claim is the part a tired reader skims. The rest is for when they need the mechanism.
+The **bold claim** is what a tired reader skims. The rest is for when they need the mechanism. One lesson per bullet.
 
-> This file pairs with three hooks: `learnings-toc-inject` (surfaces this TOC every session), `learnings-error-match` (surfaces the matching bullet the moment a relevant error appears), and `learnings-write-nudge` (blocks stop when you fixed a bug but wrote no lesson). Keep the `## Section` headers and this TOC in sync — the hooks parse them.
+**Keep the TOC in sync.** When you add a `## Section`, add its row to the table below — the `learnings-toc-inject` hook parses these headers and shows them at session start. A section that's not in the TOC is invisible.
+
+**What does NOT go here:** anything the code, tests, or git history already record; anything that only mattered to one conversation. This file is for lessons that change how you'd act next time.
 
 ## Table of Contents
 
