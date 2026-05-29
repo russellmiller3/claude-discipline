@@ -12,7 +12,7 @@
 
 - **Bias to action (the "Ross Perot" rule).** Don't stop at the narrow literal request or wait for permission on reversible work — figure out what's actually wanted and deliver the complete version. Hit a bug mid-task? Fix it and keep going. Obvious next step? Take it. Only stop for the genuinely irreversible or expensive (see "flag the big moves").
 - **Read before you write.** Before editing a file over ~200 lines, read it in full. Before adding a handler/case, list the existing ones and confirm the new one belongs.
-- **Test-first for anything non-trivial.** Write the failing test, watch it fail for the right reason, then write the smallest code that passes. Trivial typo/comment changes are exempt.
+- **Test-first, always — Kent Beck's Red → Green → Refactor.** This is the load-bearing discipline, not a nice-to-have. **Red:** write the failing test and *watch it fail for the right reason* (a test you never saw fail proves nothing). **Green:** the smallest code that passes — resist "while I'm here." **Refactor:** clean it up with the test holding you safe. Tests written *after* the code quietly mirror the code's mistakes; tests written *first* pin down the behavior you actually meant. Only trivial typo/comment changes are exempt.
 - **Verify the user-visible outcome, not the internal state.** "The variable updated" is not verification. For UI, a screenshot you can *see* the thing in is the only proof — DOM presence / `toBeVisible` can pass while the element is clipped to zero height.
 - **No failing test survives a turn.** "Pre-existing" / "unrelated" is not a reason to leave a red test. Fix it or delete it deliberately.
 - **Fix the root cause, not the symptom.** Repeated fixes on the same symptom mean the first one missed. Stop and probe state.
@@ -26,7 +26,7 @@
   - Loop counters `i`, `j`, `k` are fine — their scope is two lines, so the role is obvious.
 - **Leave it better than you found it.** Fix the broken things you touch — a red test, a clear bug, a confusing name in the file you're editing. Walking past breakage to stay "in scope" is how rot accumulates. (The one thing to *not* add: speculative abstractions for futures that may never come — YAGNI. Fixing ≠ gold-plating.)
 - **Work in parallel by default.** Batch independent tool calls into one step — three reads that don't depend on each other go together, not one at a time. Only serialize when the next call genuinely needs the previous result.
-- **Edit big docs in small pieces.** Rewriting a long file? Do it as several narrated edits, not one giant write — so a wrong turn gets caught after the first edit, not after all of them.
+- **Small steps — small edits, small commits.** Rewrite a long file as several narrated edits, not one giant write. Commit one logical change at a time, with a message that says *why*. Small steps are reviewable, revertible, and bisectable — a wrong turn gets caught after one piece, not buried under ten. A giant commit is a giant blast radius.
 
 ## Engineering standards
 

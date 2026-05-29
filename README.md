@@ -145,6 +145,26 @@ Full per-skill reference — how to invoke each, its method, and how they compos
 
 ---
 
+## Pair it with git hooks (the second gate)
+
+These are **Claude Code hooks** — they gate *the agent, in real time*: before a tool runs, after it runs, when it tries to stop. That catches the agent in the act. But an agent hook only fires when the agent is driving, and it can be overridden mid-session.
+
+So pair them with **git hooks** — I use [Husky](https://typicode.github.io/husky/). Git hooks gate the *commit and push boundary* for **everything that reaches the repo** — the agent, you by hand, another tool, a teammate. Same standards, enforced at a second gate that nothing slips past.
+
+The two layers are complementary, not redundant:
+
+| | Claude Code hooks | Git hooks (Husky) |
+|---|---|---|
+| **Fires** | While the agent works (tool calls, stop) | At `git commit` / `git push` |
+| **Catches** | The agent, in the act | Anything that reaches the repo |
+| **Overridable** | Yes, mid-session (by design) | No — the backstop that actually ships |
+
+Put your fast, deterministic checks in a Husky `pre-commit` (lint, typecheck, secret scan) and the slower ones in `pre-push` (full test suite). Several guardrails here have a natural git-hook twin — `tests-must-pass` → tests green in `pre-push`; `protect-secrets` → a secret scan in `pre-commit`; `no-commit-to-main` → a branch check in `pre-commit`. Agent-time enforcement keeps the session honest; commit-time enforcement keeps `main` honest.
+
+> This kit stays dependency-free (clone and go, no `npm install`). Husky lives in *your* project, not here — wire the same standards into both gates.
+
+---
+
 ## Repo layout
 
 ```
