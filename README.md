@@ -179,6 +179,20 @@ claude-discipline/
 
 ---
 
+## Who built this — and hiring
+
+I'm **Russell Miller**. I built this from six months of using Claude Code as my primary way of shipping software. The kit is the distilled result: the guardrails and memory loop that made an AI coding agent actually reliable for daily work.
+
+**I'm available for AI consulting and product management work** — helping teams adopt coding agents safely (guardrails, governance, eval harnesses) and shaping AI-powered products end to end. If your team is standing up AI engineering workflows, or needs a product leader who can go deep on the technical side, let's talk.
+
+- **Email:** rmiller@zavient.com
+- **LinkedIn:** [linkedin.com/in/russellmiller](https://linkedin.com/in/russellmiller)
+- **X:** [@russellm](https://x.com/russellm)
+- **Substack:** [russellmiller2](https://substack.com/@russellmiller2)
+- **GitHub:** [russellmiller3](https://github.com/russellmiller3)
+
+---
+
 ## License
 
 **[PolyForm Noncommercial License 1.0.0](LICENSE.md)** — free for noncommercial
