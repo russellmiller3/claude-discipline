@@ -24,6 +24,7 @@
     "no-legacy-shims":          [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit", "timeout": 5 }, { "event": "Stop", "timeout": 5 }],
     "root-cause-first":         [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit", "timeout": 5 }],
     "decay-footer":             [{ "event": "Stop", "timeout": 5 }],
-    "hookbook-sync":            [{ "event": "Stop", "timeout": 5 }]
+    "hookbook-sync":            [{ "event": "Stop", "timeout": 5 }],
+    "never-stop-asking":        [{ "event": "Stop", "timeout": 5 }]
   }
 }

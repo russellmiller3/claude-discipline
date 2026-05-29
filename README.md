@@ -100,6 +100,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. Full 
 | `root-cause-first` | PostToolUse | After repeated same-symptom fixes, forces a state-probe before the next swing |
 | `decay-footer` | Stop | Code-changing turns must end with a "files touched / smells introduced" footer |
 | `hookbook-sync` | Stop | Change a hook → blocks until `HOOKBOOK.md` documents it (and the count matches) |
+| `never-stop-asking` | Stop | Bias to action: blocks asking-permission phrasing and satisfaction-stops (winding down with work left). Opinionated extras (orientation beat, priority queue) are opt-in via env |
 
 > **Opinions are configurable.** Tier 3 encodes *my* engineering taste. The point isn't that you adopt my opinions — it's that you encode *yours* as deterministic gates instead of hoping the model remembers them. Fork the hook, change the rule, keep the mechanism.
 
