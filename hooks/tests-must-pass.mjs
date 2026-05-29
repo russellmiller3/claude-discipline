@@ -18,7 +18,7 @@ import { join as joinPath, dirname } from 'node:path';
 
 const ROOT_MARKERS = ['.git', 'CLAUDE.md', 'AGENTS.md', 'package.json'];
 const MARKER_RELATIVE = joinPath('.claude', 'state', 'tests-failing.json');
-const TEST_COMMAND_RE = /\b(npm\s+(run\s+)?test|test:all|test:stores|test:clear|vitest|playwright\s+test|vite-node\s+\S*\.test|node\s+\S*\.test|pytest|go\s+test|cargo\s+test|\.spec\.)/i;
+const TEST_COMMAND_RE = /\b((npm|yarn|pnpm)\s+(run\s+)?test|test:all|vitest|jest|mocha|playwright\s+test|vite-node\s+\S*\.test|node\s+\S*\.test|pytest|go\s+test|cargo\s+test|\.spec\.|\.test\.)/i;
 const FULL_SUITE_RE = process.env.TESTS_FULL_SUITE_RE
 	? new RegExp(process.env.TESTS_FULL_SUITE_RE, 'i')
 	: /\bnpm\s+test\b|test:all|\bpytest\b|\bgo\s+test\b|\bcargo\s+test\b/i;
