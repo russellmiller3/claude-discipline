@@ -62,6 +62,8 @@ The installer:
 3. Drops the starter `CLAUDE.md`, `learnings.md`, and `HANDOFF.md` templates where you choose (global `~/.claude/` or a project root).
 4. Prints exactly what it changed.
 
+Add `--skills` to also install the workflow skills (`write-plan`, `red-team-plan`, `red-team-code`, `pres`, `ship`, `docs-cascade`, `handoff`) into `~/.claude/skills/`.
+
 **Dry run first** (recommended): `node scripts/install.mjs --dry-run` shows every change without writing anything.
 
 To uninstall a hook: `node scripts/install.mjs --remove <hook-name>` (removes the file + its settings.json entry).
@@ -105,6 +107,31 @@ Hooks are **tiered by how portable they are** — pick your comfort level. Full 
 
 ---
 
+## Skills (the workflows on top)
+
+Hooks enforce; **skills are the workflows** — the *right way* to do the recurring things, available on demand. The hooks make sure you can't do the wrong thing; the skills make the right thing one command away. They're optional (`node scripts/install.mjs --skills`), and they compose into one loop:
+
+```
+  idea ─▶ write-plan ─▶ red-team-plan ─▶ execute ─▶ red-team-code ─▶ ship
+                                                                       │
+                              docs-cascade ◀───────────────────────────┘
+   (handoff at any boundary — pass full context to the next session)
+```
+
+| Skill | What it does |
+|-------|--------------|
+| `pres` | The orchestrator: **P**lan → **R**ed-team → **E**xecute → **S**hip in one run, no manual handoffs |
+| `write-plan` | A phased TDD plan with the **hardest phase first**; incremental writes you can steer mid-draft |
+| `red-team-plan` | Attacks a plan before coding — edge cases, race conditions, spec contradictions — and *fixes* them, copy-paste ready |
+| `red-team-code` | Attacks code that already compiles — security, concurrency, contracts, dead code — and fixes findings directly |
+| `ship` | Doc gate → test gate → data-at-risk gate → commit → merge → push, with a plain-English wrap-up |
+| `docs-cascade` | After a feature, sync every doc surface (config-driven to your project's set) so it's visible to users and to AI |
+| `handoff` | Write `HANDOFF.md` action-first so a fresh (often cheaper) session resumes cold without re-deriving state |
+
+> **Skills are generic by design.** They carry the *method* (hardest-phase-first planning, fix-don't-suggest red-teaming, action-first handoffs) with the project-specifics stripped out. Point `docs-cascade` at your doc surfaces, set `ROOT_CAUSE_FILES` for your pipeline, and they fit any repo.
+
+---
+
 ## The patterns worth stealing (even if you take nothing else)
 
 1. **Block, don't nag.** A `Stop` hook that returns `{"decision":"block","reason":"..."}` *cannot* be ignored. An injected reminder can. Reserve blocks for true non-negotiables so they don't become noise.
@@ -126,6 +153,7 @@ claude-discipline/
 │   ├── PHILOSOPHY.md         ← why deterministic > advisory; when to make a hook
 │   └── WRITING-HOOKS.md      ← anatomy of a hook + the marker pattern, to write your own
 ├── hooks/                    ← dependency-free .mjs hooks, one file each
+├── skills/                   ← optional workflows (one dir per skill, each a SKILL.md)
 ├── templates/
 │   ├── CLAUDE.md             ← starter rules file (philosophy lives here)
 │   ├── learnings.md          ← starter memory file (topic-organized, with TOC)

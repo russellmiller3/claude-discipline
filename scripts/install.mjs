@@ -17,7 +17,7 @@
 // entries it didn't add (except the explicit --remove). Re-running is
 // idempotent — an already-registered command is skipped, not duplicated.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync, rmSync, cpSync, statSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -25,10 +25,12 @@ import { fileURLToPath } from 'node:url';
 const KIT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const HOOKS_SRC = join(KIT_ROOT, 'hooks');
 const TEMPLATES_SRC = join(KIT_ROOT, 'templates');
+const SKILLS_SRC = join(KIT_ROOT, 'skills');
 const FRAGMENT_PATH = join(KIT_ROOT, 'settings.fragment.json');
 
 const CLAUDE_DIR = join(homedir(), '.claude');
 const HOOKS_DEST = join(CLAUDE_DIR, 'hooks');
+const SKILLS_DEST = join(CLAUDE_DIR, 'skills');
 const SETTINGS_PATH = join(CLAUDE_DIR, 'settings.json');
 
 const args = process.argv.slice(2);
@@ -139,6 +141,11 @@ function printMenu({ byHook, tierOf }, available) {
 			console.log(`    ${available.has(hook) ? '✓' : '⏳'} ${hook}`);
 		}
 	}
+	const skillNames = availableSkillDirs();
+	if (skillNames.length) {
+		console.log('\nSkills (workflows) — add --skills to install all of them:');
+		console.log(`    ${skillNames.join(', ')}`);
+	}
 	console.log('\nAdd --templates to also drop CLAUDE.md / learnings.md / HANDOFF.md.');
 	console.log('Add --dry-run to preview without writing.');
 }
@@ -151,6 +158,28 @@ function installTemplates(targetDir) {
 		if (existsSync(dest)) { note(`  = template ${file}: exists at ${dest} (left untouched)`); continue; }
 		note(`  + template ${file} -> ${dest}`);
 		if (!DRY_RUN) { mkdirSync(targetDir, { recursive: true }); copyFileSync(join(TEMPLATES_SRC, file), dest); }
+	}
+}
+
+// ── Skills ────────────────────────────────────────────────────────────────
+// Skills are directories under skills/<name>/ with a SKILL.md. Claude Code
+// auto-discovers anything in ~/.claude/skills/ — no settings.json registration
+// needed, so this is just a careful recursive copy (existing skills untouched).
+function availableSkillDirs() {
+	if (!existsSync(SKILLS_SRC)) return [];
+	return readdirSync(SKILLS_SRC).filter((entry) => {
+		try { return statSync(join(SKILLS_SRC, entry)).isDirectory(); } catch { return false; }
+	});
+}
+
+function installSkills() {
+	const skillNames = availableSkillDirs();
+	if (skillNames.length === 0) return;
+	for (const skillName of skillNames) {
+		const dest = join(SKILLS_DEST, skillName);
+		if (existsSync(dest)) { note(`  = skill ${skillName}: exists at ${dest} (left untouched)`); continue; }
+		note(`  + skill ${skillName} -> ${dest}`);
+		if (!DRY_RUN) cpSync(join(SKILLS_SRC, skillName), dest, { recursive: true });
 	}
 }
 
@@ -179,8 +208,9 @@ function main() {
 
 	const selection = resolveSelection(fragment, available);
 	const wantsTemplates = hasFlag('--templates');
+	const wantsSkills = hasFlag('--skills') || hasFlag('--all');
 
-	if (selection.length === 0 && !wantsTemplates) { printMenu(fragment, available); return; }
+	if (selection.length === 0 && !wantsTemplates && !wantsSkills) { printMenu(fragment, available); return; }
 
 	// Copy hook files
 	if (!DRY_RUN && selection.length) mkdirSync(HOOKS_DEST, { recursive: true });
@@ -197,6 +227,9 @@ function main() {
 
 	// Templates
 	if (wantsTemplates) installTemplates(flagValue('--templates') && !flagValue('--templates').startsWith('--') ? flagValue('--templates') : CLAUDE_DIR);
+
+	// Skills
+	if (wantsSkills) installSkills();
 
 	report();
 }
