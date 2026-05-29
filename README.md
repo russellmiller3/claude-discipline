@@ -130,6 +130,8 @@ Hooks enforce; **skills are the workflows** — the *right way* to do the recurr
 
 > **Skills are generic by design.** They carry the *method* (hardest-phase-first planning, fix-don't-suggest red-teaming, action-first handoffs) with the project-specifics stripped out. Point `docs-cascade` at your doc surfaces, set `ROOT_CAUSE_FILES` for your pipeline, and they fit any repo.
 
+Full per-skill reference — how to invoke each, its method, and how they compose: [`docs/SKILLS.md`](docs/SKILLS.md).
+
 ---
 
 ## The patterns worth stealing (even if you take nothing else)
@@ -150,6 +152,7 @@ claude-discipline/
 ├── README.md                ← you are here (the how-to)
 ├── docs/
 │   ├── HOOKBOOK.md           ← per-hook reference: trigger, behavior, clear-path
+│   ├── SKILLS.md             ← per-skill reference: how to invoke, method, how they compose
 │   ├── PHILOSOPHY.md         ← why deterministic > advisory; when to make a hook
 │   └── WRITING-HOOKS.md      ← anatomy of a hook + the marker pattern, to write your own
 ├── hooks/                    ← dependency-free .mjs hooks, one file each
