@@ -179,4 +179,10 @@ claude-discipline/
 
 ## License
 
-MIT. Take it, fork it, encode your own opinions.
+**[PolyForm Noncommercial License 1.0.0](LICENSE.md)** — free for noncommercial
+use (personal projects, research, education, nonprofits, government). Fork it,
+change the rules, encode your own opinions.
+
+**Commercial or for-profit use requires a paid license** — see
+[COMMERCIAL.md](COMMERCIAL.md). The hooks are easy to copy; the value is the
+system. If it saves your team engineering time, it's worth a license.
