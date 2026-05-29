@@ -17,8 +17,8 @@ commercial license.** That includes:
 A commercial license is straightforward and priced to be a no-brainer next to
 the engineering time these guardrails save. Reach out:
 
-- **Email:** `[ your email here ]`
-- **LinkedIn:** `[ your LinkedIn URL here ]`
+- **Email:** rmiller@zavient.com
+- **LinkedIn:** [linkedin.com/in/russellmiller](https://linkedin.com/in/russellmiller)
 
 Tell me roughly how many engineers will use it and whether you want:
 
