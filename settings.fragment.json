@@ -1,0 +1,29 @@
+{
+  "_comment": "Canonical hook→registration map. `scripts/install.mjs` reads this, and for each hook the user selects (whose .mjs exists in hooks/), merges its entries into ~/.claude/settings.json. command is derived as `node ~/.claude/hooks/<name>.mjs`. A hook with multiple entries registers on multiple events (e.g. tests-must-pass on PostToolUse+Stop). Tiers mirror the README.",
+
+  "tier1_standalone": {
+    "block-dangerous-commands": [{ "event": "PreToolUse", "matcher": "Bash", "timeout": 5 }],
+    "protect-secrets":          [{ "event": "PreToolUse", "matcher": "Read|Edit|Write|Bash", "timeout": 5 }],
+    "no-commit-to-main":        [{ "event": "PreToolUse", "matcher": "Bash", "timeout": 5 }],
+    "read-before-write":        [{ "event": "PreToolUse", "matcher": "Edit|MultiEdit", "timeout": 5 }],
+    "pixels-only-proof":        [{ "event": "Stop", "timeout": 5 }],
+    "tests-must-pass":          [{ "event": "PostToolUse", "matcher": "Bash", "timeout": 5 }, { "event": "Stop", "timeout": 5 }],
+    "name-by-use":              [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit", "timeout": 5 }]
+  },
+
+  "tier2_memory": {
+    "inject-claude-md":         [{ "event": "SessionStart", "timeout": 5 }],
+    "learnings-toc-inject":     [{ "event": "SessionStart", "timeout": 5 }],
+    "learnings-error-match":    [{ "event": "PostToolUse", "matcher": "Bash|Edit|Write|MultiEdit", "timeout": 5 }],
+    "require-learnings-ack":    [{ "event": "PreToolUse", "matcher": "Edit|Write|MultiEdit|Read", "timeout": 5 }],
+    "learnings-write-nudge":    [{ "event": "PostToolUse", "matcher": "Bash", "timeout": 5 }, { "event": "Stop", "timeout": 5 }],
+    "handoff-continuity":       [{ "event": "Stop", "timeout": 5 }]
+  },
+
+  "tier3_opinionated": {
+    "no-legacy-shims":          [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit", "timeout": 5 }],
+    "root-cause-first":         [{ "event": "PostToolUse", "matcher": "Bash", "timeout": 5 }],
+    "decay-footer":             [{ "event": "Stop", "timeout": 5 }],
+    "hookbook-sync":            [{ "event": "Stop", "timeout": 5 }]
+  }
+}
