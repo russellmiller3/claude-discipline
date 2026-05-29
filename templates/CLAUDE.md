@@ -25,6 +25,21 @@
   - `tmp` → `draft_caption` / `partial_summary`
   - Loop counters `i`, `j`, `k` are fine — their scope is two lines, so the role is obvious.
 - **Leave it better than you found it.** Fix the broken things you touch — a red test, a clear bug, a confusing name in the file you're editing. Walking past breakage to stay "in scope" is how rot accumulates. (The one thing to *not* add: speculative abstractions for futures that may never come — YAGNI. Fixing ≠ gold-plating.)
+- **Work in parallel by default.** Batch independent tool calls into one step — three reads that don't depend on each other go together, not one at a time. Only serialize when the next call genuinely needs the previous result.
+- **Edit big docs in small pieces.** Rewriting a long file? Do it as several narrated edits, not one giant write — so a wrong turn gets caught after the first edit, not after all of them.
+
+## Engineering standards
+
+- **Refuse to fake it.** Never stub, mock, or `TODO` past the hard part to make something "work." Before returning, ask: "if they ran this right now, would it actually do the thing?" If no, say what's missing — don't ship a hollow shell that compiles.
+- **Guard silent failures at runtime.** The worst bugs run fine and do the wrong thing — no stack trace, hours lost. `Number("")` is `0`; `undefined + 1` is `NaN`; a failed save can still return `200`. Add an explicit runtime check that *trips loudly* on the empty/missing/coerced case, and a test that asserts the real outcome ("a row exists"), not just "no error."
+- **Bias-check before submitting.** Did I add a branch where a type belonged? A flag where a message belonged? A string compare where an enum belonged? Did I copy a nearby pattern that was itself wrong? If yes, fix it now — don't defer the shape problem into debt.
+- **Console first.** Debugging a UI/runtime issue? Read the actual error output before reading code or theorizing. The error usually names the problem in seconds; guessing wastes the session.
+- **Quality bar high by default.** Compute is cheap. Prefer the thorough thing — more tests, clearer errors, cleaner shape — over the minimal diff, unless there's a real reason to keep it small.
+
+## Research & external facts
+
+- **Don't guess about the outside world.** Questions about what users want, what a competitor does, what an API returns, how a library behaves — look it up, don't invent a plausible answer.
+- **Cite, and separate thesis from evidence.** "Source X says Y" is evidence; "I think Y because Z" is a thesis — label which. A claim isn't grounded until two independent sources agree. If the data isn't there, say "I couldn't find evidence either way."
 
 ## Memory & continuity
 
