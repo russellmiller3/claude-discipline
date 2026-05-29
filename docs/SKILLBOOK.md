@@ -1,6 +1,6 @@
-# Skills
+# Skillbook
 
-Per-skill reference for Claude Discipline — **7 workflow skills**. Hooks enforce
+The skills' answer to the [Hookbook](HOOKBOOK.md). Per-skill reference for Claude Discipline — **7 workflow skills**. Hooks enforce
 ("you can't do the wrong thing"); skills are the *workflows* ("the right thing is
 one command away"). They're optional (`node scripts/install.mjs --skills`) and
 **generic by design** — they carry the *method* with project-specifics stripped,
