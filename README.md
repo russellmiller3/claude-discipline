@@ -1,8 +1,6 @@
 # Claude Discipline
 
-**An opinionated, self-enforcing operating system for Claude Code — guardrails that *can't* be skipped and memory that *can't* rot.**
-
-> Working title. `git mv` it to whatever you like.
+**An operating system for your coding agent — guardrails that *can't* be skipped and memory that *can't* rot.**
 
 ---
 
