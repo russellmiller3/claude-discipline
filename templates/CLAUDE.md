@@ -17,7 +17,13 @@
 - **No failing test survives a turn.** "Pre-existing" / "unrelated" is not a reason to leave a red test. Fix it or delete it deliberately.
 - **Fix the root cause, not the symptom.** Repeated fixes on the same symptom mean the first one missed. Stop and probe state.
 - **Replace, don't shim.** Pre-1.0, there are no external users — change the code outright and update the tests. Don't keep old paths alive "just in case."
-- **Name by role, not by type.** `approved_deal`, not `data`; `refund_amount`, not `val`. A name should say what it carries.
+- **Name by role, not by type.** A type name (`data`, `result`, `val`, `tmp`, `list`, `text`) says *what kind of thing* it is — which the reader can already see. A role name says *what it's for*, which is the part they actually need. The name should answer "what is this?" without scrolling up. Examples:
+  - `data` → `incoming_signup` / `stripe_event` / `raw_payload`
+  - `result` → `approved_deal` / `save_response` / `grade`
+  - `val` → `refund_amount` / `new_threshold` / `chosen_color`
+  - `list` → `open_tasks` / `matching_rows` / `recent_logs`
+  - `tmp` → `draft_caption` / `partial_summary`
+  - Loop counters `i`, `j`, `k` are fine — their scope is two lines, so the role is obvious.
 - **Leave it better than you found it.** Fix the broken things you touch — a red test, a clear bug, a confusing name in the file you're editing. Walking past breakage to stay "in scope" is how rot accumulates. (The one thing to *not* add: speculative abstractions for futures that may never come — YAGNI. Fixing ≠ gold-plating.)
 
 ## Memory & continuity

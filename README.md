@@ -86,7 +86,6 @@ Hooks are **tiered by how portable they are** — pick your comfort level. Full 
 ### Tier 2 — Needs the companion files (the memory system)
 | Hook | Event | What it enforces |
 |------|-------|------------------|
-| `inject-claude-md` | SessionStart | Loads your `CLAUDE.md` into context every session |
 | `learnings-toc-inject` | SessionStart | Injects the `learnings.md` table of contents so the agent scans it before working |
 | `learnings-error-match` | PostToolUse | When an error appears, surfaces the matching past lesson — *and drops a marker* |
 | `require-learnings-ack` | PreToolUse(Edit) | Blocks code edits until you've actually read the surfaced lesson |
@@ -101,6 +100,8 @@ Hooks are **tiered by how portable they are** — pick your comfort level. Full 
 | `decay-footer` | Stop | Code-changing turns must end with a "files touched / smells introduced" footer |
 | `hookbook-sync` | Stop | Change a hook → blocks until `HOOKBOOK.md` documents it (and the count matches) |
 | `never-stop-asking` | Stop | Bias to action: blocks asking-permission phrasing and satisfaction-stops (winding down with work left). Opinionated extras (orientation beat, priority queue) are opt-in via env |
+| `recommend-when-listing` | Stop | When the reply lists options but picks none, blocks until you lead with a recommendation. Quiet in survey/"what do you think" mode |
+| `file-size-guard` | PostToolUse(Write) | Warns (never blocks) when a written file exceeds size limits — too many lines, an over-long function, too many switch arms. Thresholds env-configurable |
 
 > **Opinions are configurable.** Tier 3 encodes *my* engineering taste. The point isn't that you adopt my opinions — it's that you encode *yours* as deterministic gates instead of hoping the model remembers them. Fork the hook, change the rule, keep the mechanism.
 

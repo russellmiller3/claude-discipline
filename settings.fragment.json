@@ -12,7 +12,6 @@
   },
 
   "tier2_memory": {
-    "inject-claude-md":         [{ "event": "SessionStart", "timeout": 5 }],
     "learnings-toc-inject":     [{ "event": "SessionStart", "timeout": 5 }],
     "learnings-error-match":    [{ "event": "PostToolUse", "matcher": "Bash|Edit|Write|MultiEdit", "timeout": 5 }],
     "require-learnings-ack":    [{ "event": "PreToolUse", "matcher": "Edit|Write|MultiEdit|Read", "timeout": 5 }],
@@ -25,6 +24,8 @@
     "root-cause-first":         [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit", "timeout": 5 }],
     "decay-footer":             [{ "event": "Stop", "timeout": 5 }],
     "hookbook-sync":            [{ "event": "Stop", "timeout": 5 }],
-    "never-stop-asking":        [{ "event": "Stop", "timeout": 5 }]
+    "never-stop-asking":        [{ "event": "Stop", "timeout": 5 }],
+    "recommend-when-listing":   [{ "event": "Stop", "timeout": 5 }],
+    "file-size-guard":          [{ "event": "PostToolUse", "matcher": "Write", "timeout": 5 }]
   }
 }

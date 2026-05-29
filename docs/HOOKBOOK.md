@@ -1,6 +1,6 @@
 # HOOKBOOK
 
-Per-hook reference for Claude Discipline — **18 hooks** across PreToolUse, PostToolUse, Stop, and SessionStart. For each: when it fires, what it does, and how to satisfy or override it.
+Per-hook reference for Claude Discipline — **19 hooks** across PreToolUse, PostToolUse, Stop, and SessionStart. For each: when it fires, what it does, and how to satisfy or override it.
 
 > Keep the headline count above in sync with `settings.fragment.json`. The `hookbook-sync` hook checks it mechanically and blocks a turn that changes a hook without updating this file.
 
@@ -35,9 +35,6 @@ Blocks fresh identifiers named after their type (`text`, `data`, `result`, `tmp`
 
 ## Tier 2 — Memory system (needs the companion files)
 
-### `inject-claude-md` · SessionStart
-Prints `~/.claude/CLAUDE.md` into context at session start (belt-and-suspenders for SDK/headless runs). Silent no-op if absent.
-
 ### `learnings-toc-inject` · SessionStart
 Surfaces the `## Table of Contents` of `~/.claude/learnings.md` and `<project>/learnings.md` so the agent knows what lessons exist. Prints a "start one" hint if neither file exists.
 
@@ -71,6 +68,12 @@ If a hook `.mjs` changed this turn but HOOKBOOK wasn't touched, or the "N hooks"
 
 ### `never-stop-asking` · Stop
 Bias to action (the "Ross Perot" rule). **Default (always on):** blocks asking-permission phrasing (`want me to` / `should I` / `if you'd rather`) and satisfaction-stops — winding-down language (`next session`, `TL;DR`, `wrapping up`) or naming a "next move" while the turn made zero working tool calls toward it. Suppressed when the user explicitly pauses (handoff / wrap / stop), except asking-permission which always fires. **Opt-in extras (env):** `NEVER_STOP_REQUIRE_BEAT=1` (work turns must include an orientation beat), `NEVER_STOP_REQUIRE_QUEUE=1` (work turns need a `.claude/state/priority-queue.md`). **Override:** `NEVER_STOP_OVERRIDE=1`.
+
+### `recommend-when-listing` · Stop
+When the last reply lists alternatives (Option A/B, "either X or Y", "two approaches", "your call") but contains no recommendation verb, blocks until you lead with a pick. A menu of equal options pushes the decision back onto the user. Quiet when the user asked for survey/think mode ("just thinking", "what do you think", "feedback only"). **Override:** `RECOMMEND_WHEN_LISTING_OVERRIDE=1`.
+
+### `file-size-guard` · PostToolUse(Write)
+Warns (never blocks) when a freshly written code file crosses a structural limit: too many lines, an over-long function, or too many switch/match arms (the next arm probably wants to be a new type). Surfaces the smell so you can report it honestly. **Config:** `FILE_SIZE_MAX_LINES` (400), `FILE_SIZE_MAX_FN` (80), `FILE_SIZE_MAX_ARMS` (7). **Disable:** `FILE_SIZE_GUARD_OFF=1`.
 
 ---
 
