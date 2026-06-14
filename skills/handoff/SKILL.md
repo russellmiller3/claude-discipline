@@ -16,24 +16,27 @@ So: **as long as needed.** A small session might be 100 lines; a busy multi-repo
 ## HARD RULES
 
 1. **ACTION FIRST. Reference second. Always.** The cold agent must know WHAT TO DO within 30 seconds of opening the file. Section order (load-bearing, do not deviate):
-   1. **Pick up here** — branch, head commit, test command, item 1 in one paragraph. Cold orientation.
+   1. **Pick up here** — branch, head commit, test command, item 1 in one paragraph, AND any action that was mid-flight when the session ended (see rule 8). Cold orientation.
    2. **Resume order** — dependency-ordered numbered list, one line of reasoning per item ("item N first because items after it fail without it").
    3. **What's broken or stub** — read BEFORE touching code. Trip-wires for things that look-shipped-but-aren't.
-   4. **Next session — priority order (full detail)** — scope + size estimate + why-it-matters + what-it-unblocks per item.
-   5. **Inline reference material** for the top items (templates, target code shape) — placed next to the item that needs it.
-   6. **Strategic context** — why this work matters for the goal. Read AFTER you know what you're doing.
-   7. **Cross-repo state** — table: repo / branch / last commit / tests / working tree.
-   8. **What this session shipped** — one line each; full detail lives in the changelog.
-   9. **Human-owned items** — non-coding backlog (account setup, credentials, decisions), kept separate so the agent doesn't conflate it with technical work.
-   10. **Tested vs assumed** — where surprise bugs likely lurk.
-   11. **Blocked on the human** — skip these, grab the next item.
-   The anti-pattern this prevents: strategic context first, action buried at section 5. The agent should be able to act after reading sections 1-2 alone.
+   4. **Already committed to the world (irreversible — do NOT redo)** — pushed commits, opened/merged PRs, sent messages/emails, deployed artifacts, deleted or migrated data. Read BEFORE touching code. The handoff records what the agent INTENDED; the world already moved. Re-running these un-sends nothing.
+   5. **Next session — priority order (full detail)** — scope + size estimate + why-it-matters + what-it-unblocks per item.
+   6. **Inline reference material** for the top items (templates, target code shape) — placed next to the item that needs it.
+   7. **Strategic context** — why this work matters for the goal. Read AFTER you know what you're doing.
+   8. **Cross-repo state** — table: repo / branch / last commit / tests / working tree.
+   9. **What this session shipped** — one line each; full detail lives in the changelog.
+   10. **Human-owned items** — non-coding backlog (account setup, credentials, decisions), kept separate so the agent doesn't conflate it with technical work.
+   11. **Tested vs assumed** — where surprise bugs likely lurk.
+   12. **Blocked on the human** — skip these, grab the next item.
+   The anti-pattern this prevents: strategic context first, action buried at section 6. The agent should be able to act after reading sections 1-2 alone.
 2. **Cross-repo state always.** If the session touched more than one repo, every touched repo gets a row: branch, last commit, dirty state.
 3. **Every work item gets a size estimate** so the agent has scope sense (small / medium / large, or your project's convention).
 4. **Separate technical items from human-owned items.** Two sections. Account setup / credentials / decisions are NOT coding work — don't let the agent pick them up as tasks.
 5. **Mark broken vs stub vs working explicitly.** For any active piece, the agent needs to know which features look shipped but aren't wired end-to-end.
 6. **Bullets and tables over paragraphs.** Every line stands alone.
 7. **Resume order has reasoning.** Not just items 1-5 — name what each unblocks. The agent needs the dependency graph, not just a list.
+8. **Capture mid-flight state, not just done/next.** If the session ended mid-action — a tool call in flight, an unanswered permission prompt, a half-applied edit, a partially-run migration — say so explicitly in "Pick up here." The single most common resume failure: the cold agent reads "did X, next do Y," redoes the in-flight step, and double-applies it. Name the exact step that was in progress and whether it completed.
+9. **Record irreversible side-effects separately — the world isn't the log.** Anything already committed to the outside world (pushed commits, opened/merged PRs, sent messages/emails, deployed artifacts, deleted or migrated data) goes in its own section. The handoff faithfully records what the agent *did and saw*; it does NOT make the world reversible. The cold agent must know what's already irreversible so it doesn't redo a send/deploy/delete on resume. Also flag where the world may have DRIFTED since (a file the agent edited may have changed underneath it).
 
 ## Where things go (don't bloat HANDOFF with content that lives elsewhere)
 
@@ -56,6 +59,7 @@ So: **as long as needed.** A small session might be 100 lines; a busy multi-repo
 **Confirm green before resuming:** [exact test command] -> expect [N/N passing].
 **Start on:** item 1 below ([one line]).
 **After item 1:** item 2 ([one line, name the cliff if any]).
+**Mid-flight when session ended:** [the exact in-progress step — tool call, unanswered prompt, half-applied edit — and whether it completed. "None" if the session ended clean.] <- check this BEFORE redoing anything.
 
 Read the rest top-to-bottom before touching code.
 
@@ -67,6 +71,14 @@ Read the rest top-to-bottom before touching code.
 **[Area A]:**
 - [x] [hard breakage — won't compile / fails on click]
 - [!] [stub — looks shipped, not wired end-to-end]
+
+## Already committed to the world (irreversible — do NOT redo)
+The world moved; the handoff only records intent. Re-running these un-sends nothing.
+- [→] [pushed commit / merged PR — with hash or URL]
+- [→] [sent message / email / external API write]
+- [→] [deployed artifact / deleted or migrated data]
+- [~] [DRIFT RISK: file/resource the agent changed that something else may have touched since]
+- "None — all work stayed local and reversible" if that's true.
 
 ## Next session — priority order (full detail)
 1. **[Item]** ([size estimate]). Scope: [one line]. **Why it matters:** [one line]. **Unblocks:** items N, M.
@@ -113,3 +125,5 @@ Tell the user: "Handoff saved at [path]. [N] lines. The next session should read
 - No "what's broken" inventory -> agent trips into a known stub.
 - No resume-order reasoning -> agent picks the cheapest item, not the load-bearing one.
 - Single-repo state when the session was multi-repo.
+- No mid-flight note -> agent reads "did X, next Y," redoes the in-progress step, and double-applies it.
+- Irreversible side-effects buried in "what shipped" -> agent re-pushes / re-sends / re-deploys something that already happened.
