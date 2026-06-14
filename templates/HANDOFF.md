@@ -8,35 +8,53 @@
 
 **When to READ it:** at the very start of a session, before any substantive work. It is the source of truth for "where were we."
 
-**WHAT goes in each section:**
-- **In flight** — started but not done. The thing to resume FIRST, with the next concrete step.
-- **Just landed** — what shipped this session (file/commit). **Reset this each session** — it's a "since last handoff" delta, not a changelog.
-- **Open questions / blocked** — anything waiting on a decision, key, or person.
-- **Up next** — not-yet-started work, in priority order.
-- **Gotchas** — what will bite whoever picks this up (a flaky test, a manual rebuild step, an env var).
+**Keep it PRESCRIPTIVE, SHORT, and priority-first.** Tell the next session EXACTLY what to do, in order — never a vague "continue the work." It is a snapshot, not a history: if it grows past ~1.5 screens, you're logging too much — fold durable *lessons* into `learnings.md` and drop anything already captured in commits. Keep the section ORDER below; don't invent or duplicate sections (that's how handoffs rot).
 
-**Keep it SHORT and priority-first.** This is a snapshot, not a history. If it grows past a screen, you're logging too much — fold durable *lessons* into `learnings.md` and drop anything already captured in commits.
+**This file IS the priority queue.** Do NOT keep a separate `priority-queue.md` — the "Up next (priority queue)" section below is the single, authoritative ranked backlog. One doc, one source of truth.
 
-**The split to remember:** `HANDOFF.md` = *transient* state ("where am I, what's next"). `learnings.md` = *durable* lessons ("how not to repeat a mistake"). A reusable lesson goes to learnings; a "pick up here" note stays here.
+**The split to remember:** `HANDOFF.md` = *transient* state ("where am I, what's next"). `learnings.md` = *durable* lessons ("how not to repeat a mistake"). A reusable lesson goes to learnings; a "pick up here" note stays here. **Gotchas that are durable belong in `learnings.md`** — keep only the immediate, session-specific trip-wires here.
+
+**WHAT goes in each section (in this order):**
+1. **Read these first** — the ordered file list a cold agent reads to come up to speed (README/architecture first, then this file, then the queue/plan, then the source files for task 1).
+2. **▶ GO** — the ONE unambiguous next task (= top of the queue). Typing "go" starts here. Name the first concrete step + the exact files.
+3. **State** — branch, head commit, exact test command + expected pass count, what's committed/pushed.
+4. **Up next (priority queue)** — numbered, highest-impact first, each actionable (what + which files). The spine of the handoff.
+5. **In flight** — anything started-but-not-done to resume FIRST (usually folds into GO).
+6. **Just landed** — what shipped this session (one line each, file/commit). **Reset each session** — a delta, not a changelog.
+7. **Open questions / blocked** — waiting on a decision, key, or person; skip and grab the next item.
+8. **Gotchas (transient only)** — immediate trip-wires for THIS pickup. Durable ones → `learnings.md`.
 
 ---
 
-## In flight (finish first)
+## Read these first (come up to speed in ~5 min, in order)
+1. **`README.md`** — what the project IS.
+2. **`<ARCH/architecture doc>`** — how it works (diagrams if any).
+3. **This file's "▶ GO" + "Up next"** — what to do (this IS the queue).
+4. **`<plan / design doc>`** — deeper rationale behind the backlog.
+5. **`learnings.md`** — gotchas; scan the TOC.
+6. **Source files for task 1:** `<file>`, `<file>` — where the work happens.
 
+Then: `git log --oneline <base>..HEAD` (this session's commits) + `<test command>` (expect green).
+
+## ▶ GO (type "go" → start HERE, one unambiguous task)
+**<the single next task>** — first step: `<concrete action>`. Files: `<file>`, `<file>`. (Why this and not X: <one line>.)
+
+## State
+- **Repo/branch:** `<path>` on `<branch>` (head `<hash>`, [pushed / NOT pushed]).
+- **Confirm green:** `<test command>` → expect `<N / N>`.
+
+## Up next (priority queue)
+1. **<task>** — first step — why / what it unblocks. Files: `<…>`.
+2. **<task>** — …
+
+## In flight (finish first, if any)
 1. **<epic / task>** — next concrete step — why it matters.
 
 ## Just landed this session
-
 - **<thing shipped>** — one line on what + where (file / commit).
 
 ## Open questions / blocked
-
 - **<question>** — needs <decision / key / hardware / someone>.
 
-## Up next (priority order)
-
-1. **<task>** — first step — why.
-
-## Gotchas for the next session
-
-- <flaky test / manual step / stale build that needs a rebuild / env var>.
+## Gotchas (transient — durable ones go to learnings.md)
+- <flaky test / manual rebuild step / env var that bites THIS pickup>.
