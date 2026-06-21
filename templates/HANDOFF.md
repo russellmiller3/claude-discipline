@@ -4,6 +4,8 @@
 
 ## How to maintain this file (read this first)
 
+**EVERY WRITE IS A FULL TIDY, NOT AN APPEND (hard rule).** Any time you touch this file, re-read it top to bottom and clean the WHOLE document: delete anything now done or stale, dedupe overlapping notes, fold durable lessons into `learnings.md`, and keep the section order below. A handoff rots when people only append — every edit should leave it **shorter and current**, never longer and stale. **Don't pin volatile specifics that rot** — say "full suite green," not an exact test count; cite a commit hash only when a task actually needs it.
+
 **When to UPDATE it:** after every few commits, at the end of a work session, when you switch tasks, or any time a context limit / compaction feels near. Cheaper to keep current than to reconstruct.
 
 **When to READ it:** at the very start of a session, before any substantive work. It is the source of truth for "where were we."
