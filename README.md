@@ -82,6 +82,10 @@ Hooks are **tiered by how portable they are** — pick your comfort level. Full 
 | `pixels-only-proof` | Stop | On a visual/"not rendering" task, blocks "fixed" claims that cite DOM/`toBeVisible` instead of a screenshot |
 | `tests-must-pass` | PostToolUse+Stop | Any failing test (incl. "pre-existing") blocks stop until a full green run |
 | `name-by-use` | PreToolUse(Write/Edit) | Blocks type-named identifiers (`data`, `result`, `tmp`) — name by role |
+| `coverage-claim-guard` | Stop | Blocks "tested everything / every X" claims that don't state the real scope (a count, or what's uncovered) |
+| `look-before-asking` | Stop | Blocks asking the user for a discoverable fact (a path/key/env var) when the turn ran zero searches/reads |
+| `agent-autocommit` | PostToolUse(Write/Edit) | Auto-commits WIP inside a linked git worktree after every edit — a dying agent loses ≤1 edit |
+| `hook-must-enforce` | PreToolUse(Write/Edit) | Meta-guard: blocks writing a "guardrail" hook that only advises (no deny/exit-2/side-effect — no teeth) |
 
 ### Tier 2 — Needs the companion files (the memory system)
 | Hook | Event | What it enforces |
