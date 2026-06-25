@@ -26,6 +26,7 @@
     "hookbook-sync":            [{ "event": "Stop", "timeout": 5 }],
     "never-stop-asking":        [{ "event": "Stop", "timeout": 5 }],
     "recommend-when-listing":   [{ "event": "Stop", "timeout": 5 }],
-    "file-size-guard":          [{ "event": "PostToolUse", "matcher": "Write", "timeout": 5 }]
+    "file-size-guard":          [{ "event": "PostToolUse", "matcher": "Write", "timeout": 5 }],
+    "e2e-or-its-theatre":       [{ "event": "Stop", "timeout": 5 }]
   }
 }

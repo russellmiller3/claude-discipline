@@ -106,6 +106,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. Full 
 | `never-stop-asking` | Stop | Bias to action: blocks asking-permission phrasing and satisfaction-stops (winding down with work left). Opinionated extras (orientation beat, priority queue) are opt-in via env |
 | `recommend-when-listing` | Stop | When the reply lists options but picks none, blocks until you lead with a recommendation. Quiet in survey/"what do you think" mode |
 | `file-size-guard` | PostToolUse(Write) | Warns (never blocks) when a written file exceeds size limits — too many lines, an over-long function, too many switch arms. Thresholds env-configurable |
+| `e2e-or-its-theatre` | Stop | "Unit tests without e2e are theatre." When you edit a source module that crosses a REAL boundary (WASM / network / DB / Worker / DOM) and its only tests MOCK that boundary with no real e2e, blocks until you add one. Pure-logic modules exempt. Override: `e2e-owed-live-gate: <why>` (needs real mic/socket/browser) or `e2e-skip: <why>` |
 
 > **Opinions are configurable.** Tier 3 encodes *my* engineering taste. The point isn't that you adopt my opinions — it's that you encode *yours* as deterministic gates instead of hoping the model remembers them. Fork the hook, change the rule, keep the mechanism.
 
