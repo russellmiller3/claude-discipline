@@ -8,7 +8,8 @@
     "read-before-write":        [{ "event": "PreToolUse", "matcher": "Edit|MultiEdit", "timeout": 5 }],
     "pixels-only-proof":        [{ "event": "Stop", "timeout": 5 }],
     "tests-must-pass":          [{ "event": "PostToolUse", "matcher": "Bash", "timeout": 5 }, { "event": "Stop", "timeout": 5 }],
-    "name-by-use":              [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit", "timeout": 5 }]
+    "name-by-use":              [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit", "timeout": 5 }],
+    "filename-quality-guard":   [{ "event": "PreToolUse", "matcher": "Write", "timeout": 5 }]
   },
 
   "tier2_memory": {
@@ -24,6 +25,7 @@
     "root-cause-first":         [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit", "timeout": 5 }],
     "decay-footer":             [{ "event": "Stop", "timeout": 5 }],
     "hookbook-sync":            [{ "event": "Stop", "timeout": 5 }],
+    "discipline-sync":          [{ "event": "Stop", "timeout": 5 }],
     "never-stop-asking":        [{ "event": "Stop", "timeout": 5 }],
     "recommend-when-listing":   [{ "event": "Stop", "timeout": 5 }],
     "file-size-guard":          [{ "event": "PostToolUse", "matcher": "Write", "timeout": 5 }],

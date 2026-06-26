@@ -1,6 +1,6 @@
 # HOOKBOOK
 
-Per-hook reference for Claude Discipline — **19 hooks** across PreToolUse, PostToolUse, Stop, and SessionStart. For each: when it fires, what it does, and how to satisfy or override it.
+Per-hook reference for Claude Discipline — **22 hooks** across PreToolUse, PostToolUse, Stop, and SessionStart. For each: when it fires, what it does, and how to satisfy or override it.
 
 > Keep the headline count above in sync with `settings.fragment.json`. The `hookbook-sync` hook checks it mechanically and blocks a turn that changes a hook without updating this file.
 
@@ -30,6 +30,9 @@ A test failure drops a marker; Stop is blocked until a full-suite run comes back
 
 ### `name-by-use` · PreToolUse(Write|Edit)
 Blocks fresh identifiers named after their type (`text`, `data`, `result`, `tmp`, `list`…) instead of their role, in `.js/.ts/.jsx/.tsx/.mjs/.cjs/.py`. Loop counters `i/j/k` are fine. **Override:** the token `name-by-use-override` in the text, or `NAME_BY_USE_OVERRIDE=1`.
+
+### `filename-quality-guard` · PreToolUse(Write)
+Blocks creating a file with a low-quality NAME — typos (a token one edit away from a known word but not itself a word, e.g. `findigns`→`findings`, `lenght`→`length`), lazy/scratch stems (`tmp`, `output2`, `asdf`, `untitled`, `stuff`), and dropped-vowel tokens (`fndngs`). Allowlists conventional caps files (README, LICENSE, FINDINGS, HANDOFF…), dotfiles, and tech acronyms; only blocks CLOSE misspellings, so unknown-but-plausible domain words pass (low false-positive). Has teeth (`permissionDecision: deny`). **Override:** `FILENAME_GUARD_OVERRIDE=1`.
 
 ---
 
@@ -65,6 +68,9 @@ If you wrote/edited code files this turn, the reply must end with a debt-surface
 
 ### `hookbook-sync` · Stop
 If a hook `.mjs` changed this turn but HOOKBOOK wasn't touched, or the "N hooks" headline drifts from the count registered in settings.json, blocks until you fix it. The system documents itself. **Config:** `HOOKBOOK_PATH`, `HOOK_SETTINGS_PATH`. **Override:** `HOOKBOOK_SYNC_OVERRIDE=1`.
+
+### `discipline-sync` · Stop
+The sibling of `hookbook-sync` for THIS published kit. If a hook changed this turn whose copy here is now byte-different from the live `~/.claude/hooks/` source, blocks until the kit copy is re-synced — so a shipped guard never drifts from the version that actually runs. Only fires for hooks already in the kit (it doesn't force every new hook to publish); the content-equality check also catches drift left by an earlier turn. **Config:** `DISCIPLINE_KIT_DIR`. **Override:** `DISCIPLINE_SYNC_OVERRIDE=1`.
 
 ### `never-stop-asking` · Stop
 Bias to action (the "Ross Perot" rule). **Default (always on):** blocks asking-permission phrasing (`want me to` / `should I` / `if you'd rather`) and satisfaction-stops — winding-down language (`next session`, `TL;DR`, `wrapping up`) or naming a "next move" while the turn made zero working tool calls toward it. Suppressed when the user explicitly pauses (handoff / wrap / stop), except asking-permission which always fires. **Opt-in extras (env):** `NEVER_STOP_REQUIRE_BEAT=1` (work turns must include an orientation beat), `NEVER_STOP_REQUIRE_QUEUE=1` (work turns need a `.claude/state/priority-queue.md`). **Override:** `NEVER_STOP_OVERRIDE=1`.

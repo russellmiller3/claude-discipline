@@ -82,6 +82,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. Full 
 | `pixels-only-proof` | Stop | On a visual/"not rendering" task, blocks "fixed" claims that cite DOM/`toBeVisible` instead of a screenshot |
 | `tests-must-pass` | PostToolUse+Stop | Any failing test (incl. "pre-existing") blocks stop until a full green run |
 | `name-by-use` | PreToolUse(Write/Edit) | Blocks type-named identifiers (`data`, `result`, `tmp`) — name by role |
+| `filename-quality-guard` | PreToolUse(Write) | Blocks low-quality file *names* — typos one edit from a real word (`findigns`→`findings`), lazy/scratch stems (`tmp`, `output2`, `untitled`), dropped-vowel tokens. Allowlists conventional caps files, dotfiles, tech acronyms — only close misspellings block. Override: `FILENAME_GUARD_OVERRIDE=1` |
 | `coverage-claim-guard` | Stop | Blocks "tested everything / every X" claims that don't state the real scope (a count, or what's uncovered) |
 | `look-before-asking` | Stop | Blocks asking the user for a discoverable fact (a path/key/env var) when the turn ran zero searches/reads |
 | `agent-autocommit` | PostToolUse(Write/Edit) | Auto-commits WIP inside a linked git worktree after every edit — a dying agent loses ≤1 edit |
@@ -103,6 +104,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. Full 
 | `root-cause-first` | PostToolUse | After repeated same-symptom fixes, forces a state-probe before the next swing |
 | `decay-footer` | Stop | Code-changing turns must end with a "files touched / smells introduced" footer |
 | `hookbook-sync` | Stop | Change a hook → blocks until `HOOKBOOK.md` documents it (and the count matches) |
+| `discipline-sync` | Stop | The sibling of `hookbook-sync` for this published kit: if a hook's copy here drifts byte-different from the live `~/.claude/hooks/` source, blocks until the kit copy is re-synced — so a shipped guard never drifts from the version that actually runs. Override: `DISCIPLINE_SYNC_OVERRIDE=1` |
 | `never-stop-asking` | Stop | Bias to action: blocks asking-permission phrasing and satisfaction-stops (winding down with work left). Opinionated extras (orientation beat, priority queue) are opt-in via env |
 | `recommend-when-listing` | Stop | When the reply lists options but picks none, blocks until you lead with a recommendation. Quiet in survey/"what do you think" mode |
 | `file-size-guard` | PostToolUse(Write) | Warns (never blocks) when a written file exceeds size limits — too many lines, an over-long function, too many switch arms. Thresholds env-configurable |
