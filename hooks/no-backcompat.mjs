@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// no-legacy-shims — PreToolUse(Edit|Write) + Stop. For a pre-1.0 project with no
+// no-backcompat — PreToolUse(Edit|Write) + Stop. For a pre-1.0 project with no
 // external users, refuse backward-compatibility shims: deprecation warnings,
 // "the old form still works" branches, soft-deprecation paths kept alive "just
 // in case." Before you have users, the cost of those shims (dead code, two ways
@@ -52,7 +52,7 @@ function findHits(bodyText) {
 
 function reasonText(hits, where) {
 	const matchLines = hits.slice(0, 5).map((h) => `  - matched /${h.pattern}/: "${h.sample}"`).join('\n');
-	return `STOP — no legacy shims (pre-1.0, no external users).
+	return `STOP — no backcompat (pre-1.0, no external users).
 
 Detected backcompat-friendly language in ${where}:
 

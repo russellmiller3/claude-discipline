@@ -69,7 +69,7 @@ Reminds you to read `HANDOFF.md` at start; marks a checkpoint "due" every N turn
 
 ## Tier 3 — Opinionated (great defaults; toggle off if they don't fit)
 
-### `no-legacy-shims` · PreToolUse(Write|Edit) + Stop
+### `no-backcompat` · PreToolUse(Write|Edit) + Stop
 For a pre-1.0 project with no users: blocks backcompat language (deprecation warnings, "old form still works", soft-deprecation) in edits and in the final reply. Time-bound — turn it off once you have users you can't break. **Override:** the token `intentional backcompat`, or `BACKCOMPAT_OVERRIDE=1`.
 
 ### `root-cause-first` · PreToolUse(Edit|Write)

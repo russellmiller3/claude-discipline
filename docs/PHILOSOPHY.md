@@ -50,7 +50,7 @@ If a mistake costs you real time twice, that's the bar: turn it into a rule, and
 
 ## Encode *your* opinions, not mine
 
-Tier 3 hooks (`no-legacy-shims`, `root-cause-first`, `decay-footer`) encode specific engineering taste. You may disagree with some — that's the point working as intended. The value isn't that you adopt these opinions; it's the *mechanism*: turning a standard you care about into a deterministic gate instead of hoping the model remembers it. Fork the hook, change the rule, keep the pattern. A hook you wrote for the bug that bit *you* is worth ten you inherited.
+Tier 3 hooks (`no-backcompat`, `root-cause-first`, `decay-footer`) encode specific engineering taste. You may disagree with some — that's the point working as intended. The value isn't that you adopt these opinions; it's the *mechanism*: turning a standard you care about into a deterministic gate instead of hoping the model remembers it. Fork the hook, change the rule, keep the pattern. A hook you wrote for the bug that bit *you* is worth ten you inherited.
 
 ## Fail open, always
 

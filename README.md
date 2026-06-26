@@ -100,7 +100,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 ### Tier 3 — Opinionated (great defaults; some teams will disagree — that's fine, toggle them off)
 | Hook | Event | What it enforces |
 |------|-------|------------------|
-| `no-legacy-shims` | PreToolUse(Write/Edit) | Pre-1.0 projects: replace old code outright; no fallback shims kept alive "just in case" |
+| `no-backcompat` | PreToolUse(Write/Edit) | Pre-1.0 projects: replace old code outright; no fallback shims kept alive "just in case" |
 | `root-cause-first` | PostToolUse | After repeated same-symptom fixes, forces a state-probe before the next swing |
 | `decay-footer` | Stop | Code-changing turns must end with a "files touched / smells introduced" footer |
 | `hookbook-sync` | Stop | Change a hook → blocks until `HOOKBOOK.md` documents it (and the count matches) |
