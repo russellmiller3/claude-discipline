@@ -2,11 +2,11 @@
 /**
  * e2e-or-its-theatre — Stop gate with TEETH: a load-bearing source module that crosses a REAL EXTERNAL
  * BOUNDARY must have a real end-to-end test exercising that boundary — not just unit tests that MOCK it.
- * "Unit tests without e2e are theatre."
+ * "Unit tests without e2e are theatre" (Russell, 2026-06-24).
  *
  * THE TRIGGER (deterministic, tuned for low false positives) — BLOCK on Stop iff, IN THIS TURN, you:
- *   (1) edited a load-bearing source module — a non-test `.js/.mjs/.svelte` under `src/` or `lib/`
- *       (a browser-extension tree's `extension/lib`/`extension/src` is matched too) — whose OWN SOURCE shows a real external
+ *   (1) edited a load-bearing source module — a non-test `.js/.mjs/.svelte` under `extension/lib` or
+ *       `extension/src` (or any `src/`/`lib/` if no extension tree) — whose OWN SOURCE shows a real external
  *       boundary: WASM (pyodide/wasm), network (fetch/WebSocket/EventSource/XMLHttpRequest/an http client),
  *       a DB (indexedDB/idb/sqlite/pglite), a Worker, or DOM serialization (document/jsdom/innerHTML/
  *       querySelector). A pure-logic module (no such signal) is EXEMPT — an e2e only makes sense where there's
@@ -17,13 +17,13 @@
  *   (3) there is NO real e2e for it — no `<module>.e2e.test.*` sibling, and no test in the tree tagged e2e
  *       (filename matches /e2e/i, or a describe/it title contains "e2e").
  *
- * Teeth: `decision: 'block'` — you cannot stop until you add a real e2e (e.g. a `<module>.e2e.test.js` that
- * loads the ACTUAL dependency — real WASM/DB/network — and asserts a value a JS mock physically cannot fake)
- * or explicitly exempt the change.
+ * Teeth: `decision: 'block'` — you cannot stop until you add a real e2e (see the reference
+ * extension/lib/pyodideTransform.e2e.test.js: loads ACTUAL Pyodide and asserts a value a JS mock physically
+ * cannot fake) or explicitly exempt the change.
  *
- * Why: a unit test that mocks the runner proves the wiring, never that the real thing works. Mocked-boundary
- * modules pass green while the real dependency is never exercised; the bug a mock can't catch (the WASM bigint,
- * the real DOM serialization, the real DB round-trip) has no net.
+ * Why: the codeBackend unit tests mock the Python runner — they prove the wiring, never that Python runs. That
+ * gap is exactly "theatre." Mocked-boundary modules pass green while the real dependency is never exercised; the
+ * bug a mock can't catch (the WASM bigint, the real DOM serialization, the real DB round-trip) has no net.
  *
  * Override (rare — genuinely no headless e2e is possible, e.g. a real mic + socket + browser is required): put
  * the literal token `e2e-owed-live-gate: <why>` in the final reply (records it as an OWED live gate, not a pass),
@@ -31,11 +31,38 @@
  */
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { recordGate, clearGate, defaultGatesPath } from './lib/owedLiveGates.mjs';
 
 const CODE_EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
-const OVERRIDE_RE = /e2e-(owed-live-gate|skip)\s*:/i;
+// Two distinct overrides: `e2e-skip:` is a true pass (the trigger misjudged a no-boundary change); but
+// `e2e-owed-live-gate:` is NOT a free pass any more — it RECORDS an owed gate (owedLiveGates ledger) that a
+// per-turn reminder nags about until the live e2e runs green. Russell 2026-06-26.
+const SKIP_RE = /e2e-skip\s*:/i;
+const OWED_RE = /e2e-owed-live-gate\s*:/i;
+
+// A module STEM (basename, no extension) whose live e2e RAN GREEN in this turn — that's the "you did it"
+// signal that clears its owed gate. We read it off a Bash run of `<stem>.e2e.test…` whose result reports a
+// passing vitest/node summary and NO failure. Deterministic, low-false-positive: requires both the e2e
+// filename in the command AND a green result in the same tool_result region of the turn.
+export function e2eGreenRunStems(turnEntries) {
+  const stems = new Set();
+  const e2eName = /([A-Za-z0-9_.-]+)\.e2e\.test\.[a-z]+/g;
+  const greenSummary = /(\b\d+\s+passed\b|Tests?\s+\d+\s+passed)/i;
+  const failureSummary = /\bfailed\b|\bFAIL\b|\d+\s+failed/;
+  for (const entry of turnEntries) {
+    for (const block of contentBlocks(entry)) {
+      const resultText = toolResultText(block);
+      if (!resultText || !greenSummary.test(resultText) || failureSummary.test(resultText)) continue;
+      e2eName.lastIndex = 0;
+      let match;
+      while ((match = e2eName.exec(resultText))) stems.add(match[1]);
+    }
+  }
+  return stems;
+}
 
 // A non-test load-bearing source module we police (NOT a test, NOT html/css/json/config).
 export function isLoadBearingSource(filePath) {
@@ -113,13 +140,64 @@ function contentBlocks(entry) {
   if (typeof blocks === 'string') return [{ type: 'text', text: blocks }];
   return Array.isArray(blocks) ? blocks : [];
 }
+// Flatten a tool_result block's content to plain text (it may be a string or an array of {text}/string parts).
+export function toolResultText(block) {
+  if (block?.type !== 'tool_result') return '';
+  const inner = block.content;
+  if (typeof inner === 'string') return inner;
+  if (Array.isArray(inner)) return inner.map((part) => (typeof part === 'string' ? part : part?.text || '')).join('\n');
+  return '';
+}
+// A real human prompt (not a tool-result carrier): a user message that has actual text. Tool results come back
+// as user-role messages whose blocks are all `tool_result` — those are NOT turn starts.
+function isHumanPrompt(entry) {
+  if (roleOf(entry) !== 'user') return false;
+  return contentBlocks(entry).some((block) => block.type === 'text' && (block.text || '').trim().length > 0);
+}
+// The whole current turn — from the last HUMAN prompt through the end. (Was: from the last user message before
+// the last assistant, which on a multi-step tool turn started mid-turn and dropped earlier tool_results — so a
+// `git merge` result printed early in the turn was invisible. Starting at the human prompt captures it all.)
 function currentTurnEntries(entries) {
   let lastAssistant = -1;
   for (let i = entries.length - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'assistant') { lastAssistant = i; break; } }
   if (lastAssistant < 0) return [];
   let turnStart = 0;
-  for (let i = lastAssistant - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'user') { turnStart = i; break; } }
+  for (let i = lastAssistant; i >= 0; i--) { if (isHumanPrompt(entries[i])) { turnStart = i; break; } }
   return entries.slice(turnStart);
+}
+
+// Pull git commit/merge SHAs out of this turn's Bash tool_result text. `git commit` AND `git merge` both print
+// `[<branch> <sha>] <message>` — so a turn that MERGED a background agent's branch (or committed) leaves the SHA
+// here even though no Write/Edit tool_use touched those files. This is how the gate SEES merge-introduced code,
+// the blind spot that let a subagent's mocked-boundary module ship with no e2e.
+export function commitShasFromToolResults(turnEntries) {
+  const shas = new Set();
+  const shaLine = /^\[[^\]]*?\s([0-9a-f]{7,40})\]/gm;
+  for (const entry of turnEntries) {
+    for (const block of contentBlocks(entry)) {
+      const resultText = toolResultText(block);
+      if (!resultText) continue;
+      shaLine.lastIndex = 0;
+      let match;
+      while ((match = shaLine.exec(resultText))) shas.add(match[1]);
+    }
+  }
+  return [...shas];
+}
+
+// Files each commit introduced relative to its FIRST parent. For a merge commit, `sha^1` is our prior HEAD, so
+// `diff sha^1 sha` is exactly what the merged branch brought in (the agent's new files). `runGit` is injected for
+// testing. Fail-open: any git error yields no files (never block on a git hiccup).
+export function gitFilesForCommits(repoRoot, shas, runGit) {
+  const exec = runGit || ((args) => execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+  const files = new Set();
+  for (const sha of shas) {
+    let diffOutput = '';
+    try { diffOutput = exec(['diff', '--name-only', `${sha}^1`, sha]); }
+    catch { try { diffOutput = exec(['diff', '--name-only', `${sha}^`, sha]); } catch { continue; } }
+    for (const line of String(diffOutput).split(/\r?\n/)) { const file = line.trim(); if (file) files.add(file); }
+  }
+  return [...files];
 }
 
 // Walk the whole project tree once to know if ANY e2e exists for a given module stem (covers e2e files that
@@ -147,18 +225,39 @@ function onStop(hookEvent) {
   const turnEntries = currentTurnEntries(readTranscript(hookEvent.transcript_path));
   if (turnEntries.length === 0) return;
 
-  let override = false;
+  const project = basename(repoRoot);
+  // Clear any owed gate whose live e2e RAN GREEN this turn — the "you actually did it" signal. Runs even on a
+  // turn with no edits (you came back just to run the owed e2e), so the reminder stops the moment it passes.
+  for (const stem of e2eGreenRunStems(turnEntries)) clearGate(defaultGatesPath(), stem, project);
+
+  let skipOverride = false;  // `e2e-skip:` — a true pass (trigger misjudged a no-boundary change)
+  let owedOverride = false;  // `e2e-owed-live-gate:` — NOT a pass; records an owed gate the reminder nags about
   const editedModulePaths = new Set();
   for (const entry of turnEntries) {
     for (const block of contentBlocks(entry)) {
-      if (block.type === 'text' && OVERRIDE_RE.test(block.text || '')) override = true;
+      if (block.type === 'text') {
+        if (SKIP_RE.test(block.text || '')) skipOverride = true;
+        if (OWED_RE.test(block.text || '')) owedOverride = true;
+      }
       if (block.type !== 'tool_use') continue;
       if (!CODE_EDIT_TOOLS.has(block.name || '')) continue;
       const filePath = (block.input || {}).file_path || (block.input || {}).path || '';
       if (isLoadBearingSource(filePath)) editedModulePaths.add(filePath);
     }
   }
-  if (override || editedModulePaths.size === 0) return;
+
+  // ALSO collect code that entered the tree via a commit/merge THIS turn (e.g. a background agent's worktree
+  // branch merged in) — those files were never a Write/Edit tool_use, so the scan above is blind to them. Without
+  // this, a subagent's mocked-boundary module merges in with no e2e and stops clean. Fail-open on any git error.
+  const turnCommitShas = commitShasFromToolResults(turnEntries);
+  if (turnCommitShas.length) {
+    for (const filePath of gitFilesForCommits(repoRoot, turnCommitShas)) {
+      if (isLoadBearingSource(filePath)) editedModulePaths.add(filePath);
+    }
+  }
+
+  // `e2e-skip:` is a true pass; the owed override still falls through so its offenders get RECORDED below.
+  if (skipOverride || editedModulePaths.size === 0) return;
 
   const offenders = [];
   for (const modulePath of editedModulePaths) {
@@ -183,10 +282,17 @@ function onStop(hookEvent) {
     }
 
     const verdict = evaluateModule({ boundary, hasMockedUnitTest, hasE2e });
-    if (verdict.block) offenders.push({ module: basename(moduleAbs), boundary });
+    if (verdict.block) offenders.push({ module: basename(moduleAbs), stem: basename(moduleAbs).replace(/\.(js|mjs|svelte)$/i, ''), boundary });
   }
 
   if (offenders.length === 0) return;
+
+  // `e2e-owed-live-gate:` — record each offender as an OWED gate (the reminder nags every turn until its live
+  // e2e runs green) and let this stop PROCEED. No block: Russell's call — don't hold work hostage, just nag.
+  if (owedOverride) {
+    for (const offender of offenders) recordGate(defaultGatesPath(), { moduleStem: offender.stem, why: offender.boundary, project });
+    return;
+  }
 
   const offenderLines = offenders.map((offender) => `  • ${offender.module}  (real boundary: ${offender.boundary})`).join('\n');
   process.stdout.write(JSON.stringify({
@@ -198,12 +304,12 @@ function onStop(hookEvent) {
       'Module(s) this turn with a mocked boundary and no e2e:',
       offenderLines,
       '',
-      'The rule: "unit tests without e2e are theatre." A test that mocks the runner proves the wiring, never that',
-      'the real thing works — the bug a mock physically cannot fake (the WASM bigint, the real DOM serialization,',
-      'the real DB round-trip) has no net.',
+      "Russell's rule (2026-06-24): \"unit tests without e2e are theatre.\" A test that mocks the runner proves",
+      'the wiring, never that the real thing works — the bug a mock physically cannot fake (the WASM bigint, the',
+      'real DOM serialization, the real DB round-trip) has no net.',
       '',
-      'Add a real e2e: a `<module>.e2e.test.js` that exercises the ACTUAL dependency end-to-end and asserts',
-      'something a mock could not satisfy (e.g. load real WASM and check a value JS cannot represent). Re-run green.',
+      'Add a real e2e (see extension/lib/pyodideTransform.e2e.test.js): a `<module>.e2e.test.js` that exercises',
+      'the ACTUAL dependency end-to-end and asserts something a mock could not satisfy. Then re-run it green.',
       '',
       'Override (rare): if a real e2e is genuinely infeasible headlessly (needs a real mic + socket + browser),',
       'say so with the literal token  e2e-owed-live-gate: <why>  (records it as an OWED live gate, NOT a pass).',

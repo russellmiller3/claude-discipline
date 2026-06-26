@@ -1,0 +1,17 @@
+{
+  "_comment": "Repo-local hooks for the claude-discipline kit itself (shared, tracked). These keep the kit honest: hookbook-readme-sync blocks stop until every hook in hooks/ is documented in BOTH README.md and docs/HOOKBOOK.md, so the repo can never ship a hook its docs don't describe.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/hookbook-readme-sync.mjs",
+            "timeout": 5,
+            "statusMessage": "Checking README + HOOKBOOK cover every shipped hook..."
+          }
+        ]
+      }
+    ]
+  }
+}

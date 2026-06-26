@@ -34,6 +34,18 @@ Blocks fresh identifiers named after their type (`text`, `data`, `result`, `tmp`
 ### `filename-quality-guard` · PreToolUse(Write)
 Blocks creating a file with a low-quality NAME — typos (a token one edit away from a known word but not itself a word, e.g. `findigns`→`findings`, `lenght`→`length`), lazy/scratch stems (`tmp`, `output2`, `asdf`, `untitled`, `stuff`), and dropped-vowel tokens (`fndngs`). Allowlists conventional caps files (README, LICENSE, FINDINGS, HANDOFF…), dotfiles, and tech acronyms; only blocks CLOSE misspellings, so unknown-but-plausible domain words pass (low false-positive). Has teeth (`permissionDecision: deny`). **Override:** `FILENAME_GUARD_OVERRIDE=1`.
 
+### `agent-autocommit` · PostToolUse(Write|Edit)
+Auto-commits WIP inside a linked git worktree after every edit, so a background agent that dies loses at most one edit — git is the only checkpoint that survives a silent death, and this needs no cooperation from the agent.
+
+### `coverage-claim-guard` · Stop
+Blocks a "tested everything / covered every X" claim that doesn't state the real scope — a count, or what's left uncovered. Stops blanket coverage claims that quietly mask gaps.
+
+### `look-before-asking` · Stop
+Blocks asking the user for a discoverable fact (a path, a key, an env var) when the turn ran zero searches/reads. Search the filesystem/env first; hand the user a question only when it genuinely can't be found.
+
+### `hook-must-enforce` · PreToolUse(Write|Edit)
+Meta-guard: blocks writing a "guardrail" hook that only PRINTS advice — no `decision:'block'`, no non-zero exit, no real side-effect. A hook with no teeth is false safety; if it presents as enforcement it must actually deny or act.
+
 ---
 
 ## Tier 2 — Memory system (needs the companion files)
@@ -82,7 +94,25 @@ When the last reply lists alternatives (Option A/B, "either X or Y", "two approa
 Warns (never blocks) when a freshly written code file crosses a structural limit: too many lines, an over-long function, or too many switch/match arms (the next arm probably wants to be a new type). Surfaces the smell so you can report it honestly. **Config:** `FILE_SIZE_MAX_LINES` (400), `FILE_SIZE_MAX_FN` (80), `FILE_SIZE_MAX_ARMS` (7). **Disable:** `FILE_SIZE_GUARD_OFF=1`.
 
 ### `e2e-or-its-theatre` · Stop
-**"Unit tests without e2e are theatre."** Blocks stop when, this turn, you edited a load-bearing source module (`.js`/`.mjs`/`.svelte` under `src/`/`lib/`) whose OWN source crosses a REAL external boundary — WASM (`pyodide`/`.wasm`), network (`fetch`/`WebSocket`/an HTTP client), a DB (`indexedDB`/`idb`/`sqlite`/`pglite`), a `Worker`, or DOM serialization (`document`/`jsdom`/`querySelector`) — AND its only sibling tests MOCK that boundary (`vi.mock`/`vi.fn`/`jest.mock`) AND there is NO real e2e (no `<module>.e2e.test.*`, no e2e-tagged test in the tree). A mocked-boundary test proves the wiring, never that the real dependency works — the bug a mock physically can't fake (a WASM bigint, a real DOM serialize, a real DB round-trip) has no net. A pure-logic module (no boundary signal) is **exempt**. Teeth: `decision:'block'` until you add a real e2e that exercises the actual dependency and asserts something a mock couldn't satisfy. **Override:** `e2e-owed-live-gate: <why>` when a real e2e is genuinely infeasible headlessly (real mic/socket/browser) — records it as an owed live gate, not a pass; `e2e-skip: <why>` if the trigger misjudged a no-boundary change. Fail-open. Locked by `e2e-or-its-theatre.test.mjs`.
+**"Unit tests without e2e are theatre."** Blocks stop when, this turn, you edited a load-bearing source module (`.js`/`.mjs`/`.svelte` under `src/`/`lib/`) whose OWN source crosses a REAL external boundary — WASM (`pyodide`/`.wasm`), network (`fetch`/`WebSocket`/an HTTP client), a DB (`indexedDB`/`idb`/`sqlite`/`pglite`), a `Worker`, or DOM serialization (`document`/`jsdom`/`querySelector`) — AND its only sibling tests MOCK that boundary (`vi.mock`/`vi.fn`/`jest.mock`) AND there is NO real e2e (no `<module>.e2e.test.*`, no e2e-tagged test in the tree). A mocked-boundary test proves the wiring, never that the real dependency works — the bug a mock physically can't fake (a WASM bigint, a real DOM serialize, a real DB round-trip) has no net. A pure-logic module (no boundary signal) is **exempt**. Teeth: `decision:'block'` until you add a real e2e that exercises the actual dependency and asserts something a mock couldn't satisfy. **Override:** `e2e-owed-live-gate: <why>` when a real e2e is genuinely infeasible headlessly (real mic/socket/browser) — **NOT a free pass**: it records the deferral in the owed-live-gate ledger and lets the stop proceed, but `owed-live-gate-reminder` then nags every turn until the live e2e runs green (detected here via a passing `<stem>.e2e.test…` run), which clears it. `e2e-skip: <why>` remains a true pass for a misjudged no-boundary change. Fail-open. Locked by `e2e-or-its-theatre.test.mjs` + `owed-live-gate.test.mjs`.
+
+### `owed-live-gate-reminder` · UserPromptSubmit
+The teeth behind `e2e-or-its-theatre`'s `e2e-owed-live-gate:` override (which now records to a durable ledger instead of free-passing). On every turn this surfaces each outstanding owed gate — module, age, "run the live e2e green to clear it" — until the real test actually passes. Non-blocking by design (it never blocks a commit, so you don't lose work); it simply won't let you forget. A green live run clears the gate automatically. Ledger lib: `lib/owedLiveGates.mjs`. Locked by `owed-live-gate.test.mjs`.
+
+### `ross-perot-guard` · Stop
+"Lead, don't ask." Blocks a turn that ends by SOLICITING the user's input — detected structurally, not by a phrase museum: the final message ends with a question mark, or on a small stable set of hand-off closers ("your call", "say the word", "your move"). Novel "…?" closers are caught for free. A genuine question belongs in an interactive picker, not a prose "?". Survey/"what do you think" mode and an explicit override are exempt.
+
+### `parallel-when-possible` · SessionStart + Stop
+SessionStart injects the "decompose → fan out" reflex: independent work units should be dispatched to concurrent subagents in ONE message, not ground through serially. Stop backstops it — blocks when a turn made many edits across many files with zero subagents spawned. Suppress genuinely-coupled work with "serial only".
+
+### `bench-pattern-guard` · PreToolUse(Write)
+Blocks writing a benchmark/eval/sweep runner that isn't parallel + event-emitting + durable/resumable — a bounded worker pool with a concurrency knob, live progress, and per-task checkpoints with `--resume`. No serial for-loop benches that can't stream progress or resume.
+
+### `agent-monitor-cadence` · Stop
+Forces the orchestrator to actually watch its background agents — blocks stop while a spawned agent has sat idle/unattended past a threshold, so you inspect and salvage its committed work instead of letting it rot unnoticed.
+
+### `clean-merged-worktrees` · Stop
+Auto-removes a spent agent git worktree whose branch has already merged — keeps the working tree clean with no manual `git worktree remove`.
 
 ---
 

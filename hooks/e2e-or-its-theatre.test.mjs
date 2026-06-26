@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   isLoadBearingSource, boundaryOf, mocksBoundary, isE2eTest, evaluateModule,
+  commitShasFromToolResults, gitFilesForCommits,
 } from './e2e-or-its-theatre.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -58,6 +59,32 @@ check('isE2eTest: by name or by e2e-tagged title', () => {
   assert.equal(isE2eTest('foo.e2e.test.js', ''), true);
   assert.equal(isE2eTest('foo.test.js', "describe('foo e2e — real thing', () => {})"), true);
   assert.equal(isE2eTest('foo.test.js', "describe('foo unit', () => {})"), false);
+});
+
+check('commitShasFromToolResults: pulls SHAs out of git commit/merge tool_result text', () => {
+  const turnEntries = [
+    { message: { role: 'user', content: [
+      { type: 'tool_result', content: '[feature/x d2e7336] merge: Exa search + Firecrawl\n create mode 100644 lib/exa.js' },
+    ] } },
+    { message: { role: 'user', content: [
+      { type: 'tool_result', content: [{ type: 'text', text: '[main 5552401] feat(gmail): attachments' }] },
+    ] } },
+  ];
+  const shas = commitShasFromToolResults(turnEntries);
+  assert.deepEqual(shas.sort(), ['5552401', 'd2e7336']);
+});
+check('commitShasFromToolResults: ignores prose that is not a commit line', () => {
+  const turnEntries = [{ message: { role: 'user', content: [{ type: 'tool_result', content: 'nothing here, just abc1234 inline' }] } }];
+  assert.deepEqual(commitShasFromToolResults(turnEntries), []);
+});
+check('gitFilesForCommits: diffs sha^1..sha (merge first-parent) via injected git, fails open', () => {
+  const calls = [];
+  const runGit = (args) => { calls.push(args); return 'extension/lib/exa.js\nextension/lib/exa.test.js\n'; };
+  const files = gitFilesForCommits('/repo', ['d2e7336'], runGit);
+  assert.deepEqual(files, ['extension/lib/exa.js', 'extension/lib/exa.test.js']);
+  assert.deepEqual(calls[0], ['diff', '--name-only', 'd2e7336^1', 'd2e7336']);
+  // throwing git → no files, never throws (fail-open)
+  assert.deepEqual(gitFilesForCommits('/repo', ['bad'], () => { throw new Error('not a repo'); }), []);
 });
 
 check('evaluateModule: the core verdict table', () => {
@@ -105,8 +132,12 @@ function makeRepo({ withE2e, pureLogic, override }) {
 
 function runHook(root, transcriptPath) {
   const event = JSON.stringify({ hook_event_name: 'Stop', cwd: root, transcript_path: transcriptPath });
+  // Isolate the owed-gate ledger onto a per-run temp file — the `e2e-owed-live-gate` override now RECORDS to
+  // the ledger, and without this the test would pollute the real ~/.claude ledger (it did once, firing a false
+  // reminder). Each runHook gets a fresh ledger path inside the test's temp project.
+  const gatesPath = join(root, `owed-gates-${Math.random().toString(36).slice(2)}.json`);
   try {
-    const hookOutput = execFileSync('node', [HOOK_PATH], { input: event, encoding: 'utf8' });
+    const hookOutput = execFileSync('node', [HOOK_PATH], { input: event, encoding: 'utf8', env: { ...process.env, OWED_GATES_PATH: gatesPath } });
     return hookOutput.trim();
   } catch (err) {
     return (err.stdout || '').toString().trim();
@@ -140,6 +171,61 @@ check('OVERRIDE: the owed-live-gate token lets the turn stop', () => {
   const { root, transcriptPath } = makeRepo({ withE2e: false, override: true });
   const hookOutput = runHook(root, transcriptPath);
   assert.equal(hookOutput, '', `override token should clear the block, got: ${hookOutput.slice(0, 200)}`);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ── merge-introduced module (the real blind spot) ───────────────────────────────
+// A background agent's branch is merged in. Those files were NEVER a Write/Edit tool_use in this turn — they
+// arrived via `git merge`. Build a real git repo, merge a branch carrying a mocked-boundary module with no e2e,
+// put the merge SHA in a tool_result (as `git merge` really prints it), and assert the hook BLOCKS.
+function git(root, args) {
+  return execFileSync('git', ['-c', 'user.email=t@t.test', '-c', 'user.name=test', '-c', 'commit.gpgsign=false', ...args],
+    { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+}
+function makeMergedRepo({ withE2e }) {
+  const root = mkdtempSync(join(tmpdir(), 'e2e-merge-'));
+  const libDir = join(root, 'extension', 'lib');
+  mkdirSync(libDir, { recursive: true });
+  git(root, ['init', '-q', '-b', 'main']);
+  writeFileSync(join(root, 'seed.txt'), 'seed\n');
+  git(root, ['add', '-A']); git(root, ['commit', '-q', '-m', 'seed']);
+  // agent branch: a NEW network-boundary module + a mocked-only unit test (+ optional e2e), committed off main.
+  git(root, ['checkout', '-q', '-b', 'agent']);
+  writeFileSync(join(libDir, 'exaLike.js'), 'export const search = (q) => fetch("https://api.exa.ai/search");\n');
+  writeFileSync(join(libDir, 'exaLike.test.js'), "import { vi } from 'vitest';\nconst request = vi.fn();\n");
+  if (withE2e) writeFileSync(join(libDir, 'exaLike.e2e.test.js'), "it('real fetch', async () => {});\n");
+  git(root, ['add', '-A']); git(root, ['commit', '-q', '-m', 'feat: exaLike']);
+  // merge it into main (no-ff so there's a merge commit whose ^1 is main's prior HEAD).
+  git(root, ['checkout', '-q', 'main']);
+  git(root, ['merge', '--no-ff', '-q', '-m', 'merge: exaLike research tool', 'agent']);
+  const mergeSha = git(root, ['rev-parse', '--short', 'HEAD']).trim();
+  // A transcript: human prompt, assistant runs a Bash `git merge`, then the tool_result with git's real output.
+  const transcriptEntries = [
+    { type: 'user', message: { role: 'user', content: 'merge the agent branch' } },
+    { type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'tool_use', name: 'Bash', input: { command: 'git merge --no-ff agent' } },
+    ] } },
+    { type: 'user', message: { role: 'user', content: [
+      { type: 'tool_result', content: `[main ${mergeSha}] merge: exaLike research tool\n 2 files changed` },
+    ] } },
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+  const transcriptPath = join(root, 'transcript.jsonl');
+  writeFileSync(transcriptPath, transcriptEntries);
+  return { root, transcriptPath };
+}
+
+check('TEETH (merge): blocks a mocked-boundary module that entered via git merge, not Write/Edit', () => {
+  const { root, transcriptPath } = makeMergedRepo({ withE2e: false });
+  const hookOutput = runHook(root, transcriptPath);
+  assert.ok(hookOutput.includes('"decision":"block"'), `expected block for merged-in module, got: ${hookOutput.slice(0, 200)}`);
+  assert.ok(/exaLike\.js/.test(hookOutput), 'block reason should name the merged-in module');
+  rmSync(root, { recursive: true, force: true });
+});
+
+check('PASS (merge): a merged-in module WITH an e2e does not block', () => {
+  const { root, transcriptPath } = makeMergedRepo({ withE2e: true });
+  const hookOutput = runHook(root, transcriptPath);
+  assert.equal(hookOutput, '', `merged-in module with e2e should pass, got: ${hookOutput.slice(0, 200)}`);
   rmSync(root, { recursive: true, force: true });
 });
 

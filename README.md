@@ -70,7 +70,7 @@ To uninstall a hook: `node scripts/install.mjs --remove <hook-name>` (removes th
 
 ## What's in the box
 
-Hooks are **tiered by how portable they are** — pick your comfort level. Full per-hook reference: [`docs/HOOKBOOK.md`](docs/HOOKBOOK.md).
+Hooks are **tiered by how portable they are** — pick your comfort level. This kit ships **~30 hooks across three tiers** — a curated, portable slice of a larger personal set (~100 hooks in daily use); the rest are project-specific and stay out of the public kit. Full per-hook reference: [`docs/HOOKBOOK.md`](docs/HOOKBOOK.md).
 
 ### Tier 1 — Standalone (work anywhere, zero config)
 | Hook | Event | What it enforces |
@@ -108,7 +108,13 @@ Hooks are **tiered by how portable they are** — pick your comfort level. Full 
 | `never-stop-asking` | Stop | Bias to action: blocks asking-permission phrasing and satisfaction-stops (winding down with work left). Opinionated extras (orientation beat, priority queue) are opt-in via env |
 | `recommend-when-listing` | Stop | When the reply lists options but picks none, blocks until you lead with a recommendation. Quiet in survey/"what do you think" mode |
 | `file-size-guard` | PostToolUse(Write) | Warns (never blocks) when a written file exceeds size limits — too many lines, an over-long function, too many switch arms. Thresholds env-configurable |
-| `e2e-or-its-theatre` | Stop | "Unit tests without e2e are theatre." When you edit a source module that crosses a REAL boundary (WASM / network / DB / Worker / DOM) and its only tests MOCK that boundary with no real e2e, blocks until you add one. Pure-logic modules exempt. Override: `e2e-owed-live-gate: <why>` (needs real mic/socket/browser) or `e2e-skip: <why>` |
+| `e2e-or-its-theatre` | Stop | "Unit tests without e2e are theatre." When you edit a source module that crosses a REAL boundary (WASM / network / DB / Worker / DOM) and its only tests MOCK that boundary with no real e2e, blocks until you add one. Pure-logic modules exempt. The `e2e-owed-live-gate: <why>` override is **not a free pass** — it records the deferral in a durable ledger (`owed-live-gate-reminder` then nags until you run it); `e2e-skip: <why>` is a true pass for a misjudged no-boundary change. |
+| `owed-live-gate-reminder` | UserPromptSubmit | The teeth behind the override above: surfaces every OWED live e2e (module, age, "run it green to clear") on **every turn** until the real live test actually passes. Non-blocking by design — it never blocks a commit (don't lose work), it just won't let you forget. A green live run clears the gate automatically. |
+| `ross-perot-guard` | Stop | "Lead, don't ask." Blocks a turn that ends by soliciting the user's input — a trailing question, or a hand-off closer like "your call" / "say the word" — instead of deciding and acting. Survey/"what do you think" mode and an explicit override are exempt. |
+| `parallel-when-possible` | SessionStart+Stop | Up front: decompose the task and fan independent units out to concurrent subagents. Backstops a long serial grind (many edits across many files with zero subagents spawned). |
+| `bench-pattern-guard` | PreToolUse(Write) | Blocks writing a benchmark/eval/sweep runner that isn't parallel + event-emitting + durable/resumable — no serial for-loop benches that can't stream progress or resume. |
+| `agent-monitor-cadence` | Stop | Forces the orchestrator to actually watch its background agents — blocks stop while a spawned agent sits idle/unattended past a threshold, so you salvage its committed work instead of forgetting it. |
+| `clean-merged-worktrees` | Stop | Auto-removes spent agent git worktrees whose branch has already merged — keeps the working tree clean with no manual cleanup. |
 
 > **Opinions are configurable.** Tier 3 encodes *my* engineering taste. The point isn't that you adopt my opinions — it's that you encode *yours* as deterministic gates instead of hoping the model remembers them. Fork the hook, change the rule, keep the mechanism.
 
