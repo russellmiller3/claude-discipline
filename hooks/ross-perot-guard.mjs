@@ -24,6 +24,7 @@
 // Override: the token "ross-perot-override: <why>" in the reply. Fail-open on error.
 
 import { readFileSync, existsSync } from 'node:fs';
+import { lastAssistantText } from './lib/transcript.mjs';
 
 const ALTERNATIVE_PATTERNS = [
   // "Option A" / "Option B" framing
@@ -159,26 +160,6 @@ const USER_PAUSE_PATTERNS = [
   /\bjust\s+laying\s+out\b/i,
   /\bwhat\s+(do you think|are the options)\b/i,  // user asked for options on purpose
 ];
-
-function lastAssistantText(transcriptPath) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return '';
-  let content;
-  try { content = readFileSync(transcriptPath, 'utf8'); } catch { return ''; }
-  const lines = content.trim().split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let entry;
-    try { entry = JSON.parse(lines[i]); } catch { continue; }
-    if (entry.type !== 'assistant') continue;
-    const assistantMessage = entry.message;
-    if (!assistantMessage || !Array.isArray(assistantMessage.content)) continue;
-    const replyText = assistantMessage.content
-      .filter(b => b && b.type === 'text' && typeof b.text === 'string')
-      .map(b => b.text)
-      .join('\n');
-    if (replyText) return replyText;
-  }
-  return '';
-}
 
 function lastUserText(transcriptPath) {
   if (!transcriptPath || !existsSync(transcriptPath)) return '';

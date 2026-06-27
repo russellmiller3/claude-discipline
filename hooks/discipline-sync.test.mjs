@@ -1,41 +1,36 @@
 // Tests for discipline-sync's pure core. Run: node --test discipline-sync.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { driftedPublishedHooks, changedHookBasenames } from './discipline-sync.mjs';
+import { hooksNeedingSync, changedHookBasenames } from './discipline-sync.mjs';
 
-// ── driftedPublishedHooks ──
-test('flags a published hook whose live + kit copies differ', () => {
+// ── hooksNeedingSync ──
+test('flags a published hook whose live + kit copies differ as drift', () => {
   const readLive = (name) => ({ 'a.mjs': 'LIVE-A' }[name] ?? null);
   const readKit = (name) => ({ 'a.mjs': 'OLD-A' }[name] ?? null);
-  assert.deepEqual(driftedPublishedHooks(['a.mjs'], readLive, readKit), ['a.mjs']);
+  assert.deepEqual(hooksNeedingSync(['a.mjs'], readLive, readKit), [{ basename: 'a.mjs', reason: 'drift' }]);
 });
 
-test('flags multiple drifted published hooks', () => {
-  const live = { 'a.mjs': '1', 'b.mjs': '2', 'c.mjs': 'same' };
-  const kit = { 'a.mjs': 'X', 'b.mjs': 'Y', 'c.mjs': 'same' };
-  const drifted = driftedPublishedHooks(['a.mjs', 'b.mjs', 'c.mjs'], (n) => live[n] ?? null, (n) => kit[n] ?? null);
-  assert.deepEqual(drifted.sort(), ['a.mjs', 'b.mjs']);
-});
-
-test('does NOT flag a hook that is not published (no kit twin)', () => {
+test('flags a NEW hook (no kit twin) as missing — must be published now', () => {
   const readLive = () => 'LIVE';
-  const readKit = () => null;                 // not in the kit
-  assert.deepEqual(driftedPublishedHooks(['jarvis-local.mjs'], readLive, readKit), []);
+  const readKit = () => null;                 // not in the kit yet
+  assert.deepEqual(hooksNeedingSync(['new-guard.mjs'], readLive, readKit), [{ basename: 'new-guard.mjs', reason: 'missing' }]);
 });
 
-test('does NOT flag a published hook that is already in sync', () => {
+test('flags a mix of missing + drift, skips in-sync', () => {
+  const live = { 'a.mjs': '1', 'b.mjs': 'NEW', 'c.mjs': 'same' };
+  const kit = { 'a.mjs': 'X', 'c.mjs': 'same' };          // b.mjs absent from kit
+  const needing = hooksNeedingSync(['a.mjs', 'b.mjs', 'c.mjs'], (n) => live[n] ?? null, (n) => kit[n] ?? null);
+  assert.deepEqual(needing.sort((x, y) => x.basename.localeCompare(y.basename)),
+    [{ basename: 'a.mjs', reason: 'drift' }, { basename: 'b.mjs', reason: 'missing' }]);
+});
+
+test('does NOT flag a hook that is already in sync', () => {
   const same = () => 'IDENTICAL';
-  assert.deepEqual(driftedPublishedHooks(['a.mjs'], same, same), []);
+  assert.deepEqual(hooksNeedingSync(['a.mjs'], same, same), []);
 });
 
 test('does NOT flag when the live file is gone (deleted, not this guard\'s job)', () => {
-  assert.deepEqual(driftedPublishedHooks(['a.mjs'], () => null, () => 'KIT'), []);
-});
-
-test('does NOT flag a hook that differs only by line endings (CRLF kit vs LF live)', () => {
-  const live = () => 'line one\nline two\n';
-  const kit = () => 'line one\r\nline two\r\n';
-  assert.deepEqual(driftedPublishedHooks(['a.mjs'], live, kit), []);
+  assert.deepEqual(hooksNeedingSync(['a.mjs'], () => null, () => 'KIT'), []);
 });
 
 // ── changedHookBasenames ──

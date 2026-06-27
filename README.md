@@ -70,7 +70,7 @@ To uninstall a hook: `node scripts/install.mjs --remove <hook-name>` (removes th
 
 ## What's in the box
 
-Hooks are **tiered by how portable they are** — pick your comfort level. This kit ships **~30 hooks across three tiers** — a curated, portable slice of a larger personal set (~100 hooks in daily use); the rest are project-specific and stay out of the public kit. Full per-hook reference: [`docs/HOOKBOOK.md`](docs/HOOKBOOK.md).
+Hooks are **tiered by how portable they are** — pick your comfort level. This kit ships **~40 hooks across three tiers** — a curated, portable slice of a larger personal set (~100 hooks in daily use); the rest are project-specific and stay out of the public kit. Full per-hook reference: [`docs/HOOKBOOK.md`](docs/HOOKBOOK.md).
 
 ### Tier 1 — Standalone (work anywhere, zero config)
 | Hook | Event | What it enforces |
@@ -87,6 +87,13 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 | `look-before-asking` | Stop | Blocks asking the user for a discoverable fact (a path/key/env var) when the turn ran zero searches/reads |
 | `agent-autocommit` | PostToolUse(Write/Edit) | Auto-commits WIP inside a linked git worktree after every edit — a dying agent loses ≤1 edit |
 | `hook-must-enforce` | PreToolUse(Write/Edit) | Meta-guard: blocks writing a "guardrail" hook that only advises (no deny/exit-2/side-effect — no teeth) |
+| `no-write-to-main` | PreToolUse(Bash) | Closes the shell-bypass gap in `no-commit-to-main`: blocks `cp`/`mv`/redirect/`tee` of code into the repo while on `main` (docs + non-repo paths allowed) |
+| `delete-merged-branches` | PostToolUse(Bash) | After a merge/push to `main`, auto-deletes local branches whose commits are fully reachable from `main` (current/worktree/protected branches kept) |
+| `no-junk-files` | Stop | Blocks stop while throwaway/scratch files (`tmp-*`, `probe-*`, `scan-*`, stray `COMMIT_*.txt`) linger in the repo |
+| `never-idle` | Stop | Blocks stop while background work (async agents, background Bash) is still running — salvage it, don't abandon it |
+| `husky-on-new-projects` | SessionStart | Nudges husky setup when a Node+git project has no git hooks (so there's a real commit-time test gate) |
+| `rebuild-after-commit` | Stop | Edited buildable source but `dist/` is stale (by content hash)? Blocks until you rebuild — the running artifact is the build, not the commit. Ships `lib/buildFingerprint.mjs` |
+| `stamp-build-fingerprint` | PostToolUse(Bash) | On a successful build, records a content fingerprint of the source it built from, so freshness checks compare by hash, not mtime (companion to `rebuild-after-commit`) |
 
 ### Tier 2 — Needs the companion files (the memory system)
 | Hook | Event | What it enforces |
@@ -115,6 +122,8 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 | `bench-pattern-guard` | PreToolUse(Write) | Blocks writing a benchmark/eval/sweep runner that isn't parallel + event-emitting + durable/resumable — no serial for-loop benches that can't stream progress or resume. |
 | `agent-monitor-cadence` | Stop | Forces the orchestrator to actually watch its background agents — blocks stop while a spawned agent sits idle/unattended past a threshold, so you salvage its committed work instead of forgetting it. |
 | `clean-merged-worktrees` | Stop | Auto-removes spent agent git worktrees whose branch has already merged — keeps the working tree clean with no manual cleanup. |
+| `no-bullshit-tests` | PreToolUse(Write/Edit) | Blocks test files whose only assertions are tautologies (`assert(true)`, `x === x`) or a lone "is a function" smoke check — assert real behavior |
+| `docs-on-feature-commit` | PostToolUse(Bash)+Stop | Blocks stop when the turn committed code but moved no docs (README/docs/CHANGELOG) — unless it's a docs commit. **Override:** `docs-skip: <why>` (or the word `docs` in the commit) |
 
 > **Opinions are configurable.** Tier 3 encodes *my* engineering taste. The point isn't that you adopt my opinions — it's that you encode *yours* as deterministic gates instead of hoping the model remembers them. Fork the hook, change the rule, keep the mechanism.
 

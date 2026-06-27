@@ -1,55 +1,58 @@
 #!/usr/bin/env node
 /**
- * discipline-sync — Stop hook. Keeps the PUBLISHED claude-discipline kit in sync with the live hooks.
+ * discipline-sync — Stop hook. On ANY hook work this turn, FORCE the full publish loop:
+ *   1. every changed live hook (incl. its *.test.mjs) is COPIED into the claude-discipline kit,
+ *   2. the live ~/.claude repo has NO uncommitted hook/settings changes (commit them), and
+ *   3. the kit repo has NO uncommitted changes (commit the kit).
+ * Blocks Stop until all three hold.
  *
  * Russell, 2026-06-25: "hookbook and claude discipline need to update on any hook work — meta hook for that."
- * `hookbook-sync.mjs` already forces the HOOKBOOK row. This is its sibling for the distributable kit
- * (`programming/claude-discipline/`): when a hook under `~/.claude/hooks/` changed this turn AND a copy of
- * that hook already lives in the kit (i.e. it is a PUBLISHED hook), block Stop until the kit copy is
- * byte-identical. A shipped guard that drifted from its live source is a broken product.
+ * Russell, 2026-06-27 (this rewrite): "the meta hook creation hook should have fired. should force you to commit,
+ * update hookbook, copy into claude-discipline folder. didnt work. update that hook." — the prior version SKIPPED
+ * any hook not already in the kit ("curation stays manual"), so a brand-NEW hook was never forced in. Now a
+ * missing-from-kit hook is a publish requirement, not a skip. `hookbook-sync.mjs` still owns the live HOOKBOOK row.
  *
- * Scope by design: only hooks that ALREADY exist in the kit are enforced — curation of WHICH hooks get
- * published stays a manual call, this just keeps the published ones honest. Content equality is the check,
- * so it also catches drift left by a prior turn. Fail-open. Override: DISCIPLINE_SYNC_OVERRIDE=1.
+ * Fail-open (a git/fs error never blocks all work). Override: DISCIPLINE_SYNC_OVERRIDE=1.
  */
 
 import { readFileSync, existsSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const LIVE_HOOKS_DIR = join(homedir(), '.claude', 'hooks');
+const LIVE_REPO_DIR = join(homedir(), '.claude');
 const KIT_DIR_CANDIDATES = [
   process.env.DISCIPLINE_KIT_DIR,
   join(homedir(), 'Desktop', 'programming', 'claude-discipline'),
   'C:/Users/rmill/Desktop/programming/claude-discipline',
 ].filter(Boolean);
 
-function findKitHooksDir() {
+function findKitRoot() {
   for (const kitDir of KIT_DIR_CANDIDATES) {
-    const hooksDir = join(kitDir, 'hooks');
-    if (existsSync(hooksDir)) return hooksDir;
+    if (existsSync(join(kitDir, 'hooks'))) return kitDir;
   }
   return null;
 }
 
-// Pure core: of the hook basenames changed this turn, which have a kit twin whose content DIFFERS from the
-// live copy? `readLive`/`readKit` return file text or null if absent. A basename with no kit twin is skipped
-// (not yet published). Unit-tested directly with stub readers.
-// Compare hook bodies ignoring line-ending style: the kit is CRLF on Windows while live is LF, so a raw
-// `!==` flags every hook as drifted — and editing a kit hook on Windows could self-trip this very gate.
-// Content equality is what matters, not the byte that ends each line.
+// Compare hook bodies ignoring line-ending style: the kit is CRLF on Windows while live is LF, so a raw `!==`
+// flags every hook as drifted. Content equality is what matters, not the byte that ends each line.
 const sameContent = (a, b) => a.replace(/\r\n/g, '\n') === b.replace(/\r\n/g, '\n');
 
-export function driftedPublishedHooks(changedBasenames, readLive, readKit) {
-  const drifted = [];
+// Pure core: of the hook basenames changed this turn, which need to be published to / re-synced with the kit?
+// A live hook with NO kit twin is 'missing' (a NEW hook — must be published now); one whose kit copy DIFFERS is
+// 'drift'. A live file that's gone (deleted) is skipped (not this hook's job). Unit-tested with stub readers.
+export function hooksNeedingSync(changedBasenames, readLive, readKit) {
+  const needing = [];
   for (const basename of changedBasenames) {
-    const kitText = readKit(basename);
-    if (kitText === null) continue;              // not published → curation stays manual
     const liveText = readLive(basename);
-    if (liveText === null) continue;             // live gone (deleted) — not this hook's job
-    if (!sameContent(liveText, kitText)) drifted.push(basename);
+    if (liveText === null) continue;                                  // live gone (deleted)
+    const kitText = readKit(basename);
+    if (kitText === null) { needing.push({ basename, reason: 'missing' }); continue; } // NEW → publish it
+    if (!sameContent(liveText, kitText)) needing.push({ basename, reason: 'drift' });
   }
-  return drifted;
+  return needing;
 }
 
 // ── transcript plumbing (same shape as hookbook-sync) ──
@@ -91,7 +94,6 @@ export function changedHookBasenames(turnEntries) {
         if (match) changed.add(match[1].toLowerCase());
       }
       if (['Bash', 'PowerShell'].includes(name)) {
-        // a shell command that writes/copies into the live hooks dir
         for (const match of JSON.stringify(toolUse.input || '').matchAll(new RegExp(LIVE_HOOK_PATH_RE, 'gi'))) {
           changed.add(match[1].toLowerCase());
         }
@@ -101,6 +103,13 @@ export function changedHookBasenames(turnEntries) {
   return [...changed];
 }
 
+// `git status --porcelain` for a repo, or '' on any error (fail-open: a non-repo / missing git reads as clean).
+function gitPorcelain(repoDir) {
+  try {
+    return execSync('git status --porcelain', { cwd: repoDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch { return ''; }
+}
+
 async function main() {
   if (process.env.DISCIPLINE_SYNC_OVERRIDE === '1') process.exit(0);
   let input = '';
@@ -108,36 +117,47 @@ async function main() {
   let payload;
   try { payload = JSON.parse(input); } catch { payload = {}; }
 
-  const kitHooksDir = findKitHooksDir();
-  if (!kitHooksDir) process.exit(0);                       // no kit on this machine → nothing to sync
+  const kitRoot = findKitRoot();
+  if (!kitRoot) process.exit(0);                            // no kit on this machine → nothing to sync
+  const kitHooksDir = join(kitRoot, 'hooks');
 
   const turnEntries = currentTurnEntries(readTranscript(payload.transcript_path));
   if (!turnEntries.length) process.exit(0);
   const changed = changedHookBasenames(turnEntries);
-  if (!changed.length) process.exit(0);                    // no hook work this turn
+  if (!changed.length) process.exit(0);                     // no hook work this turn
 
   const readFileOrNull = (dir) => (basename) => {
     const path = join(dir, basename);
     if (!existsSync(path)) return null;
     try { return readFileSync(path, 'utf8'); } catch { return null; }
   };
-  const drifted = driftedPublishedHooks(changed, readFileOrNull(LIVE_HOOKS_DIR), readFileOrNull(kitHooksDir));
-  if (!drifted.length) process.exit(0);                    // published copies are in sync (or not published)
+  const needing = hooksNeedingSync(changed, readFileOrNull(LIVE_HOOKS_DIR), readFileOrNull(kitHooksDir));
 
-  const lines = [
-    'DISCIPLINE KIT OUT OF SYNC — a PUBLISHED hook changed but its claude-discipline copy did not match.',
-    '',
-    `Kit hooks dir: ${kitHooksDir}`,
-    'These published hooks differ from their live source:',
-    ...drifted.map((basename) => `  • ${basename}`),
-    '',
-    'Copy each over so the shipped kit matches the live guard, e.g.:',
-    ...drifted.map((basename) => `  cp ~/.claude/hooks/${basename} "${join(kitHooksDir, basename)}"`),
-    '',
-    'Also update the kit\'s docs/HOOKBOOK.md row if the behavior changed. Override: DISCIPLINE_SYNC_OVERRIDE=1.',
-  ];
+  // Commit enforcement: hook work must be committed in BOTH repos before the turn can end.
+  const liveUncommitted = gitPorcelain(LIVE_REPO_DIR)
+    .split('\n').filter((line) => /(\bhooks\/|settings\.json)/.test(line));
+  const kitUncommitted = gitPorcelain(kitRoot).split('\n').filter(Boolean);
+
+  if (!needing.length && !liveUncommitted.length && !kitUncommitted.length) process.exit(0); // all done
+
+  const lines = ['HOOK WORK NOT PUBLISHED — finish the full loop before stopping (copy to kit → update HOOKBOOK → commit BOTH repos).', ''];
+  if (needing.length) {
+    lines.push(`Kit: ${kitHooksDir}`, 'These changed hooks are NOT yet in the claude-discipline kit (or differ):');
+    for (const { basename, reason } of needing) lines.push(`  • ${basename} (${reason})`);
+    lines.push('Copy each (and its *.test.mjs) over + add a row to the kit\'s docs/HOOKBOOK.md, e.g.:');
+    for (const { basename } of needing) lines.push(`  cp ~/.claude/hooks/${basename} "${join(kitHooksDir, basename)}"`);
+    lines.push('');
+  }
+  if (liveUncommitted.length) {
+    lines.push('Uncommitted hook/settings changes in ~/.claude — commit them:');
+    lines.push('  cd ~/.claude && git add hooks settings.json && git commit -m "feat(hooks): ..."  (COMMIT_MAIN_OVERRIDE=1 if on main)', '');
+  }
+  if (kitUncommitted.length) {
+    lines.push(`Uncommitted changes in the kit (${kitRoot}) — commit them:`);
+    lines.push(`  cd "${kitRoot}" && git add -A && git commit -m "sync: publish hooks from ~/.claude"`, '');
+  }
+  lines.push('Override (rare — a deliberately unpublished/local hook): DISCIPLINE_SYNC_OVERRIDE=1.');
   process.stdout.write(JSON.stringify({ decision: 'block', reason: lines.join('\n') }));
 }
 
-import { fileURLToPath } from 'node:url';
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main().catch(() => process.exit(0));

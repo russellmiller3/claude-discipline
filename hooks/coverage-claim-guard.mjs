@@ -13,7 +13,7 @@
  *
  * Exports `makesAbsoluteClaim`, `statesRealScope`, `coverageClaimViolation` for the test.
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { lastAssistantText } from './lib/transcript.mjs';
 
 // ── PARTS (combined combinatorially so paraphrases still trip it) ──
 const VERB = '(?:tested|test|testing|covers?|covered|covering|exercises?|exercised|exercising|uses?|used|using|hits?|hit|ran|run|validates?|validated|validating)';
@@ -67,27 +67,6 @@ export function coverageClaimViolation(reply) {
   const replyBody = String(reply || '');
   if (OVERRIDE.test(replyBody)) return false;
   return makesAbsoluteClaim(replyBody) && !statesRealScope(replyBody);
-}
-
-function readEntries(transcriptPath) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return [];
-  try {
-    return readFileSync(transcriptPath, 'utf8').trim().split('\n')
-      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
-      .filter(Boolean);
-  } catch { return []; }
-}
-
-function lastAssistantText(transcriptPath) {
-  const entries = readEntries(transcriptPath);
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].type !== 'assistant') continue;
-    const blocks = entries[i].message?.content;
-    if (!Array.isArray(blocks)) continue;
-    const reply = blocks.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
-    if (reply) return reply;
-  }
-  return '';
 }
 
 async function main() {

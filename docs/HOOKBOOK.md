@@ -1,6 +1,6 @@
 # HOOKBOOK
 
-Per-hook reference for Claude Discipline — **22 hooks** across PreToolUse, PostToolUse, Stop, and SessionStart. For each: when it fires, what it does, and how to satisfy or override it.
+Per-hook reference for Claude Discipline — **~40 hooks** across PreToolUse, PostToolUse, Stop, SessionStart, and UserPromptSubmit. For each: when it fires, what it does, and how to satisfy or override it.
 
 > Keep the headline count above in sync with `settings.fragment.json`. The `hookbook-sync` hook checks it mechanically and blocks a turn that changes a hook without updating this file.
 
@@ -82,7 +82,16 @@ If you wrote/edited code files this turn, the reply must end with a debt-surface
 If a hook `.mjs` changed this turn but HOOKBOOK wasn't touched, or the "N hooks" headline drifts from the count registered in settings.json, blocks until you fix it. The system documents itself. **Config:** `HOOKBOOK_PATH`, `HOOK_SETTINGS_PATH`. **Override:** `HOOKBOOK_SYNC_OVERRIDE=1`.
 
 ### `discipline-sync` · Stop
-The sibling of `hookbook-sync` for THIS published kit. If a hook changed this turn whose copy here is now byte-different from the live `~/.claude/hooks/` source, blocks until the kit copy is re-synced — so a shipped guard never drifts from the version that actually runs. Only fires for hooks already in the kit (it doesn't force every new hook to publish); the content-equality check also catches drift left by an earlier turn. **Config:** `DISCIPLINE_KIT_DIR`. **Override:** `DISCIPLINE_SYNC_OVERRIDE=1`.
+The sibling of `hookbook-sync` for THIS published kit. On ANY hook work this turn it forces the full publish loop: every changed live hook (incl. its `*.test.mjs`) must be COPIED into the kit (a brand-NEW hook is flagged `missing` and must be published — no longer skipped), AND neither the live `~/.claude` repo (hooks/settings) nor the kit repo may have uncommitted changes. So a guard never ships drifted from the version that runs, and "I built a hook" can't end without it being published + committed. **Config:** `DISCIPLINE_KIT_DIR`. **Override:** `DISCIPLINE_SYNC_OVERRIDE=1`.
+
+### `instrument-before-debug` · UserPromptSubmit + PreToolUse(Write|Edit|MultiEdit)
+Forces "measure before fixing." A debugging-an-in-app-failure signal in your prompt (a pasted debug artifact, "still broken / doesn't work / wrong tier / routed to / you failed") opens a debug-gate; while it's open and no instrumentation has been added, BLOCKS any edit to source LOGIC that isn't itself logging (tests/docs/`/hooks/` exempt). An edit that adds a `console.log` / structured debug push clears the gate; so does an override. Kills the "ship a blind hypothesis-fix to an unobservable path, reload, repeat" loop — add the logging that captures WHY first. **Override:** `instrumented: <where>` or `instrument-override: <why>`.
+
+### `global-hooks-only` · PreToolUse(Write|Edit|MultiEdit)
+Hooks are global by default — blocks writing a hook implementation into a PROJECT-local `.claude/hooks/`, or registering one in a project `.claude/settings(.local).json`. Keeps the kit and its registration in `~/.claude` so every project gets the guard. **Override:** `local-hook-ok: <why>` or `LOCAL_HOOK_OK=1`.
+
+### `chrome-only-testing-guard` · PreToolUse(Bash|PowerShell)
+Project-scoped (gated on a project name in cwd): blocks installing or invoking Playwright in a repo that is meant to be tested only on its real loaded browser extension, not a Playwright stand-in. A template for "this repo has ONE real test harness, not a reimplementation." **Override:** `chrome-only-override: <why>` or `CHROME_ONLY_OVERRIDE=1`.
 
 ### `never-stop-asking` · Stop
 Bias to action (the "Ross Perot" rule). **Default (always on):** blocks asking-permission phrasing (`want me to` / `should I` / `if you'd rather`) and satisfaction-stops — winding-down language (`next session`, `TL;DR`, `wrapping up`) or naming a "next move" while the turn made zero working tool calls toward it. Suppressed when the user explicitly pauses (handoff / wrap / stop), except asking-permission which always fires. **Opt-in extras (env):** `NEVER_STOP_REQUIRE_BEAT=1` (work turns must include an orientation beat), `NEVER_STOP_REQUIRE_QUEUE=1` (work turns need a `.claude/state/priority-queue.md`). **Override:** `NEVER_STOP_OVERRIDE=1`.
@@ -113,6 +122,36 @@ Forces the orchestrator to actually watch its background agents — blocks stop 
 
 ### `clean-merged-worktrees` · Stop
 Auto-removes a spent agent git worktree whose branch has already merged — keeps the working tree clean with no manual `git worktree remove`.
+
+### `no-write-to-main` · PreToolUse(Bash)
+Closes the shell-bypass gap in `no-commit-to-main`: blocks `cp`/`mv`/redirect/`tee` writes of code files into the repo while on `main`/`master`. Docs (`.md`/`.txt`) and non-repo paths (`/tmp`, temp dirs) are allowed. **Override:** `WRITE_MAIN_OVERRIDE=1`.
+
+### `delete-merged-branches` · PostToolUse(Bash|PowerShell)
+After a `git merge`/`push` to `main`, auto-deletes every local branch whose commits are fully reachable from `main` — the "delete the branch" step that's easy to forget. Current, worktree-checked-out, and protected branches are never touched. **Disable:** `BRANCH_AUTODELETE_OFF=1`.
+
+### `no-junk-files` · Stop
+Blocks stop while throwaway/scratch files (`tmp-*`, `scan-*`, `probe-*`, stray `COMMIT_*.txt`, etc.) sit in the repo. **Override:** put `keep-junk: <reason>` in the reply.
+
+### `never-idle` · Stop
+Blocks stop while background work is still running (async Agents, background Bash, spawned tasks) — so you salvage their results instead of ending the turn on top of them. Clears automatically once the work completes.
+
+### `husky-on-new-projects` · SessionStart
+Nudges (never blocks) when a Node + git project has no husky installed — no git hooks means commits/pushes run no test gate. This is the second enforcement layer the README recommends pairing with.
+
+### `rebuild-after-commit` · Stop
+If the turn edited buildable source but the build output (`dist/`) is stale by content hash (or missing), blocks until you rebuild — a bundled app runs from the build, not the source. Ships with `lib/buildFingerprint.mjs`; pairs with `stamp-build-fingerprint`. **Override:** `rebuild-skip: <why>`.
+
+### `stamp-build-fingerprint` · PostToolUse(Bash)
+On a successful build command, records a content fingerprint of the source it was built from, so `rebuild-after-commit` proves staleness by hash instead of unreliable timestamps.
+
+### `no-bullshit-tests` · PreToolUse(Write|Edit)
+Blocks writing a test file whose only assertions are tautologies (`assert(true)`, `assert.equal(x, x)`) or a lone "is a function" smoke check — a test must assert behavior that could actually break. **Override:** `no-bullshit override: <reason>`.
+
+### `docs-on-feature-commit` · PostToolUse(Bash) + Stop
+Nudges after a non-docs commit, then blocks stop if the turn committed code but moved no documentation (README/docs/CHANGELOG). **Override:** `docs-skip: <why>` (or the word `docs` in the commit message).
+
+### `lib/transcript.mjs` (shared helper — not a registered hook)
+The canonical transcript/stdin helpers — `readHookEvent`, `readTranscript`, `roleOf`, `contentBlocks`, `toolUsesOf`, `toolResultText`, `isHumanPrompt`, `currentTurnEntries`, `lastAssistantText` — that Stop/PostToolUse hooks import via `./lib/transcript.mjs` instead of re-implementing. `currentTurnEntries` here is the bug-fixed version (it walks back to the last *human* prompt, so early-turn tool results aren't dropped); `lastAssistantText` accepts either a transcript path or an already-parsed entries array.
 
 ---
 
