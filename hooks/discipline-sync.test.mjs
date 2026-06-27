@@ -32,6 +32,12 @@ test('does NOT flag when the live file is gone (deleted, not this guard\'s job)'
   assert.deepEqual(driftedPublishedHooks(['a.mjs'], () => null, () => 'KIT'), []);
 });
 
+test('does NOT flag a hook that differs only by line endings (CRLF kit vs LF live)', () => {
+  const live = () => 'line one\nline two\n';
+  const kit = () => 'line one\r\nline two\r\n';
+  assert.deepEqual(driftedPublishedHooks(['a.mjs'], live, kit), []);
+});
+
 // ── changedHookBasenames ──
 const turn = (toolUses) => [{ role: 'assistant', message: { content: toolUses.map((t) => ({ type: 'tool_use', ...t })) } }];
 

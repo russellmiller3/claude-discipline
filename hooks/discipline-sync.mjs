@@ -35,6 +35,11 @@ function findKitHooksDir() {
 // Pure core: of the hook basenames changed this turn, which have a kit twin whose content DIFFERS from the
 // live copy? `readLive`/`readKit` return file text or null if absent. A basename with no kit twin is skipped
 // (not yet published). Unit-tested directly with stub readers.
+// Compare hook bodies ignoring line-ending style: the kit is CRLF on Windows while live is LF, so a raw
+// `!==` flags every hook as drifted — and editing a kit hook on Windows could self-trip this very gate.
+// Content equality is what matters, not the byte that ends each line.
+const sameContent = (a, b) => a.replace(/\r\n/g, '\n') === b.replace(/\r\n/g, '\n');
+
 export function driftedPublishedHooks(changedBasenames, readLive, readKit) {
   const drifted = [];
   for (const basename of changedBasenames) {
@@ -42,7 +47,7 @@ export function driftedPublishedHooks(changedBasenames, readLive, readKit) {
     if (kitText === null) continue;              // not published → curation stays manual
     const liveText = readLive(basename);
     if (liveText === null) continue;             // live gone (deleted) — not this hook's job
-    if (liveText !== kitText) drifted.push(basename);
+    if (!sameContent(liveText, kitText)) drifted.push(basename);
   }
   return drifted;
 }
