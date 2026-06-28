@@ -60,6 +60,15 @@ export function hooksNeedingSync(changedBasenames, readLive, readKit) {
   return needing;
 }
 
+// Pure: of a `git status --porcelain` text, the lines that touch THIS session's hook work — a changed hook basename
+// or settings.json (where registration lives). Scopes the commit-enforcement so it never demands committing OTHER
+// sessions' unrelated WIP hooks. Tested without git.
+export function uncommittedForChanged(porcelainText, changedBasenames) {
+  const basenames = changedBasenames || [];
+  return String(porcelainText || '').split('\n').filter(Boolean)
+    .filter((line) => /settings\.json/.test(line) || basenames.some((basename) => line.includes(basename)));
+}
+
 // ── transcript plumbing (same shape as hookbook-sync) ──
 function readTranscript(path) {
   if (!path || !existsSync(path)) return [];
@@ -133,10 +142,12 @@ async function main() {
   };
   const needing = hooksNeedingSync(changed, readFileOrNull(LIVE_HOOKS_DIR), readFileOrNull(kitHooksDir));
 
-  // Commit enforcement: hook work must be committed in BOTH repos before the turn can end.
-  const liveUncommitted = gitPorcelain(LIVE_REPO_DIR)
-    .split('\n').filter((line) => /(\bhooks\/|settings\.json)/.test(line));
-  const kitUncommitted = gitPorcelain(kitRoot).split('\n').filter(Boolean);
+  // Commit enforcement: hook work must be committed in BOTH repos before the turn can end — but ONLY the hooks YOU
+  // touched this session (+ settings.json, which hook registration lives in). Now that the scan spans the whole
+  // session, a blanket "any uncommitted hook" check would demand committing OTHER sessions' unrelated WIP hooks on
+  // every Stop — a yak-shave. `uncommittedForChanged` scopes the porcelain to this session's hook work.
+  const liveUncommitted = uncommittedForChanged(gitPorcelain(LIVE_REPO_DIR), changed);
+  const kitUncommitted = uncommittedForChanged(gitPorcelain(kitRoot), changed);
 
   if (!needing.length && !liveUncommitted.length && !kitUncommitted.length) process.exit(0); // all done
 

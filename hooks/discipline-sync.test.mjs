@@ -1,7 +1,7 @@
 // Tests for discipline-sync's pure core. Run: node --test discipline-sync.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hooksNeedingSync, changedHookBasenames } from './discipline-sync.mjs';
+import { hooksNeedingSync, changedHookBasenames, uncommittedForChanged } from './discipline-sync.mjs';
 
 // ── hooksNeedingSync ──
 test('flags a published hook whose live + kit copies differ as drift', () => {
@@ -31,6 +31,22 @@ test('does NOT flag a hook that is already in sync', () => {
 
 test('does NOT flag when the live file is gone (deleted, not this guard\'s job)', () => {
   assert.deepEqual(hooksNeedingSync(['a.mjs'], () => null, () => 'KIT'), []);
+});
+
+// ── uncommittedForChanged (whole-session scoping must NOT yak-shave unrelated WIP hooks) ──
+test('uncommittedForChanged: flags only this session\'s touched hooks + settings.json, ignores other WIP hooks', () => {
+  const porcelain = [
+    ' M hooks/agent-monitor-cadence.mjs',   // I touched this → flag
+    ' M hooks/e2e-or-its-theatre.mjs',      // someone else's WIP → ignore
+    '?? hooks/verify-change-with-screenshot.mjs', // unrelated → ignore
+    ' M settings.json',                      // registration → flag
+  ].join('\n');
+  const got = uncommittedForChanged(porcelain, ['agent-monitor-cadence.mjs']);
+  assert.deepEqual(got, [' M hooks/agent-monitor-cadence.mjs', ' M settings.json']);
+});
+
+test('uncommittedForChanged: empty when nothing I touched is uncommitted', () => {
+  assert.deepEqual(uncommittedForChanged(' M hooks/someone-else.mjs', ['my-hook.mjs']), []);
 });
 
 // ── changedHookBasenames ──
