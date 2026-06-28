@@ -7,10 +7,15 @@
  * Blocks Stop until all three hold.
  *
  * Russell, 2026-06-25: "hookbook and claude discipline need to update on any hook work — meta hook for that."
- * Russell, 2026-06-27 (this rewrite): "the meta hook creation hook should have fired. should force you to commit,
- * update hookbook, copy into claude-discipline folder. didnt work. update that hook." — the prior version SKIPPED
- * any hook not already in the kit ("curation stays manual"), so a brand-NEW hook was never forced in. Now a
- * missing-from-kit hook is a publish requirement, not a skip. `hookbook-sync.mjs` still owns the live HOOKBOOK row.
+ * Russell, 2026-06-27: "the meta hook creation hook should have fired. should force you to commit, update hookbook,
+ * copy into claude-discipline folder. didnt work. update that hook." — the prior version SKIPPED any hook not already
+ * in the kit, so a brand-NEW hook was never forced in. Now a missing-from-kit hook is a publish requirement.
+ * Russell, 2026-06-28 (this fix): "there should have been a hook that forced you to update hookbook + claude-discipline
+ * — why didnt it work?" — it scoped detection to the CURRENT TURN only (`currentTurnEntries`), so hook work done in an
+ * EARLIER turn (then committed to ~/.claude) was invisible by the Stop that mattered → the kit silently drifted. Fix:
+ * scan the WHOLE SESSION transcript for hook edits. Scope stays tight because the SATISFACTION checks (kit in sync +
+ * both repos committed) read CURRENT state — once you publish + commit, it stops blocking; it never yak-shaves
+ * unrelated hooks you didn't touch this session. `hookbook-sync.mjs` still owns the live HOOKBOOK row.
  *
  * Fail-open (a git/fs error never blocks all work). Override: DISCIPLINE_SYNC_OVERRIDE=1.
  */
@@ -71,14 +76,6 @@ function contentBlocks(entry) {
   return Array.isArray(blocks) ? blocks : [];
 }
 function toolUsesOf(entry) { return contentBlocks(entry).filter((block) => block?.type === 'tool_use'); }
-function currentTurnEntries(entries) {
-  let lastAssistant = -1;
-  for (let i = entries.length - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'assistant') { lastAssistant = i; break; } }
-  if (lastAssistant < 0) return [];
-  let turnStart = 0;
-  for (let i = lastAssistant - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'user') { turnStart = i; break; } }
-  return entries.slice(turnStart);
-}
 
 // Basenames of live hook files (incl. *.test.mjs) written/edited this turn.
 const LIVE_HOOK_PATH_RE = /[/\\]\.claude[/\\]hooks[/\\]([a-z0-9._-]+\.mjs)/i;
@@ -121,10 +118,13 @@ async function main() {
   if (!kitRoot) process.exit(0);                            // no kit on this machine → nothing to sync
   const kitHooksDir = join(kitRoot, 'hooks');
 
-  const turnEntries = currentTurnEntries(readTranscript(payload.transcript_path));
-  if (!turnEntries.length) process.exit(0);
-  const changed = changedHookBasenames(turnEntries);
-  if (!changed.length) process.exit(0);                     // no hook work this turn
+  // Scan the WHOLE SESSION (not just the current turn) so hook work done in an earlier turn — then committed — is
+  // still caught by the Stop that matters. The kit-drift + commit checks below read CURRENT state, so this stays
+  // scoped to what you touched this session and stops blocking the moment you publish + commit.
+  const sessionEntries = readTranscript(payload.transcript_path);
+  if (!sessionEntries.length) process.exit(0);
+  const changed = changedHookBasenames(sessionEntries);
+  if (!changed.length) process.exit(0);                     // no hook work this session
 
   const readFileOrNull = (dir) => (basename) => {
     const path = join(dir, basename);

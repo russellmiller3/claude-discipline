@@ -61,3 +61,16 @@ test('ignores writes that are not in the hooks dir (no false positives)', () => 
   ]));
   assert.deepEqual(got, []);
 });
+
+// THE 2026-06-28 FIX: a hook edited in an EARLIER turn (with a later user turn in between) must still be detected —
+// main() now scans the whole-session transcript, not just the current turn. Build a multi-turn transcript and assert
+// the turn-1 hook edit is found even though turn 2 touched nothing relevant.
+test('detects a hook edited in an earlier turn across a multi-turn session (the cross-turn miss)', () => {
+  const sessionEntries = [
+    { role: 'user', message: { content: 'go' } },
+    ...turn([{ name: 'Edit', input: { file_path: 'C:/Users/rmill/.claude/hooks/agent-monitor-cadence.mjs' } }]),
+    { role: 'user', message: { content: 'now do something unrelated' } },
+    ...turn([{ name: 'Bash', input: { command: 'git status' } }]),
+  ];
+  assert.deepEqual(changedHookBasenames(sessionEntries), ['agent-monitor-cadence.mjs']);
+});

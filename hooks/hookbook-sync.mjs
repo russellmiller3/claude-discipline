@@ -1,122 +1,157 @@
 #!/usr/bin/env node
-// hookbook-sync — Stop. The system documents itself. If you change a hook file
-// this turn but don't update HOOKBOOK.md, block until you do. A meta-hook that
-// guards the guardrails — the per-hook reference can't silently drift out of
-// date, because the gate won't let the turn end until it's current.
-//
-// It enforces TWO things:
-//   1. A hook .mjs changed this turn → HOOKBOOK.md must be touched this turn too
-//      (you write the human judgment: what the hook does, its clear-path).
-//   2. The "N hooks" headline count in HOOKBOOK.md must match the number of
-//      hooks actually registered in settings.json (mechanical — auto-verified).
-//
-// Paths are configurable:
-//   HOOKBOOK_PATH   (default ~/.claude/hooks/HOOKBOOK.md)
-//   HOOK_SETTINGS_PATH (default ~/.claude/settings.json)
-// Override: HOOKBOOK_SYNC_OVERRIDE=1.
-//
-// Note: do NOT bail on stop_hook_active — when another Stop hook blocks first,
-// the re-evaluation sets that flag, and bailing here would let hook changes slip
-// through unrecorded. It can't loop forever: updating HOOKBOOK.md clears it.
+/**
+ * Stop hook — require HOOKBOOK.md update when a global hook file changes.
+ *
+ * Fires when any registered .mjs hook was written/run this SESSION but
+ * ~/.claude/hooks/HOOKBOOK.md wasn't touched this session.
+ * This is the same pattern as mark-queue-on-ship: mechanical enforcement
+ * of a doc-update discipline that would otherwise be forgotten.
+ *
+ * 2026-06-28 fix (Russell: "why didnt the hook fire?"): was scoped to the
+ * CURRENT TURN (currentTurnEntries), so a hook edited in an earlier turn slipped
+ * the Stop that mattered. Now scans the whole-session transcript; the HOOKBOOK-
+ * touched check is over the same span, so updating HOOKBOOK once clears it.
+ */
 
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const HOOKS_DIR_RE = /[/\\](?:\.claude|hooks)[/\\][^/\\]+\.mjs/i;
-const HOOKBOOK_RE = /HOOKBOOK\.md/i;
-const HOOKBOOK_PATH = process.env.HOOKBOOK_PATH || join(homedir(), '.claude', 'hooks', 'HOOKBOOK.md');
-const SETTINGS_PATH = process.env.HOOK_SETTINGS_PATH || join(homedir(), '.claude', 'settings.json');
+const HOOKS_DIR_RE = /[/\\]\.claude[/\\]hooks[/\\][^/\\]+\.mjs/i;
+const HOOKBOOK_RE  = /HOOKBOOK\.md/i;
+const HOOK_FILENAME_RE = /([^/\\]+\.mjs)/i;
 
-function readTranscript(transcriptPath) {
-	if (!transcriptPath || !existsSync(transcriptPath)) return [];
-	try {
-		return readFileSync(transcriptPath, 'utf8').split('\n').filter(Boolean)
-			.map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
-	} catch { return []; }
+// Every .mjs basename REGISTERED as a hook in settings.json — including hooks that live OUTSIDE
+// ~/.claude/hooks/ (e.g. claude-voice/hooks/silent-mode.mjs, wired via an absolute path). Editing any
+// of these must require a HOOKBOOK update, even though the dir-based check above wouldn't catch them.
+function registeredHookBasenames() {
+  try {
+    const settingsText = readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8');
+    return new Set([...settingsText.matchAll(/([a-z0-9._-]+\.mjs)/gi)].map((m) => m[1].toLowerCase()));
+  } catch {
+    return new Set();
+  }
 }
 
-function roleOf(entry) { return entry.message?.role || entry.role || entry.type || ''; }
-function contentBlocks(entry) {
-	const blocks = entry.message?.content ?? entry.content ?? [];
-	if (typeof blocks === 'string') return [{ type: 'text', text: blocks }];
-	return Array.isArray(blocks) ? blocks : [];
-}
-function toolUsesOf(entry) { return contentBlocks(entry).filter((b) => b?.type === 'tool_use'); }
-
-function currentTurnEntries(entries) {
-	let lastAssistant = -1;
-	for (let i = entries.length - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'assistant') { lastAssistant = i; break; } }
-	if (lastAssistant < 0) return [];
-	let turnStart = 0;
-	for (let i = lastAssistant - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'user') { turnStart = i; break; } }
-	return entries.slice(turnStart);
+// A registered hook file (anywhere), but NOT its *.test.mjs sibling — editing only a test shouldn't
+// demand a HOOKBOOK row.
+function isRegisteredHookPath(filePath, registeredBasenames) {
+  const basename = (HOOK_FILENAME_RE.exec(filePath || '')?.[1] || '').toLowerCase();
+  if (!basename || basename.endsWith('.test.mjs')) return false;
+  return registeredBasenames.has(basename);
 }
 
-function hookFileChangedThisTurn(turnEntries) {
-	for (const entry of turnEntries) {
-		if (roleOf(entry) !== 'assistant') continue;
-		for (const toolUse of toolUsesOf(entry)) {
-			const inputStr = JSON.stringify(toolUse.input || '');
-			if (['Write', 'Edit', 'MultiEdit'].includes(toolUse.name || '')) {
-				const filePath = toolUse.input?.file_path || toolUse.input?.path || '';
-				if (HOOKS_DIR_RE.test(filePath)) return true;
-			}
-			if (['Bash', 'PowerShell'].includes(toolUse.name || '')) {
-				if (HOOKS_DIR_RE.test(inputStr) && /cat\s*>|Out-File|Set-Content|tee\b|>\s*["']/.test(inputStr)) return true;
-			}
-		}
-	}
-	return false;
+function readTranscript(path) {
+  if (!path || !existsSync(path)) return [];
+  try {
+    return readFileSync(path, 'utf8')
+      .split('\n').filter(Boolean)
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(Boolean);
+  } catch { return []; }
 }
 
-function hookbookUpdatedThisTurn(turnEntries) {
-	for (const entry of turnEntries) {
-		if (roleOf(entry) !== 'assistant') continue;
-		for (const toolUse of toolUsesOf(entry)) {
-			if (HOOKBOOK_RE.test(JSON.stringify(toolUse.input || ''))) return true;
-		}
-	}
-	return false;
+function roleOf(e) { return e.message?.role || e.role || e.type || ''; }
+
+function contentBlocks(e) {
+  const c = e.message?.content ?? e.content ?? [];
+  if (typeof c === 'string') return [{ type: 'text', text: c }];
+  return Array.isArray(c) ? c : [];
 }
 
-// Mechanically derive the truth: count unique hooks/<name>.mjs referenced in
-// settings.json, compare to the "N hooks" headline in HOOKBOOK.md.
+function toolUsesOf(e) {
+  return contentBlocks(e).filter(b => b?.type === 'tool_use');
+}
+
+function hookFileChangedThisSession(sessionEntries) {
+  const registeredBasenames = registeredHookBasenames();
+  for (const entry of sessionEntries) {
+    if (roleOf(entry) !== 'assistant') continue;
+    for (const tu of toolUsesOf(entry)) {
+      const inputStr = JSON.stringify(tu.input || '');
+      // Write/Edit targeting a hook: either it sits in any .claude/hooks/ dir, OR it's a file
+      // registered as a hook in settings.json (catches hooks living in other dirs, e.g. claude-voice).
+      if (['Write', 'Edit', 'MultiEdit'].includes(tu.name || '')) {
+        const editedPath = tu.input?.file_path || tu.input?.path || '';
+        if (HOOKS_DIR_RE.test(editedPath) || isRegisteredHookPath(editedPath, registeredBasenames)) return true;
+      }
+      // Bash/PowerShell writing to a hook file (by dir or by registered basename).
+      if (['Bash', 'PowerShell'].includes(tu.name || '')) {
+        const wroteAFile = /cat\s*>|Out-File|Set-Content|tee\b|>\s*["']/.test(inputStr);
+        if (wroteAFile && (HOOKS_DIR_RE.test(inputStr) || [...registeredBasenames].some((name) => inputStr.toLowerCase().includes(name)))) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function hookbookUpdatedThisSession(sessionEntries) {
+  for (const entry of sessionEntries) {
+    if (roleOf(entry) !== 'assistant') continue;
+    for (const tu of toolUsesOf(entry)) {
+      const inputStr = JSON.stringify(tu.input || '');
+      if (HOOKBOOK_RE.test(inputStr)) return true;
+    }
+  }
+  return false;
+}
+
+// The "N hooks across 5 event types" headline is hand-maintained and drifted
+// (said 43 while 45 were registered, 2026-05-29). Mechanically derive the truth:
+// count unique hooks/<name>.mjs referenced in settings.json, compare to the
+// headline. Returns null when they match, else {headline, registered}.
 function getCountDrift() {
-	try {
-		const settingsText = readFileSync(SETTINGS_PATH, 'utf8');
-		const hookbookText = readFileSync(HOOKBOOK_PATH, 'utf8');
-		const registered = new Set([...settingsText.matchAll(/hooks\/([a-z0-9-]+)\.mjs/gi)].map((m) => m[1])).size;
-		const headlineMatch = hookbookText.match(/(\d+)\s+hooks\b/i);
-		if (!headlineMatch) return null;
-		const headline = Number(headlineMatch[1]);
-		return headline === registered ? null : { headline, registered };
-	} catch {
-		return null;
-	}
+  try {
+    const settingsText = readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8');
+    const hookbookText = readFileSync(join(homedir(), '.claude', 'hooks', 'HOOKBOOK.md'), 'utf8');
+    const registered = new Set(
+      [...settingsText.matchAll(/hooks\/([a-z0-9-]+)\.mjs/gi)].map((m) => m[1])
+    ).size;
+    const headlineMatch = hookbookText.match(/(\d+)\s+hooks across/i);
+    if (!headlineMatch) return null;
+    const headline = Number(headlineMatch[1]);
+    return headline === registered ? null : { headline, registered };
+  } catch {
+    return null;
+  }
 }
 
 async function main() {
-	if (process.env.HOOKBOOK_SYNC_OVERRIDE === '1') return;
+  let input = '';
+  for await (const chunk of process.stdin) input += chunk;
+  let payload;
+  try { payload = JSON.parse(input); } catch { payload = {}; }
+  // NOTE: intentionally do NOT bail on payload.stop_hook_active. Doing so
+  // defeated enforcement whenever ANOTHER Stop hook blocked first (which is
+  // common given how many Stop hooks exist) — the re-evaluation set
+  // stop_hook_active=true and this hook bailed before checking, so hook-file
+  // writes slipped through unrecorded (2026-05-29: pixels-only-proof.mjs and
+  // require-learnings-ack.mjs were both written but never logged to HOOKBOOK).
+  // It cannot loop forever: it only blocks while a hook changed in the current
+  // turn-span AND HOOKBOOK.md wasn't touched in that same span — updating
+  // HOOKBOOK.md clears it. Matches never-stop-asking.mjs, which also re-fires.
 
-	let stdinText = '';
-	for await (const chunk of process.stdin) stdinText += chunk;
-	let payload;
-	try { payload = JSON.parse(stdinText); } catch { payload = {}; }
+  // Scan the WHOLE SESSION (not just the current turn): a hook edited in an earlier turn must still require a
+  // HOOKBOOK row by the Stop that matters. The HOOKBOOK-touched check below is over the same span, so updating
+  // HOOKBOOK once in the session clears the block.
+  const sessionEntries = readTranscript(payload.transcript_path);
+  if (sessionEntries.length === 0) return;
 
-	const turnEntries = currentTurnEntries(readTranscript(payload.transcript_path));
-	if (turnEntries.length === 0) return;
-	if (!hookFileChangedThisTurn(turnEntries)) return;
+  if (!hookFileChangedThisSession(sessionEntries)) return;
 
-	const rowMissing = !hookbookUpdatedThisTurn(turnEntries);
-	const drift = getCountDrift();
-	if (!rowMissing && !drift) return;
+  const rowMissing = !hookbookUpdatedThisSession(sessionEntries);
+  const drift = getCountDrift();
+  if (!rowMissing && !drift) return; // row added this turn AND count is accurate
 
-	const blockLines = ['HOOKBOOK UPDATE REQUIRED — a hook file changed this turn.', '', `HOOKBOOK lives at: ${HOOKBOOK_PATH}`, ''];
-	if (rowMissing) blockLines.push('• Add or update the row for the changed hook (under the right event section).');
-	if (drift) blockLines.push(`• Fix the headline count: it says "${drift.headline} hooks" but ${drift.registered} are registered in settings.json. Update it to ${drift.registered}.`);
-	blockLines.push('', 'Override (rare): HOOKBOOK_SYNC_OVERRIDE=1');
-	process.stdout.write(JSON.stringify({ decision: 'block', reason: blockLines.join('\n') }));
+  const hookbookPath = join(homedir(), '.claude', 'hooks', 'HOOKBOOK.md');
+  const lines = ['HOOKBOOK UPDATE REQUIRED — a hook file changed this session.', '', `HOOKBOOK lives at: ${hookbookPath}`, ''];
+  if (rowMissing) {
+    lines.push('• Add or update the row for the changed hook (under the right event section).');
+  }
+  if (drift) {
+    lines.push(`• Fix the headline count: it says "${drift.headline} hooks" but ${drift.registered} are registered in settings.json. Update it to ${drift.registered}.`);
+  }
+  process.stdout.write(JSON.stringify({ decision: 'block', reason: lines.join('\n') }));
 }
 
 main().catch(() => process.exit(0));
