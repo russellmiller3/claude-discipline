@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 /**
- * coverage-claim-guard — Stop hook. Enforces the "say the REAL scope" lesson: it's easy to round
- * "tested most primitives" up to "tested EVERY primitive" in a chat summary while the written report
- * was honest. This blocks an absolute coverage claim UNLESS the same reply also states the true scope
- * (a count, or what's uncovered).
+ * coverage-claim-guard — Stop hook. Enforces the "say the REAL scope" lesson (learnings.md:83, bitten
+ * twice): I rounded "tested most primitives" up to "tested EVERY primitive" in a chat summary while the
+ * written report was honest. This blocks an absolute coverage claim UNLESS the same reply also states
+ * the true scope (a count, or what's uncovered).
  *
- * Detection is combinatorial: (coverage verb) × (every/all quantifier) × (testable noun) within a
- * proximity window, PLUS "full/100% coverage" and "tested/covered everything". The escape is any
+ * Detection is combinatorial (HOOKBOOK rule): (coverage verb) × (every/all quantifier) × (testable noun)
+ * within a proximity window, PLUS "full/100% coverage" and "tested/covered everything". The escape is any
  * scope-honest signal in the SAME message: "N of M", "uncovered", "didn't test", "except", "gated", etc.
  *
  * Fail-open on any error. Override: "coverage-override: <why>" in the reply.
  *
  * Exports `makesAbsoluteClaim`, `statesRealScope`, `coverageClaimViolation` for the test.
  */
-import { lastAssistantText } from './lib/transcript.mjs';
+import { readFileSync, existsSync } from 'node:fs';
 
 // ── PARTS (combined combinatorially so paraphrases still trip it) ──
 const VERB = '(?:tested|test|testing|covers?|covered|covering|exercises?|exercised|exercising|uses?|used|using|hits?|hit|ran|run|validates?|validated|validating)';
@@ -69,6 +69,8 @@ export function coverageClaimViolation(reply) {
   return makesAbsoluteClaim(replyBody) && !statesRealScope(replyBody);
 }
 
+import { lastAssistantTextOf } from './lib/transcript.mjs';
+
 async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
@@ -77,10 +79,10 @@ async function main() {
   const event = payload.hook_event_name || payload.hookEventName || '';
   if (event && event !== 'Stop' && event !== 'SubagentStop') return;
 
-  const reply = lastAssistantText(payload.transcript_path);
+  const reply = lastAssistantTextOf(payload.transcript_path);
   if (!coverageClaimViolation(reply)) return;
 
-  const reason = `STOP-BLOCKED — absolute coverage claim without the real scope.
+  const reason = `STOP-BLOCKED — absolute coverage claim without the real scope (learnings.md:83, bitten twice).
 Your reply claims you tested/covered EVERYTHING (or "every <X>") but doesn't state the true scope.
 Don't round "most" up to "every". Before stopping, rewrite the claim to state the REAL coverage:
   • a count — "N of M <X> covered", and

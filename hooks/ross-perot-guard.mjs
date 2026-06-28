@@ -263,48 +263,7 @@ const USER_PAUSE_PATTERNS = [
   /\bwhat\s+(do you think|are the options)\b/i,  // user asked for options on purpose
 ];
 
-function lastAssistantText(transcriptPath) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return '';
-  let content;
-  try { content = readFileSync(transcriptPath, 'utf8'); } catch { return ''; }
-  const lines = content.trim().split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let entry;
-    try { entry = JSON.parse(lines[i]); } catch { continue; }
-    if (entry.type !== 'assistant') continue;
-    const msg = entry.message;
-    if (!msg || !Array.isArray(msg.content)) continue;
-    const text = msg.content
-      .filter(b => b && b.type === 'text' && typeof b.text === 'string')
-      .map(b => b.text)
-      .join('\n');
-    if (text) return text;
-  }
-  return '';
-}
-
-function lastUserText(transcriptPath) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return '';
-  let content;
-  try { content = readFileSync(transcriptPath, 'utf8'); } catch { return ''; }
-  const lines = content.trim().split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let entry;
-    try { entry = JSON.parse(lines[i]); } catch { continue; }
-    if (entry.type !== 'user') continue;
-    const msg = entry.message;
-    if (!msg) continue;
-    if (typeof msg.content === 'string') return msg.content;
-    if (Array.isArray(msg.content)) {
-      const text = msg.content
-        .filter(b => b && b.type === 'text' && typeof b.text === 'string')
-        .map(b => b.text)
-        .join('\n');
-      if (text) return text;
-    }
-  }
-  return '';
-}
+import { lastAssistantTextOf, lastUserTextOf } from './lib/transcript.mjs';
 
 async function main() {
   let input = '';
@@ -313,14 +272,14 @@ async function main() {
   try { payload = JSON.parse(input); } catch { payload = {}; }
 
   // name-by-use-override: `text` is the existing variable name used throughout this hook.
-  let text = lastAssistantText(payload.transcript_path);
+  let text = lastAssistantTextOf(payload.transcript_path);
   if (!text) { process.exit(0); return; }
   // Phrase matchers run on the code-span-stripped text so quoting a trigger (e.g. `want me to` in backticks
   // while explaining this hook) doesn't false-fire. Edit-detection still reads the raw transcript.
   text = stripCodeSpans(text);
 
   // Suppress on explicit user-pause / survey-mode messages
-  const userText = lastUserText(payload.transcript_path);
+  const userText = lastUserTextOf(payload.transcript_path);
   const userInSurveyMode = USER_PAUSE_PATTERNS.some(p => p.test(userText));
   if (userInSurveyMode) { process.exit(0); return; }
 

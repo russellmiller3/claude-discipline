@@ -43,6 +43,18 @@ const CODE_EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
 const SKIP_RE = /e2e-skip\s*:/i;
 const OWED_RE = /e2e-owed-live-gate\s*:/i;
 
+// The owed-live-gate override is ONLY legitimate when the boundary genuinely CANNOT be exercised headlessly —
+// a real microphone, a live WebRTC/audio socket, a camera, dedicated hardware, or an interactive browser/OAuth
+// step. A network/HTTP, database, or credential boundary IS headlessly testable (node + real fetch, a real DB, a
+// key from .env), so "I'll owe it" there is the self-cert abuse that shipped untested wiring THIS session (I owed
+// a network boundary I later proved testable). So the override is honored ONLY if its reason NAMES a real
+// human/hardware gate; a vague "it's just wiring" / "can't be tested headlessly" does NOT qualify and the gate
+// keeps blocking. Pure + exported so the test pins the exact abuse shapes.
+const HUMAN_GATE_RE = /\b(mic|microphone|audio|sound|webrtc|web ?rtc|camera|webcam|speakers?|headphones?|hardware|physical device|usb|bluetooth|real browser|headed browser|interactive (?:oauth|login|sign-?in|consent)|oauth (?:consent|popup)|\bmfa\b|\b2fa\b|captcha)\b/i;
+export function owedOverrideHonored(reasonText) {
+  return HUMAN_GATE_RE.test(String(reasonText || ''));
+}
+
 // A module STEM (basename, no extension) whose live e2e RAN GREEN in this turn — that's the "you did it"
 // signal that clears its owed gate. We read it off a Bash run of `<stem>.e2e.test…` whose result reports a
 // passing vitest/node summary and NO failure. Deterministic, low-false-positive: requires both the e2e
@@ -81,6 +93,13 @@ const BOUNDARY_SIGNALS = [
   { name: 'database', re: /\b(indexedDB|openDB\b|idb|IDBDatabase|sqlite|better-sqlite3|pglite|PGlite|\.execute\(|prepare\()/i },
   { name: 'worker', re: /\bnew\s+Worker\s*\(|Worker\(|postMessage\s*\(|onmessage\b|MessageChannel/i },
   { name: 'DOM serialization', re: /\b(document\.|jsdom|JSDOM|innerHTML|outerHTML|querySelector|createElement|getBoundingClientRect|new\s+DOMParser)\b/ },
+  // CREDENTIAL/SETTINGS WIRING — a UI that COLLECTS an api key/token/secret has no fetch of its own (a downstream
+  // collaborator sends it), so the other signals miss it. But its whole correctness is "does this key reach its
+  // service" — exactly the bug that shipped the exa key fix untested (the Settings UI saved exaKey but nothing
+  // proved it reached the Exa API). Signal: a password input bound to a *Key/*Token/*Secret field. The two-sided
+  // regex catches either order (attribute before or after the binding). A non-credential password (a login form,
+  // no *Key) does NOT match — keeps false positives low.
+  { name: 'credential/settings wiring', re: /type=["']password["'][\s\S]{0,200}\b\w*(Key|Token|Secret)\b|\b\w*(Key|Token|Secret)\b[\s\S]{0,200}type=["']password["']/i },
 ];
 
 export function boundaryOf(sourceCode) {
@@ -126,45 +145,9 @@ export function evaluateModule({ boundary, hasMockedUnitTest, hasE2e }) {
   return { block: true, boundary, reason: 'real boundary, mocked unit tests, NO e2e — theatre' };
 }
 
-// ── transcript helpers (same shape as explainer-sync) ──────────────────────────
-function readTranscript(transcriptPath) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return [];
-  try {
-    return readFileSync(transcriptPath, 'utf8').split('\n').filter(Boolean)
-      .map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
-  } catch { return []; }
-}
-function roleOf(entry) { return entry.message?.role || entry.role || entry.type || ''; }
-function contentBlocks(entry) {
-  const blocks = entry.message?.content ?? entry.content ?? [];
-  if (typeof blocks === 'string') return [{ type: 'text', text: blocks }];
-  return Array.isArray(blocks) ? blocks : [];
-}
-// Flatten a tool_result block's content to plain text (it may be a string or an array of {text}/string parts).
-export function toolResultText(block) {
-  if (block?.type !== 'tool_result') return '';
-  const inner = block.content;
-  if (typeof inner === 'string') return inner;
-  if (Array.isArray(inner)) return inner.map((part) => (typeof part === 'string' ? part : part?.text || '')).join('\n');
-  return '';
-}
-// A real human prompt (not a tool-result carrier): a user message that has actual text. Tool results come back
-// as user-role messages whose blocks are all `tool_result` — those are NOT turn starts.
-function isHumanPrompt(entry) {
-  if (roleOf(entry) !== 'user') return false;
-  return contentBlocks(entry).some((block) => block.type === 'text' && (block.text || '').trim().length > 0);
-}
-// The whole current turn — from the last HUMAN prompt through the end. (Was: from the last user message before
-// the last assistant, which on a multi-step tool turn started mid-turn and dropped earlier tool_results — so a
-// `git merge` result printed early in the turn was invisible. Starting at the human prompt captures it all.)
-function currentTurnEntries(entries) {
-  let lastAssistant = -1;
-  for (let i = entries.length - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'assistant') { lastAssistant = i; break; } }
-  if (lastAssistant < 0) return [];
-  let turnStart = 0;
-  for (let i = lastAssistant; i >= 0; i--) { if (isHumanPrompt(entries[i])) { turnStart = i; break; } }
-  return entries.slice(turnStart);
-}
+import {
+  readTranscript, roleOf, contentBlocks, toolResultText, isHumanPrompt, currentTurnEntries,
+} from './lib/transcript.mjs';
 
 // Pull git commit/merge SHAs out of this turn's Bash tool_result text. `git commit` AND `git merge` both print
 // `[<branch> <sha>] <message>` — so a turn that MERGED a background agent's branch (or committed) leaves the SHA
@@ -220,6 +203,30 @@ function treeHasE2eFor(root, stem) {
   return false;
 }
 
+// A credential/settings-wiring boundary (a UI collecting an api key) is covered by ANY real e2e that proves a
+// credential reaches its service — that e2e is named after the SERVICE/flow it proves (e.g. researchKeyFromSettings),
+// not after the component, so the stem match above can't find it. Accept any `*.e2e.test.*` whose source handles a
+// *Key/*Token/*Secret. This keeps a routine settings tweak from blocking forever once a credential e2e exists,
+// while still requiring that SUCH an e2e exists at all. Bounded walk (Stop must stay fast).
+const CREDENTIAL_IN_SOURCE = /\b\w*(Key|Token|Secret)\b/;
+function treeHasCredentialE2e(root) {
+  const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.vite', 'coverage', '.next', 'out']);
+  const queue = [root];
+  let budget = 6000;
+  while (queue.length && budget > 0) {
+    const probeDir = queue.shift();
+    let entries = [];
+    try { entries = readdirSync(probeDir, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (budget-- <= 0) break;
+      if (entry.isDirectory()) { if (!SKIP.has(entry.name) && !entry.name.startsWith('.')) queue.push(join(probeDir, entry.name)); continue; }
+      if (!/\.e2e\.test\.[a-z]+$/i.test(entry.name)) continue;
+      if (CREDENTIAL_IN_SOURCE.test(readFileSafe(join(probeDir, entry.name)))) return true;
+    }
+  }
+  return false;
+}
+
 function onStop(hookEvent) {
   const repoRoot = hookEvent.cwd || process.cwd();
   const turnEntries = currentTurnEntries(readTranscript(hookEvent.transcript_path));
@@ -230,14 +237,14 @@ function onStop(hookEvent) {
   // turn with no edits (you came back just to run the owed e2e), so the reminder stops the moment it passes.
   for (const stem of e2eGreenRunStems(turnEntries)) clearGate(defaultGatesPath(), stem, project);
 
-  let skipOverride = false;  // `e2e-skip:` — a true pass (trigger misjudged a no-boundary change)
-  let owedOverride = false;  // `e2e-owed-live-gate:` — NOT a pass; records an owed gate the reminder nags about
+  let skipOverride = false;     // `e2e-skip:` — a true pass (trigger misjudged a no-boundary change)
+  let owedReasonText = null;    // the text of the block carrying `e2e-owed-live-gate:` — its reason is checked below
   const editedModulePaths = new Set();
   for (const entry of turnEntries) {
     for (const block of contentBlocks(entry)) {
       if (block.type === 'text') {
         if (SKIP_RE.test(block.text || '')) skipOverride = true;
-        if (OWED_RE.test(block.text || '')) owedOverride = true;
+        if (OWED_RE.test(block.text || '')) owedReasonText = block.text;
       }
       if (block.type !== 'tool_use') continue;
       if (!CODE_EDIT_TOOLS.has(block.name || '')) continue;
@@ -280,6 +287,9 @@ function onStop(hookEvent) {
       const stem = basename(moduleAbs).replace(/\.(js|mjs|svelte)$/i, '');
       if (treeHasE2eFor(repoRoot, stem)) hasE2e = true;
     }
+    // A credential/settings-wiring boundary is covered by ANY credential e2e in the tree (named after the flow it
+    // proves, not the component) — so a routine settings edit doesn't block once such an e2e exists.
+    if (!hasE2e && boundary === 'credential/settings wiring' && treeHasCredentialE2e(repoRoot)) hasE2e = true;
 
     const verdict = evaluateModule({ boundary, hasMockedUnitTest, hasE2e });
     if (verdict.block) offenders.push({ module: basename(moduleAbs), stem: basename(moduleAbs).replace(/\.(js|mjs|svelte)$/i, ''), boundary });
@@ -287,14 +297,24 @@ function onStop(hookEvent) {
 
   if (offenders.length === 0) return;
 
-  // `e2e-owed-live-gate:` — record each offender as an OWED gate (the reminder nags every turn until its live
-  // e2e runs green) and let this stop PROCEED. No block: Russell's call — don't hold work hostage, just nag.
-  if (owedOverride) {
+  // `e2e-owed-live-gate:` — honored ONLY when its reason names a GENUINE human/hardware gate (mic/WebRTC/camera/
+  // hardware/interactive browser). Then record each offender as an OWED gate (the reminder nags until its live
+  // e2e runs green) and let this stop PROCEED. A vague reason ("just wiring" / "can't be tested headlessly") is
+  // the self-cert abuse — the boundary IS headlessly testable, so the override is REJECTED and the block stands.
+  const owedHonored = owedReasonText != null && owedOverrideHonored(owedReasonText);
+  if (owedHonored) {
     for (const offender of offenders) recordGate(defaultGatesPath(), { moduleStem: offender.stem, why: offender.boundary, project });
     return;
   }
+  const owedRejected = owedReasonText != null && !owedHonored; // a token was present but its reason had no real gate
 
   const offenderLines = offenders.map((offender) => `  • ${offender.module}  (real boundary: ${offender.boundary})`).join('\n');
+  const owedRejectedNote = owedRejected
+    ? ['', 'Your `e2e-owed-live-gate:` was REJECTED — its reason named no genuine human/hardware gate (mic, WebRTC,',
+       'camera, hardware, interactive browser/OAuth). These boundaries ARE headlessly testable, so "owe it" is not',
+       'allowed here — write + RUN the real e2e (a key from .env + node + real fetch is enough), or if this change',
+       'truly has no boundary, use `e2e-skip: <why>`.', '']
+    : [];
   process.stdout.write(JSON.stringify({
     decision: 'block',
     reason: [
@@ -303,6 +323,7 @@ function onStop(hookEvent) {
       '',
       'Module(s) this turn with a mocked boundary and no e2e:',
       offenderLines,
+      ...owedRejectedNote,
       '',
       "Russell's rule (2026-06-24): \"unit tests without e2e are theatre.\" A test that mocks the runner proves",
       'the wiring, never that the real thing works — the bug a mock physically cannot fake (the WASM bigint, the',

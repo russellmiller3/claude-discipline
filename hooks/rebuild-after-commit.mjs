@@ -2,7 +2,7 @@
 /**
  * Rebuild-after-source-edit guard — GLOBAL, Stop hook.
  *
- * The rule: a bundled app (Chrome extension, Vite app) runs from the
+ * Russell's rule (2026-06-20, tightened): a bundled app (Chrome extension, Vite app) runs from the
  * BUILT artifact (dist/), not the source. ANY time you do a fix or a feature — commit or not — you
  * must rebuild before the turn ends, or a reload shows the STALE bundle ("none of my changes are
  * there"). The earlier version only fired on a commit in the same turn; this one fires on any source
@@ -82,27 +82,7 @@ function distIsStale(buildRoot, editedFiles) {
   return newestDist < newestEdit;            // dist older than your newest edit → not rebuilt
 }
 
-function readTranscript(transcriptPath) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return [];
-  try {
-    return readFileSync(transcriptPath, 'utf8').split('\n').filter(Boolean)
-      .map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
-  } catch { return []; }
-}
-function roleOf(entry) { return entry.message?.role || entry.role || entry.type || ''; }
-function contentBlocks(entry) {
-  const blocks = entry.message?.content ?? entry.content ?? [];
-  if (typeof blocks === 'string') return [{ type: 'text', text: blocks }];
-  return Array.isArray(blocks) ? blocks : [];
-}
-function currentTurnEntries(entries) {
-  let lastAssistant = -1;
-  for (let i = entries.length - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'assistant') { lastAssistant = i; break; } }
-  if (lastAssistant < 0) return [];
-  let turnStart = 0;
-  for (let i = lastAssistant - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'user') { turnStart = i; break; } }
-  return entries.slice(turnStart);
-}
+import { readTranscript, roleOf, contentBlocks, currentTurnEntries } from './lib/transcript.mjs';
 
 function onStop(hookEvent) {
   const turnEntries = currentTurnEntries(readTranscript(hookEvent.transcript_path));
@@ -144,7 +124,7 @@ function onStop(hookEvent) {
     reason: [
       'REBUILD REQUIRED — you changed source in a buildable project but dist/ is stale.',
       '',
-      "The rule: the app runs from the BUILT artifact (dist/), not source. ANY fix",
+      "Russell's rule (2026-06-20): the app runs from the BUILT artifact (dist/), not source. ANY fix",
       'or feature must be rebuilt before you finish, or a reload shows the OLD bundle ("not there").',
       'This is a freshness check: dist/ is older than the files you edited this turn (or missing) — so',
       'either you never built, or the build failed.',

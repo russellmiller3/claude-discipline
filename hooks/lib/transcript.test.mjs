@@ -1,95 +1,98 @@
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import { writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+#!/usr/bin/env node
+// transcript.test.mjs — direct coverage for the shared transcript helpers.
+// Run: node lib/transcript.test.mjs   (exits non-zero on failure)
+
+import assert from 'node:assert';
+import { writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
-  readTranscript, roleOf, contentBlocks, toolUsesOf, toolResultText,
-  isHumanPrompt, currentTurnEntries, lastAssistantText,
+  readTranscript, roleOf, contentBlocks, textOf, toolUsesOf, toolResultText, isHumanPrompt,
+  currentTurnEntries, lastAssistantText, lastUserText, lastAssistantTextOf, lastUserTextOf,
 } from './transcript.mjs';
 
-// Helpers to build entries in both transcript shapes the helpers must tolerate.
-const human = (text) => ({ type: 'user', message: { role: 'user', content: [{ type: 'text', text }] } });
-const toolResultUser = (text) => ({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: text }] } });
-const assistantText = (text) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } });
-const assistantTool = (name, input) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name, input }] } });
+let passed = 0;
+const ok = (cond, msg) => { assert.ok(cond, msg); passed++; };
 
-test('roleOf tolerates message-wrapped, flat, and type-only shapes', () => {
-  assert.equal(roleOf({ message: { role: 'assistant' } }), 'assistant');
-  assert.equal(roleOf({ role: 'user' }), 'user');
-  assert.equal(roleOf({ type: 'system' }), 'system');
-  assert.equal(roleOf({}), '');
-});
+// readTranscript: missing file → [], real file → parsed entries, bad lines skipped.
+ok(readTranscript('').length === 0, 'empty path → []');
+ok(readTranscript('/nope/missing.jsonl').length === 0, 'missing file → []');
+{
+  const dir = mkdtempSync(join(tmpdir(), 'transcript-test-'));
+  const transcriptPath = join(dir, 't.jsonl');
+  writeFileSync(transcriptPath, '{"role":"user"}\nnot-json\n{"role":"assistant"}');
+  const entries = readTranscript(transcriptPath);
+  ok(entries.length === 2, 'parses good lines, skips the broken one');
+}
 
-test('contentBlocks normalizes string content to one text block and tolerates missing', () => {
-  assert.deepEqual(contentBlocks({ content: 'hi' }), [{ type: 'text', text: 'hi' }]);
-  assert.deepEqual(contentBlocks({}), []);
-  assert.equal(contentBlocks(assistantTool('Bash', {})).length, 1);
-});
+// roleOf: both shapes + fallback.
+ok(roleOf({ message: { role: 'assistant' } }) === 'assistant', 'roleOf reads message.role');
+ok(roleOf({ role: 'user' }) === 'user', 'roleOf reads flat role');
+ok(roleOf({ type: 'tool_result' }) === 'tool_result', 'roleOf falls back to type');
+ok(roleOf({}) === '', 'roleOf empty → ""');
 
-test('toolUsesOf returns only tool_use blocks', () => {
-  const entry = { content: [{ type: 'text', text: 'x' }, { type: 'tool_use', name: 'Edit' }] };
-  assert.equal(toolUsesOf(entry).length, 1);
-  assert.equal(toolUsesOf(entry)[0].name, 'Edit');
-});
+// contentBlocks: string → one text block, array passthrough, missing → [].
+ok(contentBlocks({ content: 'hi' })[0].text === 'hi', 'string content → text block');
+ok(contentBlocks({ message: { content: [{ type: 'text', text: 'x' }] } }).length === 1, 'array content passthrough');
+ok(contentBlocks({}).length === 0, 'no content → []');
 
-test('toolResultText flattens string and array content; ignores non-results', () => {
-  assert.equal(toolResultText({ type: 'tool_result', content: 'done' }), 'done');
-  assert.equal(toolResultText({ type: 'tool_result', content: [{ text: 'a' }, 'b'] }), 'a\nb');
-  assert.equal(toolResultText({ type: 'text', text: 'nope' }), '');
-});
+// textOf + toolUsesOf.
+ok(textOf({ content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] }) === 'a\nb', 'textOf joins blocks');
+ok(toolUsesOf({ content: [{ type: 'tool_use', name: 'Edit' }, { type: 'text', text: 'x' }] }).length === 1, 'toolUsesOf filters tool_use');
 
-test('isHumanPrompt is true only for user messages with real text (not tool-result carriers)', () => {
-  assert.equal(isHumanPrompt(human('hello')), true);
-  assert.equal(isHumanPrompt(toolResultUser('git output')), false);
-  assert.equal(isHumanPrompt(assistantText('hi')), false);
-});
+// toolResultText + isHumanPrompt.
+ok(toolResultText({ type: 'tool_result', content: 'done' }) === 'done', 'toolResultText reads string content');
+ok(toolResultText({ type: 'tool_result', content: [{ text: 'a' }, 'b'] }) === 'a\nb', 'toolResultText flattens array parts');
+ok(toolResultText({ type: 'text', text: 'x' }) === '', 'toolResultText ignores non-tool_result');
+ok(isHumanPrompt({ role: 'user', content: [{ type: 'text', text: 'hi' }] }), 'a text user message is a human prompt');
+ok(!isHumanPrompt({ role: 'user', content: [{ type: 'tool_result', content: 'r' }] }), 'a tool-result-only user message is NOT a human prompt');
+ok(!isHumanPrompt({ role: 'assistant', content: [{ type: 'text', text: 'x' }] }), 'an assistant message is not a human prompt');
 
-test('currentTurnEntries starts at the human prompt and KEEPS early-turn tool results (the bug fix)', () => {
+// currentTurnEntries: last user → end.
+{
   const entries = [
-    human('first turn'),
-    assistantText('done first'),
-    human('do a thing'),          // <- turn start
-    assistantTool('Bash', { command: 'git merge' }),
-    toolResultUser('[main abc1234] merged'), // early tool_result the naive parser dropped
-    assistantTool('Edit', { file_path: 'a.mjs' }),
-    assistantText('finished'),
+    { role: 'user', message: { role: 'user', content: 'first' } },
+    { role: 'assistant', message: { role: 'assistant', content: 'reply1' } },
+    { role: 'user', message: { role: 'user', content: 'second' } },
+    { role: 'assistant', message: { role: 'assistant', content: 'reply2' } },
   ];
   const turn = currentTurnEntries(entries);
-  assert.equal(turn[0].message.content[0].text, 'do a thing');
-  // the early git-merge tool_result must be inside the captured turn
-  const sawMerge = turn.some((e) => contentBlocks(e).some((b) => toolResultText(b).includes('merged')));
-  assert.equal(sawMerge, true);
-});
+  ok(turn.length === 2 && roleOf(turn[0]) === 'user', 'currentTurnEntries starts at the last user prompt');
+  ok(currentTurnEntries([]).length === 0, 'no entries → []');
+  ok(lastAssistantText(entries) === 'reply2', 'lastAssistantText is the newest assistant text');
+  ok(lastUserText(entries) === 'second', 'lastUserText is the newest user text');
+}
+// currentTurnEntries anchors on the HUMAN prompt, keeping an early tool_result in-turn.
+{
+  const entries = [
+    { role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'do it' }] } },
+    { role: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'merge output' }] } },
+    { role: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } },
+  ];
+  const turn = currentTurnEntries(entries);
+  ok(turn.length === 3, 'turn keeps the tool-result user message (anchored on the human prompt, not the tool result)');
+}
 
-test('currentTurnEntries returns [] when there is no assistant entry', () => {
-  assert.deepEqual(currentTurnEntries([human('hi')]), []);
-});
+// lastAssistantText skips a trailing tool-use-only assistant message and returns the real reply.
+{
+  const entries = [
+    { role: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'I fixed it' }] } },
+    { role: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash' }] } },
+  ];
+  ok(lastAssistantText(entries) === 'I fixed it', 'lastAssistantText skips a tool-only trailing message');
+}
 
-test('lastAssistantText accepts a pre-parsed entries array', () => {
-  const entries = [human('q'), assistantText('answer one'), human('q2'), assistantText('answer two')];
-  assert.equal(lastAssistantText(entries), 'answer two');
-});
+// Path-taking wrappers fold readTranscript + getter together.
+{
+  const dir = mkdtempSync(join(tmpdir(), 'transcript-wrap-'));
+  const transcriptPath = join(dir, 't.jsonl');
+  writeFileSync(transcriptPath, [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'go' }] } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } }),
+  ].join('\n'));
+  ok(lastAssistantTextOf(transcriptPath) === 'done', 'lastAssistantTextOf reads reply from a path');
+  ok(lastUserTextOf(transcriptPath) === 'go', 'lastUserTextOf reads user text from a path');
+  ok(lastAssistantTextOf('/nope/missing.jsonl') === '', 'wrappers fail-safe on a missing file');
+}
 
-test('lastAssistantText accepts a transcript PATH (unified signature)', () => {
-  const path = join(tmpdir(), `transcript-test-${process.pid}.jsonl`);
-  const lines = [human('q'), assistantText('from disk')].map((e) => JSON.stringify(e)).join('\n');
-  writeFileSync(path, lines);
-  try {
-    assert.equal(lastAssistantText(path), 'from disk');
-    assert.equal(readTranscript(path).length, 2);
-  } finally {
-    rmSync(path, { force: true });
-  }
-});
-
-test('readTranscript returns [] for a missing path and skips garbled lines', () => {
-  assert.deepEqual(readTranscript('/no/such/file.jsonl'), []);
-  const path = join(tmpdir(), `transcript-garbled-${process.pid}.jsonl`);
-  writeFileSync(path, `${JSON.stringify(human('ok'))}\nNOT JSON\n`);
-  try {
-    assert.equal(readTranscript(path).length, 1);
-  } finally {
-    rmSync(path, { force: true });
-  }
-});
+console.log(`transcript.test.mjs — ${passed} checks passed`);

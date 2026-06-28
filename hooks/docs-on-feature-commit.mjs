@@ -7,7 +7,7 @@
  *   • Stop: if THIS TURN made ANY git commit whose message is not a docs commit, and never updated
  *     the available docs, BLOCK the turn until the docs are updated (or it's explicitly exempt).
  *
- * The rule: trigger on a commit for ANYTHING — unless the word "docs"
+ * Russell's rule (2026-06-20, restated): trigger on a commit for ANYTHING — unless the word "docs"
  * is in the commit message (which marks it as the docs commit itself). The first cut was feat-only
  * and missed a `fix(...)` commit; the corrected rule is "every commit must move the available docs
  * unless it IS a docs commit." "The available documentation" is whatever the repo keeps: a README
@@ -42,28 +42,7 @@ function commandUpdatesDocs(command) {
   return /(>>|>|\bgit\s+add\b|\btee\b|Set-Content|Out-File|writeFileSync|cp\b|mv\b)/i.test(command);
 }
 
-// ── transcript helpers (shared shape with learnings-write-nudge) ───────────────
-function readTranscript(transcriptPath) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return [];
-  try {
-    return readFileSync(transcriptPath, 'utf8').split('\n').filter(Boolean)
-      .map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
-  } catch { return []; }
-}
-function roleOf(entry) { return entry.message?.role || entry.role || entry.type || ''; }
-function contentBlocks(entry) {
-  const blocks = entry.message?.content ?? entry.content ?? [];
-  if (typeof blocks === 'string') return [{ type: 'text', text: blocks }];
-  return Array.isArray(blocks) ? blocks : [];
-}
-function currentTurnEntries(entries) {
-  let lastAssistant = -1;
-  for (let i = entries.length - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'assistant') { lastAssistant = i; break; } }
-  if (lastAssistant < 0) return [];
-  let turnStart = 0;
-  for (let i = lastAssistant - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'user') { turnStart = i; break; } }
-  return entries.slice(turnStart);
-}
+import { readTranscript, roleOf, contentBlocks, currentTurnEntries } from './lib/transcript.mjs';
 
 // ── Stop: hard gate ────────────────────────────────────────────────────────────
 function onStop(hookEvent) {
@@ -102,7 +81,7 @@ function onStop(hookEvent) {
     reason: [
       'DOCS UPDATE REQUIRED — you committed this turn but never moved the available documentation.',
       '',
-      "The rule: EVERY commit must update the available docs — unless the commit is",
+      "Russell's rule (2026-06-20): EVERY commit must update the available docs — unless the commit is",
       'itself a docs commit (the word "docs" in its message). The canonical docs are the README (or a',
       'docs/ tree, or CHANGELOG). HANDOFF/plans/learnings do NOT count.',
       '',
@@ -141,7 +120,7 @@ function onPostToolUse(hookEvent) {
         '=== DOCS WRITE NUDGE ===',
         `Commit didn't touch docs: ${committedFiles.slice(0, 4).join(', ')}`,
         '',
-        "The rule: every commit must move the available documentation (README / docs/) — unless",
+        "Russell's rule: every commit must move the available documentation (README / docs/) — unless",
         "it's a docs commit. Update it now and commit, or the Stop gate will require it before you finish.",
       ].join('\n'),
     },

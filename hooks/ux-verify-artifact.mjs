@@ -47,42 +47,7 @@ function findProjectRoot(startDirectory) {
 	return null;
 }
 
-function parseTranscript(transcriptPath) {
-	if (!transcriptPath || !existsSync(transcriptPath)) return [];
-	try {
-		return readFileSync(transcriptPath, 'utf8')
-			.split('\n').filter(Boolean)
-			.map((entryLine) => { try { return JSON.parse(entryLine); } catch { return null; } })
-			.filter(Boolean);
-	} catch { return []; }
-}
-
-function roleOf(entry) {
-	return entry.message?.role || entry.role || entry.type || '';
-}
-
-function contentBlocks(entry) {
-	const blocks = entry.message?.content ?? entry.content ?? [];
-	if (typeof blocks === 'string') return [{ type: 'text', text: blocks }];
-	return Array.isArray(blocks) ? blocks : [];
-}
-
-function toolUsesFromEntry(entry) {
-	return contentBlocks(entry).filter((blk) => blk?.type === 'tool_use');
-}
-
-function currentTurnEntries(allEntries) {
-	let lastAssistantIdx = -1;
-	for (let i = allEntries.length - 1; i >= 0; i--) {
-		if (roleOf(allEntries[i]) === 'assistant') { lastAssistantIdx = i; break; }
-	}
-	if (lastAssistantIdx < 0) return [];
-	let turnStartIdx = 0;
-	for (let i = lastAssistantIdx - 1; i >= 0; i--) {
-		if (roleOf(allEntries[i]) === 'user') { turnStartIdx = i; break; }
-	}
-	return allEntries.slice(turnStartIdx);
-}
+import { readTranscript, roleOf, contentBlocks, toolUsesOf, currentTurnEntries } from './lib/transcript.mjs';
 
 function visualEditsInTurn(turnEntries) {
 	const visualEdits = [];
@@ -90,7 +55,7 @@ function visualEditsInTurn(turnEntries) {
 		if (roleOf(entry) !== 'assistant') continue;
 		const entryTimestamp = entry.timestamp || entry.message?.timestamp;
 		const entryTimeMs = entryTimestamp ? Date.parse(entryTimestamp) : Date.now();
-		for (const toolUse of toolUsesFromEntry(entry)) {
+		for (const toolUse of toolUsesOf(entry)) {
 			if (!/^(Write|Edit|MultiEdit|NotebookEdit)$/i.test(toolUse.name || '')) continue;
 			const targetFilePath = toolUse.input?.file_path || toolUse.input?.path || '';
 			if (!targetFilePath) continue;
@@ -160,7 +125,7 @@ function main() {
 	const hookEvent = readHookEvent();
 	if (hookEvent.stop_hook_active) return;
 
-	const turnEntries = currentTurnEntries(parseTranscript(hookEvent.transcript_path));
+	const turnEntries = currentTurnEntries(readTranscript(hookEvent.transcript_path));
 	if (turnEntries.length === 0) return;
 
 	const visualEdits = visualEditsInTurn(turnEntries);

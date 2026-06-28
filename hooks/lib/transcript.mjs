@@ -82,10 +82,18 @@ export function currentTurnEntries(entries) {
   return entries.slice(turnStart);
 }
 
-/** Text of the most recent assistant entry (''). */
+/**
+ * Text of the most recent assistant REPLY — the last assistant entry that actually carries text.
+ * Trailing assistant messages may be tool_use-only (no prose); those are skipped so callers scanning
+ * "the reply" for phrases get the real words, not ''.
+ */
 export function lastAssistantText(entries) {
   for (let i = entries.length - 1; i >= 0; i--) {
-    if (roleOf(entries[i]) === 'assistant') return textOf(entries[i]);
+    if (roleOf(entries[i]) !== 'assistant') continue;
+    const reply = contentBlocks(entries[i])
+      .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text).join('\n');
+    if (reply) return reply;
   }
   return '';
 }
@@ -97,10 +105,24 @@ export function lastUserText(entries) {
       const blocks = entries[i]?.message?.content ?? entries[i]?.content;
       if (typeof blocks === 'string') return blocks;
       if (Array.isArray(blocks)) {
-        const textBlocks = blocks.filter((block) => block?.type === 'text');
+        const textBlocks = blocks.filter((block) => block?.type === 'text' && typeof block.text === 'string');
         if (textBlocks.length > 0) return textBlocks.map((block) => block.text).join('\n');
       }
     }
   }
   return '';
+}
+
+// ── path-taking convenience wrappers ─────────────────────────────────────────
+// Many Stop hooks only want "the last reply text" / "the last user text" straight from a transcript path.
+// These fold readTranscript + the entries-based getter into one call (was ~8 hand-rolled copies each).
+
+/** Last assistant reply text, read straight from a transcript file path (''). */
+export function lastAssistantTextOf(transcriptPath) {
+  return lastAssistantText(readTranscript(transcriptPath));
+}
+
+/** Last genuine user text, read straight from a transcript file path (''). */
+export function lastUserTextOf(transcriptPath) {
+  return lastUserText(readTranscript(transcriptPath));
 }

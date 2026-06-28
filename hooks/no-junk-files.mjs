@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Stop hook — block stopping while throwaway/scratch files are sitting in the project.
 //
-// Past sessions leave scratch/throwaway files behind — often 40+
+// Russell, 2026-06-14: "the filebrain folder is full of junk." Past sessions left 40+
 // `tmp-claude-*.png` screenshots, `tmp-*.mjs` probes, `scan-*.mjs` one-offs, and `.git/COMMIT_*.txt`
 // scratch scattered in the repo. This hook fires at Stop, lists the junk, and blocks until each file
 // is either DELETED (the default for scratch) or kept deliberately — so junk never accumulates again.
@@ -28,20 +28,7 @@ const JUNK_PATTERNS = [
 // In .git/, these are scratch I drop while committing (message files, one-off scripts).
 const GIT_JUNK_PATTERNS = [/^COMMIT_.*\.txt$/i, /\.(mjs|cjs)$/i];
 
-function lastAssistantText(transcriptPath) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return '';
-  let content;
-  try { content = readFileSync(transcriptPath, 'utf8'); } catch { return ''; }
-  for (const line of content.trim().split('\n').reverse()) {
-    let entry;
-    try { entry = JSON.parse(line); } catch { continue; }
-    if (entry.type !== 'assistant') continue;
-    const blocks = entry.message?.content || [];
-    const messageText = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n');
-    if (messageText) return messageText;
-  }
-  return '';
-}
+import { lastAssistantTextOf } from './lib/transcript.mjs';
 
 function junkInDir(dir, patterns) {
   if (!existsSync(dir)) return [];
@@ -60,7 +47,7 @@ async function main() {
   const cwd = payload.cwd || process.cwd();
 
   // Honor an explicit keep override.
-  if (/keep-junk:/i.test(lastAssistantText(payload.transcript_path))) { process.exit(0); return; }
+  if (/keep-junk:/i.test(lastAssistantTextOf(payload.transcript_path))) { process.exit(0); return; }
 
   const rootJunk = junkInDir(cwd, JUNK_PATTERNS);
   const gitJunk = junkInDir(join(cwd, '.git'), GIT_JUNK_PATTERNS).map((name) => `.git/${name}`);
@@ -71,7 +58,7 @@ async function main() {
   const more = junk.length > shown.length ? `\n  …and ${junk.length - shown.length} more` : '';
   process.stdout.write(JSON.stringify({
     decision: 'block',
-    reason: `STOP-BLOCKED — throwaway/scratch files left in the project.
+    reason: `STOP-BLOCKED — throwaway/scratch files left in the project (Russell: "full of junk").
 
 Found ${junk.length} scratch file(s) in ${cwd}:
   ${shown.join('\n  ')}${more}

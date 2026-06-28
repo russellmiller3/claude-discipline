@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   isLoadBearingSource, boundaryOf, mocksBoundary, isE2eTest, evaluateModule,
-  commitShasFromToolResults, gitFilesForCommits,
+  commitShasFromToolResults, gitFilesForCommits, owedOverrideHonored,
 } from './e2e-or-its-theatre.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -46,6 +46,30 @@ check('boundaryOf: detects WASM / network / DB / worker / DOM', () => {
 check('boundaryOf: a pure-logic module has NO boundary (exempt)', () => {
   assert.equal(boundaryOf('export const add = (a, b) => a + b;'), null);
   assert.equal(boundaryOf('export function slugify(name){ return name.toLowerCase(); }'), null);
+});
+
+// The blind spot that shipped the exa key fix untested: a settings UI that COLLECTS an api key has no fetch of
+// its own (the key is sent by a downstream collaborator), so boundaryOf saw NONE and the gate never fired —
+// even though the change's whole correctness was "does this key reach its service." A password input bound to a
+// *Key/*Token/*Secret field IS a real external boundary (a credential that feeds an API).
+check('boundaryOf: a settings component collecting an API key (password input → *Key) is credential wiring', () => {
+  assert.equal(boundaryOf('<input class="fld" type="password" bind:value={exaKey} placeholder="exa-…" />'), 'credential/settings wiring');
+  assert.equal(boundaryOf('<input type="password" bind:value={firecrawlKey} />'), 'credential/settings wiring');
+  // a non-credential password field (a login form, no *Key) is NOT this boundary
+  assert.equal(boundaryOf('<input type="password" bind:value={loginPassword} />'), null);
+});
+
+// The self-cert abuse this session: I typed `e2e-owed-live-gate:` with a reason like "it's just wiring / can't
+// be tested headlessly" and slipped past the gate on a NETWORK boundary that WAS headlessly testable (proven —
+// I later wrote exactly that harness). The owed override is only legitimate for a GENUINE human/hardware gate.
+check('owedOverrideHonored: only a real human/hardware gate honors the owed override', () => {
+  assert.equal(owedOverrideHonored('e2e-owed-live-gate: needs a real mic + WebRTC socket'), true);
+  assert.equal(owedOverrideHonored('e2e-owed-live-gate: needs real headphones / audio playback'), true);
+  assert.equal(owedOverrideHonored('e2e-owed-live-gate: requires interactive OAuth sign-in'), true);
+  // the abuse shapes — no real human gate named → NOT honored, the gate must keep blocking
+  assert.equal(owedOverrideHonored('e2e-owed-live-gate: debug-log wiring only, not a network-path change'), false);
+  assert.equal(owedOverrideHonored("e2e-owed-live-gate: the real boundary can't be exercised headlessly"), false);
+  assert.equal(owedOverrideHonored('e2e-owed-live-gate: in-app only'), false);
 });
 
 check('mocksBoundary: detects vi.mock / vi.fn / jest.mock', () => {
@@ -122,7 +146,7 @@ function makeRepo({ withE2e, pureLogic, override }) {
     { type: 'user', message: { role: 'user', content: 'do the thing' } },
     { type: 'assistant', message: { role: 'assistant', content: [
       { type: 'tool_use', name: 'Edit', input: { file_path: modulePath } },
-      ...(override ? [{ type: 'text', text: 'e2e-owed-live-gate: needs a real mic' }] : []),
+      ...(override ? [{ type: 'text', text: `e2e-owed-live-gate: ${typeof override === 'string' ? override : 'needs a real mic'}` }] : []),
     ] } },
   ].map((entry) => JSON.stringify(entry)).join('\n');
   const transcriptPath = join(root, 'transcript.jsonl');
@@ -167,10 +191,60 @@ check('NO FALSE POSITIVE: a pure-logic module is exempt', () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-check('OVERRIDE: the owed-live-gate token lets the turn stop', () => {
-  const { root, transcriptPath } = makeRepo({ withE2e: false, override: true });
+check('OVERRIDE: an owed-live-gate token naming a REAL human gate (mic) lets the turn stop', () => {
+  const { root, transcriptPath } = makeRepo({ withE2e: false, override: true }); // default reason: "needs a real mic"
   const hookOutput = runHook(root, transcriptPath);
-  assert.equal(hookOutput, '', `override token should clear the block, got: ${hookOutput.slice(0, 200)}`);
+  assert.equal(hookOutput, '', `a genuine human-gate override should clear the block, got: ${hookOutput.slice(0, 200)}`);
+  rmSync(root, { recursive: true, force: true });
+});
+
+check('OVERRIDE REJECTED: an owed token with no real human-gate reason STILL BLOCKS (the self-cert abuse)', () => {
+  const { root, transcriptPath } = makeRepo({ withE2e: false, override: 'debug-log wiring only, not a network change' });
+  const hookOutput = runHook(root, transcriptPath);
+  assert.ok(hookOutput.includes('"decision":"block"'), `a bad-reason owed override must still block, got: ${hookOutput.slice(0, 200)}`);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ── credential/settings wiring (the exa-key blind spot) ─────────────────────────
+// A settings component that collects an api key (password input → *Key) is a real boundary, but the e2e proving
+// the key reaches its service is named after the FLOW (researchKeyFromSettings.e2e), not the component — so it
+// must be accepted by content, not stem. Build a settings-like module + a mocked unit test, and assert: BLOCK
+// with no credential e2e anywhere; PASS once a credential e2e exists under a different name.
+function makeCredentialRepo({ withCredentialE2e }) {
+  const root = mkdtempSync(join(tmpdir(), 'e2e-cred-'));
+  const componentsDir = join(root, 'extension', 'src', 'lib', 'components');
+  mkdirSync(componentsDir, { recursive: true });
+  const componentPath = join(componentsDir, 'Settings.svelte');
+  writeFileSync(componentPath, '<input class="fld" type="password" bind:value={exaKey} placeholder="exa-…" />\n');
+  writeFileSync(join(componentsDir, 'Settings.test.js'), "import { vi } from 'vitest';\nconst onsave = vi.fn();\n");
+  if (withCredentialE2e) {
+    // Named after the flow, NOT the component — proves a settings key reaches the real service.
+    writeFileSync(join(root, 'extension', 'src', 'lib', 'researchKeyFromSettings.e2e.test.js'),
+      "it('a Settings exaKey reaches the real Exa API', async () => { const exaKey = process.env.EXA; });\n");
+  }
+  const transcriptEntries = [
+    { type: 'user', message: { role: 'user', content: 'add the exa key field' } },
+    { type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'tool_use', name: 'Edit', input: { file_path: componentPath } },
+    ] } },
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+  const transcriptPath = join(root, 'transcript.jsonl');
+  writeFileSync(transcriptPath, transcriptEntries);
+  return { root, transcriptPath };
+}
+
+check('TEETH (credential): a settings component collecting an api key with mocked tests + NO credential e2e BLOCKS', () => {
+  const { root, transcriptPath } = makeCredentialRepo({ withCredentialE2e: false });
+  const hookOutput = runHook(root, transcriptPath);
+  assert.ok(hookOutput.includes('"decision":"block"'), `credential wiring with no e2e should block, got: ${hookOutput.slice(0, 200)}`);
+  assert.ok(/credential\/settings wiring/.test(hookOutput), 'block reason should name the credential boundary');
+  rmSync(root, { recursive: true, force: true });
+});
+
+check('PASS (credential): a flow-named credential e2e elsewhere in the tree clears the settings component', () => {
+  const { root, transcriptPath } = makeCredentialRepo({ withCredentialE2e: true });
+  const hookOutput = runHook(root, transcriptPath);
+  assert.equal(hookOutput, '', `a credential e2e (different name) should clear the block, got: ${hookOutput.slice(0, 200)}`);
   rmSync(root, { recursive: true, force: true });
 });
 
