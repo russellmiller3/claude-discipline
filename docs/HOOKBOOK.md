@@ -6,6 +6,15 @@ Per-hook reference for Claude Discipline — **~40 hooks** across PreToolUse, Po
 
 Every hook is dependency-free Node (`.mjs`), **fails open** on any parse error (a broken hook never wedges Claude Code), and has an explicit override. Overrides are environment variables unless noted.
 
+### Shared library — `hooks/lib/transcript.mjs`
+
+The transcript-reading Stop / UserPromptSubmit hooks share one set of JSONL helpers instead of each hand-rolling them: `readTranscript`, `roleOf`, `contentBlocks`, `toolUsesOf`, `currentTurnEntries`, `lastAssistantText` / `lastAssistantTextOf`, `lastUserText` / `lastUserTextOf`, `toolResultText`, `isHumanPrompt`. `currentTurnEntries` anchors on the last *human* prompt (so early tool-results stay in-turn); `lastAssistantText` skips a trailing tool-only assistant message. Re-implementing one of these in a hook is blocked by `hook-dry-review` (below) — import from the lib instead.
+
+### Recent additions (2026-06-28)
+
+- **`hook-dry-review.mjs`** (PreToolUse Write/Edit/MultiEdit) — editing or creating a hook forces a DRY review: BLOCKS a hook write that hand-rolls a `lib/transcript.mjs` helper instead of importing it. Override: `dry-reviewed: <why>` in the edit, or `HOOK_DRY_OVERRIDE=1`.
+- **`self-verify-before-asking.mjs`** (Stop) — in builder mode, BLOCKS a reply that asks the user to TEST/VERIFY work the agent could verify itself, unless it names a genuine environment/hardware/visual reason. Override: name the real reason, or `self-verify-override: <why>`.
+
 ---
 
 ## Tier 1 — Standalone (work anywhere, zero config)
