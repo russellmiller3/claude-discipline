@@ -1,78 +1,106 @@
-// transcript.mjs — shared helpers for Claude Code hooks that read the hook event (on stdin) and the
-// session transcript (the JSONL log of the conversation). Extracted because nearly every Stop / PostToolUse
-// hook re-implemented these, and the copies had DRIFTED: three incompatible `lastAssistantText` signatures,
-// and a `currentTurnEntries` that started mid-turn and silently dropped early tool_results (so a `git merge`
-// printed early in a turn was invisible to the gate). One canonical, bug-fixed copy lives here.
+// transcript.mjs — shared transcript-parsing helpers for Stop / UserPromptSubmit hooks.
 //
-// Dependency-free. Import from a hook in hooks/ with:  import { ... } from './lib/transcript.mjs';
+// Before 2026-06-28 these were copy-pasted into ~15 hooks (readTranscript) and ~12 (the
+// roleOf/contentBlocks/toolUsesOf trio), each with tiny drift. This is the single canonical home;
+// `hook-dry-review.mjs` blocks any new hook that hand-rolls one of these instead of importing it.
+//
+// A Claude Code transcript is JSONL: one JSON object per line. Each entry is a user/assistant/tool
+// message. These helpers normalize the two shapes seen in the wild (`entry.message.{role,content}`
+// and the flatter `entry.{role,content,type}`) so callers never branch on it.
 
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
-// Read the hook event JSON from stdin (fd 0). Fail-open to {} so a parse error never breaks a hook —
-// each caller decides whether an empty event means "no-op".
-export function readHookEvent() {
-  try { return JSON.parse(readFileSync(0, 'utf8') || '{}'); } catch { return {}; }
-}
-
-// Parse a transcript JSONL file into an array of entries (skips blank/garbled lines). [] on any error.
+/** Parse a JSONL transcript file into an array of entries. Missing file / bad lines → []. Never throws. */
 export function readTranscript(transcriptPath) {
   if (!transcriptPath || !existsSync(transcriptPath)) return [];
   try {
-    return readFileSync(transcriptPath, 'utf8').split('\n').filter(Boolean)
+    return readFileSync(transcriptPath, 'utf8')
+      .split('\n').filter(Boolean)
       .map((line) => { try { return JSON.parse(line); } catch { return null; } })
       .filter(Boolean);
   } catch { return []; }
 }
 
-// The role/type of an entry, tolerant of the two transcript shapes (message-wrapped or flat).
-export function roleOf(entry) { return entry?.message?.role || entry?.role || entry?.type || ''; }
-
-// An entry's content blocks, normalized to an array. A bare string becomes one text block.
-export function contentBlocks(entry) {
-  const blocks = entry?.message?.content ?? entry?.content ?? [];
-  if (typeof blocks === 'string') return [{ type: 'text', text: blocks }];
-  return Array.isArray(blocks) ? blocks : [];
+/** The role of an entry: 'user' | 'assistant' | tool/type fallback | ''. */
+export function roleOf(entry) {
+  return entry?.message?.role || entry?.role || entry?.type || '';
 }
 
-// The tool_use blocks in an entry (what the assistant called this step).
-export function toolUsesOf(entry) { return contentBlocks(entry).filter((b) => b?.type === 'tool_use'); }
+/** Normalize an entry's content to an array of blocks. A bare string becomes one text block. */
+export function contentBlocks(entry) {
+  const content = entry?.message?.content ?? entry?.content ?? [];
+  if (typeof content === 'string') return [{ type: 'text', text: content }];
+  return Array.isArray(content) ? content : [];
+}
 
-// Flatten a tool_result block to plain text (its content may be a string or an array of {text}/string parts).
+/** All text in an entry, blocks joined by newline (handles string blocks and {text}/{content} blocks). */
+export function textOf(entry) {
+  return contentBlocks(entry)
+    .map((block) => (typeof block === 'string' ? block : block?.text || block?.content || ''))
+    .join('\n');
+}
+
+/** Just the tool_use blocks in an entry. */
+export function toolUsesOf(entry) {
+  return contentBlocks(entry).filter((block) => block?.type === 'tool_use');
+}
+
+/** Flatten a tool_result block's content to plain text (it may be a string or an array of {text}/string parts). */
 export function toolResultText(block) {
   if (block?.type !== 'tool_result') return '';
   const inner = block.content;
   if (typeof inner === 'string') return inner;
-  if (Array.isArray(inner)) return inner.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('\n');
+  if (Array.isArray(inner)) return inner.map((part) => (typeof part === 'string' ? part : part?.text || '')).join('\n');
   return '';
 }
 
-// A real human prompt (not a tool-result carrier): a user-role message that has actual text. Tool results
-// come back as user-role messages whose blocks are all tool_result — those are NOT turn starts.
+/**
+ * A REAL human prompt — a user message carrying actual text. Tool results come back as user-role messages
+ * whose blocks are all `tool_result`; those are NOT turn starts.
+ */
 export function isHumanPrompt(entry) {
   if (roleOf(entry) !== 'user') return false;
-  return contentBlocks(entry).some((b) => b.type === 'text' && (b.text || '').trim().length > 0);
+  return contentBlocks(entry).some((block) => block.type === 'text' && (block.text || '').trim().length > 0);
 }
 
-// The current turn: from the last HUMAN prompt through the end. (The naive version started at the last user
-// message before the last assistant — on a multi-step tool turn that began mid-turn and dropped earlier
-// tool_results. Starting at the human prompt captures the whole turn, including early tool output.)
+/**
+ * Entries belonging to the CURRENT turn: from the last HUMAN prompt through the end of the transcript.
+ * Empty when there's no assistant entry yet. Anchoring on the human prompt (not just any user message)
+ * keeps early tool_results in-turn — the simpler "last user before last assistant" version started mid-turn
+ * on a multi-step tool turn and dropped an early `git merge` result. Empty when there's no assistant yet.
+ */
 export function currentTurnEntries(entries) {
   let lastAssistant = -1;
-  for (let i = entries.length - 1; i >= 0; i--) { if (roleOf(entries[i]) === 'assistant') { lastAssistant = i; break; } }
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (roleOf(entries[i]) === 'assistant') { lastAssistant = i; break; }
+  }
   if (lastAssistant < 0) return [];
   let turnStart = 0;
-  for (let i = lastAssistant; i >= 0; i--) { if (isHumanPrompt(entries[i])) { turnStart = i; break; } }
+  for (let i = lastAssistant; i >= 0; i--) {
+    if (isHumanPrompt(entries[i])) { turnStart = i; break; }
+  }
   return entries.slice(turnStart);
 }
 
-// The text of the last assistant message. Accepts EITHER a transcript path (string) or a pre-parsed entries
-// array — unifying the three drifted signatures that existed across hooks, so a caller can't pass the wrong type.
-export function lastAssistantText(pathOrEntries) {
-  const entries = typeof pathOrEntries === 'string' ? readTranscript(pathOrEntries) : (pathOrEntries || []);
+/** Text of the most recent assistant entry (''). */
+export function lastAssistantText(entries) {
   for (let i = entries.length - 1; i >= 0; i--) {
-    if (roleOf(entries[i]) !== 'assistant') continue;
-    const textBlocks = contentBlocks(entries[i]).filter((b) => b && b.type === 'text');
-    if (textBlocks.length > 0) return textBlocks.map((b) => b.text).join('\n');
+    if (roleOf(entries[i]) === 'assistant') return textOf(entries[i]);
+  }
+  return '';
+}
+
+/** Text of the most recent user entry — only its text blocks, never tool results (''). */
+export function lastUserText(entries) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (roleOf(entries[i]) === 'user') {
+      const blocks = entries[i]?.message?.content ?? entries[i]?.content;
+      if (typeof blocks === 'string') return blocks;
+      if (Array.isArray(blocks)) {
+        const textBlocks = blocks.filter((block) => block?.type === 'text');
+        if (textBlocks.length > 0) return textBlocks.map((block) => block.text).join('\n');
+      }
+    }
   }
   return '';
 }

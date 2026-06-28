@@ -69,22 +69,7 @@ export function uncommittedForChanged(porcelainText, changedBasenames) {
     .filter((line) => /settings\.json/.test(line) || basenames.some((basename) => line.includes(basename)));
 }
 
-// ── transcript plumbing (same shape as hookbook-sync) ──
-function readTranscript(path) {
-  if (!path || !existsSync(path)) return [];
-  try {
-    return readFileSync(path, 'utf8').split('\n').filter(Boolean)
-      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
-      .filter(Boolean);
-  } catch { return []; }
-}
-function roleOf(entry) { return entry.message?.role || entry.role || entry.type || ''; }
-function contentBlocks(entry) {
-  const blocks = entry.message?.content ?? entry.content ?? [];
-  if (typeof blocks === 'string') return [{ type: 'text', text: blocks }];
-  return Array.isArray(blocks) ? blocks : [];
-}
-function toolUsesOf(entry) { return contentBlocks(entry).filter((block) => block?.type === 'tool_use'); }
+import { readTranscript, roleOf, toolUsesOf } from './lib/transcript.mjs';
 
 // Basenames of live hook files (incl. *.test.mjs) written/edited this turn.
 const LIVE_HOOK_PATH_RE = /[/\\]\.claude[/\\]hooks[/\\]([a-z0-9._-]+\.mjs)/i;

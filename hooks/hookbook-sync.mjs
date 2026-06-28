@@ -41,27 +41,7 @@ function isRegisteredHookPath(filePath, registeredBasenames) {
   return registeredBasenames.has(basename);
 }
 
-function readTranscript(path) {
-  if (!path || !existsSync(path)) return [];
-  try {
-    return readFileSync(path, 'utf8')
-      .split('\n').filter(Boolean)
-      .map(line => { try { return JSON.parse(line); } catch { return null; } })
-      .filter(Boolean);
-  } catch { return []; }
-}
-
-function roleOf(e) { return e.message?.role || e.role || e.type || ''; }
-
-function contentBlocks(e) {
-  const c = e.message?.content ?? e.content ?? [];
-  if (typeof c === 'string') return [{ type: 'text', text: c }];
-  return Array.isArray(c) ? c : [];
-}
-
-function toolUsesOf(e) {
-  return contentBlocks(e).filter(b => b?.type === 'tool_use');
-}
+import { readTranscript, roleOf, toolUsesOf } from './lib/transcript.mjs';
 
 function hookFileChangedThisSession(sessionEntries) {
   const registeredBasenames = registeredHookBasenames();
