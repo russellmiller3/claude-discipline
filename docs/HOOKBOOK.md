@@ -22,8 +22,11 @@ Blocks `git commit` while the current branch is `main`/`master`. Work on a branc
 ### `read-before-write` · PreToolUse(Edit|Write)
 Blocks editing/overwriting a file >200 lines that you haven't Read (or Written) this session — catches the "edit from stale memory → `old_string` mismatch → wasted retries" loop. New files and small files pass. **Config:** `READ_BEFORE_WRITE_LINES` (threshold). **Override:** `READ_BEFORE_WRITE_OVERRIDE=1`.
 
-### `pixels-only-proof` · Stop
-For a visual / "not rendering" bug, blocks "it's fixed / it renders" claims that cite DOM-level evidence (`toBeVisible`, `innerText`, `boundingBox`, `.toContain`, "in the DOM") when the turn never viewed a screenshot. An honest disclaimer ("not visually verified") or actually reading a `.png` clears it. **Override:** `PIXELS_PROOF_OVERRIDE=1`.
+### `visual-proof-required` · Stop
+ONE gate consolidating three near-duplicates (`verify-change-with-screenshot` + `ux-screenshot-required` + `pixels-only-proof`): a visual change/claim needs a REAL screenshot. Blocks Stop when, this turn, NOT overridden, NO real screenshot, AND any of: (A) edited a UI surface — union pattern `.svelte/.css/.scss/.html/.vue/.tsx/.jsx` + component/route/e2e paths (covers plain `.html` widgets); (B) claimed a visual element renders/shows/is-fixed citing DOM evidence (`toBeVisible`/`innerText`/`boundingBox`/`.toContain`/"in the DOM") with no disclaimer; (C) the "DOM is stronger than pixels" heresy (blocks regardless of screenshot). A screenshot tool that merely FIRED (or timed out) does NOT count — proof is a REAL captured image (an `image` part in a tool result, a `Read` of a `.png`, a `SendUserFile` image, or a harness result printing a `.png` path). **Override:** `visual-proof-skip: <why>` (legacy `verify-change-skip:` accepted).
+
+### `ux-verify-artifact` · Stop
+File-mtime sibling of `visual-proof-required`: blocks Stop when a UI file was edited but no screenshot file on disk has an mtime newer than the edit (catches "claimed verified" with a stale or absent capture).
 
 ### `tests-must-pass` · PostToolUse(Bash) + Stop
 A test failure drops a marker; Stop is blocked until a full-suite run comes back green. "Pre-existing" / "unrelated" is never an excuse to leave a red test. **Config:** `TESTS_FULL_SUITE_RE` (what counts as a clearing full run).
