@@ -71,6 +71,9 @@ export function uncommittedForChanged(porcelainText, changedBasenames) {
 
 import { readTranscript, roleOf, toolUsesOf } from './lib/transcript.mjs';
 
+// The file path a Write/Edit/MultiEdit tool use targeted.
+const editedPathOf = (toolUse) => toolUse.input?.file_path || toolUse.input?.path || '';
+
 // Basenames of live hook files (incl. *.test.mjs) written/edited this turn.
 const LIVE_HOOK_PATH_RE = /[/\\]\.claude[/\\]hooks[/\\]([a-z0-9._-]+\.mjs)/i;
 export function changedHookBasenames(turnEntries) {
@@ -80,8 +83,7 @@ export function changedHookBasenames(turnEntries) {
     for (const toolUse of toolUsesOf(entry)) {
       const name = toolUse.name || '';
       if (['Write', 'Edit', 'MultiEdit'].includes(name)) {
-        const editedPath = toolUse.input?.file_path || toolUse.input?.path || '';
-        const match = LIVE_HOOK_PATH_RE.exec(editedPath);
+        const match = LIVE_HOOK_PATH_RE.exec(editedPathOf(toolUse));
         if (match) changed.add(match[1].toLowerCase());
       }
       if (['Bash', 'PowerShell'].includes(name)) {
@@ -99,6 +101,41 @@ function gitPorcelain(repoDir) {
   try {
     return execSync('git status --porcelain', { cwd: repoDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch { return ''; }
+}
+
+// Did this session touch the kit's PUBLISHED docs (README or anything under docs/)? A hook change must move the
+// surface people actually read, not just the hook files. Pure + exported so the rule is unit-tested. Russell
+// 2026-06-29 ("update hookbook and claude-discipline folder and readme ... on editing hooks").
+const KIT_DOCS_PATH_RE = /claude-discipline[/\\](readme\.md|docs[/\\])/i;
+export function kitDocsTouchedThisSession(sessionEntries) {
+  for (const entry of sessionEntries) {
+    if (roleOf(entry) !== 'assistant') continue;
+    for (const toolUse of toolUsesOf(entry)) {
+      if (!['Write', 'Edit', 'MultiEdit'].includes(toolUse.name || '')) continue;
+      if (KIT_DOCS_PATH_RE.test(editedPathOf(toolUse))) return true;
+    }
+  }
+  return false;
+}
+
+// The kit is a PUBLISHED artifact — a local commit isn't "published" until it's on GitHub. Once the publish loop
+// is otherwise satisfied, push the kit's current branch (the KIT repo ONLY — never ~/.claude, which has no remote,
+// and never a project). Auto-pushes, then BLOCKS only if commits remain unpushed (so a failed/again-needed push
+// still has teeth). Runs git directly (not a Bash tool call) so it doesn't trip the no-push-without-permission
+// guard — Russell 2026-06-29 ("it should push in this case"). Disable the push half with DISCIPLINE_NO_PUSH=1.
+function ensureKitPushed(kitRoot) {
+  if (process.env.DISCIPLINE_NO_PUSH === '1') return null;
+  const git = (gitArgs) => execSync(`git ${gitArgs}`, { cwd: kitRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20000 }).trim();
+  let branch;
+  try {
+    branch = git('rev-parse --abbrev-ref HEAD');
+    git(`rev-parse --verify origin/${branch}`); // throws when there's no matching upstream → nothing to push
+  } catch { return null; }
+  const unpushedCount = () => { try { return Number(git(`rev-list --count origin/${branch}..HEAD`)); } catch { return 0; } };
+  if (unpushedCount() === 0) return null;                 // already in sync
+  try { git(`push origin ${branch}`); } catch { /* re-check below decides */ }
+  if (unpushedCount() === 0) return null;                 // pushed successfully
+  return `the kit has unpushed commit(s) on ${branch} — push it:\n  cd "${kitRoot}" && git push origin ${branch}`;
 }
 
 async function main() {
@@ -134,9 +171,21 @@ async function main() {
   const liveUncommitted = uncommittedForChanged(gitPorcelain(LIVE_REPO_DIR), changed);
   const kitUncommitted = uncommittedForChanged(gitPorcelain(kitRoot), changed);
 
-  if (!needing.length && !liveUncommitted.length && !kitUncommitted.length) process.exit(0); // all done
+  // The published surface (kit README / docs) must move too, and be committed so the push carries it.
+  const docsTouched = kitDocsTouchedThisSession(sessionEntries);
+  const kitDocsDirty = gitPorcelain(kitRoot).split('\n').filter(Boolean).filter((line) => /readme\.md|[/\\]docs[/\\]/i.test(line));
 
-  const lines = ['HOOK WORK NOT PUBLISHED — finish the full loop before stopping (copy to kit → update HOOKBOOK → commit BOTH repos).', ''];
+  if (!needing.length && !liveUncommitted.length && !kitUncommitted.length && docsTouched && !kitDocsDirty.length) {
+    // Sync + commits + docs are all done — the only thing left is getting it onto GitHub. Push the kit.
+    const pushReason = ensureKitPushed(kitRoot);
+    if (!pushReason) process.exit(0);                       // fully published (synced, committed, docs, pushed)
+    process.stdout.write(JSON.stringify({ decision: 'block', reason:
+      ['KIT NOT PUSHED — the publish loop is done but GitHub is behind.', '', pushReason, '',
+       'Override: DISCIPLINE_NO_PUSH=1 (gate without auto-push) or DISCIPLINE_SYNC_OVERRIDE=1.'].join('\n') }));
+    return;
+  }
+
+  const lines = ['HOOK WORK NOT PUBLISHED — finish the full loop before stopping (copy to kit → update kit README/HOOKBOOK → commit BOTH repos → push the kit).', ''];
   if (needing.length) {
     lines.push(`Kit: ${kitHooksDir}`, 'These changed hooks are NOT yet in the claude-discipline kit (or differ):');
     for (const { basename, reason } of needing) lines.push(`  • ${basename} (${reason})`);
@@ -152,6 +201,15 @@ async function main() {
     lines.push(`Uncommitted changes in the kit (${kitRoot}) — commit them:`);
     lines.push(`  cd "${kitRoot}" && git add -A && git commit -m "sync: publish hooks from ~/.claude"`, '');
   }
+  if (!docsTouched) {
+    lines.push('Kit docs NOT updated this session — a hook change must move the published surface people read:');
+    lines.push(`  • update ${join(kitRoot, 'README.md')} and/or ${join(kitRoot, 'docs', 'HOOKBOOK.md')} for what changed, then commit.`, '');
+  }
+  if (kitDocsDirty.length) {
+    lines.push('Uncommitted kit README/docs — commit them so the push carries them:');
+    lines.push(`  cd "${kitRoot}" && git add README.md docs && git commit -m "docs: ..."`, '');
+  }
+  lines.push('Once synced + committed + docs updated, the kit is pushed automatically (DISCIPLINE_NO_PUSH=1 to gate without push).');
   lines.push('Override (rare — a deliberately unpublished/local hook): DISCIPLINE_SYNC_OVERRIDE=1.');
   process.stdout.write(JSON.stringify({ decision: 'block', reason: lines.join('\n') }));
 }

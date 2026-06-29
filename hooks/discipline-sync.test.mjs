@@ -1,7 +1,22 @@
 // Tests for discipline-sync's pure core. Run: node --test discipline-sync.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hooksNeedingSync, changedHookBasenames, uncommittedForChanged } from './discipline-sync.mjs';
+import { hooksNeedingSync, changedHookBasenames, uncommittedForChanged, kitDocsTouchedThisSession } from './discipline-sync.mjs';
+
+const assistantEditing = (file_path) => ({ message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: { file_path } }] } });
+
+test('kitDocsTouchedThisSession: true when the kit README was edited', () => {
+  assert.equal(kitDocsTouchedThisSession([assistantEditing('C:/x/claude-discipline/README.md')]), true);
+});
+test('kitDocsTouchedThisSession: true when a kit docs/ file was edited', () => {
+  assert.equal(kitDocsTouchedThisSession([assistantEditing('/home/u/Desktop/programming/claude-discipline/docs/HOOKBOOK.md')]), true);
+});
+test('kitDocsTouchedThisSession: false for a kit HOOK edit (not docs)', () => {
+  assert.equal(kitDocsTouchedThisSession([assistantEditing('C:/x/claude-discipline/hooks/ross-perot-guard.mjs')]), false);
+});
+test('kitDocsTouchedThisSession: false when nothing in the kit was touched', () => {
+  assert.equal(kitDocsTouchedThisSession([assistantEditing('C:/x/.claude/hooks/foo.mjs')]), false);
+});
 
 // ── hooksNeedingSync ──
 test('flags a published hook whose live + kit copies differ as drift', () => {
