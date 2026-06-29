@@ -13,6 +13,7 @@ The transcript-reading Stop / UserPromptSubmit hooks share one set of JSONL help
 ### Recent additions (2026-06-29)
 
 - **`background-on-agent-spawn.mjs`** (PreToolUse `Agent`) — DENIES any Agent spawn missing `run_in_background: true`, forcing every agent (build OR read-only research) to run detached so a turn interrupt can't kill it (a foreground agent is owned by the turn, not the session). The companion worktree hook's `FOREGROUND_OK` deliberately does NOT bypass this. Override: `FOREGROUND_RUSSELL_OK` in the prompt. Locked by `background-on-agent-spawn.test.mjs` (6 cases).
+- **`cross-repo-worktree-on-agent-spawn.mjs`** (PreToolUse `Agent`) — DENIES an Agent spawn that drives a SIBLING repo by absolute path but lacks `git worktree add`. The Agent tool's `isolation: "worktree"` isolates the SESSION repo, not a sibling the brief operates on by path — so parallel agents share the sibling's single working tree and reset HEAD under each other (commits land on the wrong branch). Fix: the brief sets up its own worktree in the target repo. Escapes: `FOREGROUND_OK` (read-only), `CROSS_REPO_WORKTREE_RUSSELL_OK`. Locked by `cross-repo-worktree-on-agent-spawn.test.mjs` (9 cases).
 
 ### Recent additions (2026-06-28)
 
