@@ -10,6 +10,10 @@ Every hook is dependency-free Node (`.mjs`), **fails open** on any parse error (
 
 The transcript-reading Stop / UserPromptSubmit hooks share one set of JSONL helpers instead of each hand-rolling them: `readTranscript`, `roleOf`, `contentBlocks`, `toolUsesOf`, `currentTurnEntries`, `lastAssistantText` / `lastAssistantTextOf`, `lastUserText` / `lastUserTextOf`, `toolResultText`, `isHumanPrompt`. `currentTurnEntries` anchors on the last *human* prompt (so early tool-results stay in-turn); `lastAssistantText` skips a trailing tool-only assistant message. Re-implementing one of these in a hook is blocked by `hook-dry-review` (below) — import from the lib instead.
 
+### Recent additions (2026-06-29)
+
+- **`background-on-agent-spawn.mjs`** (PreToolUse `Agent`) — DENIES any Agent spawn missing `run_in_background: true`, forcing every agent (build OR read-only research) to run detached so a turn interrupt can't kill it (a foreground agent is owned by the turn, not the session). The companion worktree hook's `FOREGROUND_OK` deliberately does NOT bypass this. Override: `FOREGROUND_RUSSELL_OK` in the prompt. Locked by `background-on-agent-spawn.test.mjs` (6 cases).
+
 ### Recent additions (2026-06-28)
 
 - **`hook-dry-review.mjs`** (PreToolUse Write/Edit/MultiEdit) — editing or creating a hook forces a DRY review: BLOCKS a hook write that hand-rolls a `lib/transcript.mjs` helper instead of importing it. Override: `dry-reviewed: <why>` in the edit, or `HOOK_DRY_OVERRIDE=1`.
