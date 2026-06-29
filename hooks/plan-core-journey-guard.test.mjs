@@ -17,10 +17,16 @@ const planEvent = (filePath, content) => ({
   hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: filePath, content },
 });
 const ROOT = 'C:/proj';
-const deps = ({ northStar = null, proofExists = false } = {}) => ({
+const deps = ({ northStar = null, proofExists = false, existingPlan = '' } = {}) => ({
   projectRoot: ROOT,
   readNorthStar: () => northStar,
   fileExists: () => proofExists,
+  readFile: () => existingPlan,
+});
+
+const editEvent = (filePath, newString) => ({
+  hook_event_name: 'PreToolUse', tool_name: 'Edit',
+  tool_input: { file_path: filePath, old_string: 'x', new_string: newString },
 });
 
 // isPlanPath
@@ -91,6 +97,48 @@ test('ignores a non-plan file write', () => {
 // 7. A NORTH_STAR with no proof declared → nothing to check, allowed.
 test('allows when north-star declares no proof path', () => {
   assert.equal(decidePlanGate(planEvent('C:/proj/plans/plan-x.md', 'plan'), deps({ northStar: 'core_journey: x' })), null);
+});
+
+// 8. REGRESSION: a section Edit whose fragment doesn't mention the core journey is ALLOWED
+//    when the existing plan file (read whole) DOES address it. This is the incremental-
+//    authoring bug: the write-plan skill mandates section-by-section Edits.
+test('allows a section Edit when the whole existing plan addresses the core', () => {
+  const decision = decidePlanGate(
+    editEvent('C:/proj/plans/plan-wire.md', '## Edge cases\n- InMemoryStorage named differently'),
+    deps({
+      northStar: 'core_journey: x\nproof: tests/test_e2e.py',
+      proofExists: false,
+      existingPlan: '# Plan\nPhase 1: wire the brain to the engine end-to-end, creating tests/test_e2e.py.',
+    }),
+  );
+  assert.equal(decision, null);
+});
+
+// 9. The inverse still BLOCKS: neither the fragment nor the existing plan addresses the core.
+test('still blocks a section Edit when neither fragment nor existing plan addresses the core', () => {
+  const decision = decidePlanGate(
+    editEvent('C:/proj/plans/plan-component.md', '## Edge cases\n- handle empty input'),
+    deps({
+      northStar: 'core_journey: x\nproof: tests/test_e2e.py',
+      proofExists: false,
+      existingPlan: '# Plan\nAdd a third bridge adapter with full TDD coverage.',
+    }),
+  );
+  assert.ok(decision, 'expected a deny');
+  assert.match(decision.hookSpecificOutput.permissionDecisionReason, /UNWIRED/);
+});
+
+// 10. DEFER override works across the whole plan too (in the existing file, not this fragment).
+test('NORTH_STAR_DEFER_OK in the existing plan bypasses a later section Edit', () => {
+  const decision = decidePlanGate(
+    editEvent('C:/proj/plans/plan-component.md', '## More detail'),
+    deps({
+      northStar: 'core_journey: x\nproof: tests/test_e2e.py',
+      proofExists: false,
+      existingPlan: '# Plan\nbuild a part first. NORTH_STAR_DEFER_OK — foundation before the wire.',
+    }),
+  );
+  assert.equal(decision, null);
 });
 
 console.log(`\n${passedCount} passed`);

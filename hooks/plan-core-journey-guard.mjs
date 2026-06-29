@@ -49,7 +49,7 @@ export function parseNorthStar(northStarText) {
  * Decide on one PreToolUse Write/Edit event. Pure: callers inject `projectRoot`,
  * `readNorthStar(root) -> content|null`, and `fileExists(absPath) -> bool`.
  */
-export function decidePlanGate(event, { projectRoot, readNorthStar, fileExists }) {
+export function decidePlanGate(event, { projectRoot, readNorthStar, fileExists, readFile }) {
   const eventName = event.hook_event_name || event.hookEventName || '';
   if (eventName !== 'PreToolUse') return null;
   const toolName = event.tool_name || event.toolName || '';
@@ -59,9 +59,18 @@ export function decidePlanGate(event, { projectRoot, readNorthStar, fileExists }
   const filePath = input.file_path || input.path || '';
   if (!isPlanPath(filePath)) return null;
 
-  const planContent = String(
+  // The text of THIS write/edit (Write = full content; Edit/MultiEdit = the new fragment(s)).
+  const editText = String(
     input.content || input.new_string || (Array.isArray(input.edits) ? input.edits.map((edit) => edit.new_string || '').join('\n') : '') || ''
   );
+  // Judge the WHOLE plan, not just this fragment. A plan is authored section-by-section
+  // (the write-plan skill MANDATES incremental Edits), so an individual Edit's new_string
+  // rarely names the core journey even when the plan as a whole does. For an Edit/MultiEdit
+  // to an existing plan, fold in the file's current content so the keyword checks below see
+  // the full plan; a Write already carries the full content. (Fail-safe: if the file can't
+  // be read, fall back to the fragment alone.)
+  const existingPlan = (toolName !== 'Write' && typeof readFile === 'function') ? (readFile(filePath) || '') : '';
+  const planContent = `${existingPlan}\n${editText}`;
   if (/\bNORTH_STAR_DEFER_OK\b/.test(planContent)) return null;
 
   const northStarText = readNorthStar(projectRoot);
@@ -129,6 +138,7 @@ function main() {
     projectRoot,
     readNorthStar: (root) => { try { return readFileSync(join(root, 'NORTH_STAR.md'), 'utf8'); } catch { return null; } },
     fileExists: (candidate) => existsSync(candidate),
+    readFile: (candidate) => { try { return readFileSync(candidate, 'utf8'); } catch { return null; } },
   });
   if (decision) process.stdout.write(JSON.stringify(decision));
   process.exit(0);
