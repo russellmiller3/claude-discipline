@@ -56,6 +56,16 @@ test('allows a sibling-repo brief that sets up its own worktree', () => {
   assert.equal(decision, null);
 });
 
+// 2b. The `git -C <path> worktree add` form (with -C between git and worktree) is
+//     also valid setup and must be allowed (regression: the old regex missed it).
+test('allows the `git -C <path> worktree add` form', () => {
+  const decision = decideCrossRepoGate(
+    agentEvent('Run: git -C C:\\Users\\rmill\\Desktop\\programming\\skaffen-desktop worktree add ../wt -b feature/x main, then work in skaffen-desktop there.'),
+    opts,
+  );
+  assert.equal(decision, null);
+});
+
 // 3. FOREGROUND_OK (read-only) bypasses — no tree to clobber.
 test('allows a read-only FOREGROUND_OK sibling-repo recon', () => {
   const decision = decideCrossRepoGate(

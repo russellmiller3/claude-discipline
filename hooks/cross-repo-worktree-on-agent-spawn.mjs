@@ -62,7 +62,10 @@ export function decideCrossRepoGate(event, { sessionRepoRoot, isGitRepo }) {
   const description = input.description || '(unnamed)';
 
   // The real fix is present, or an explicit escape — allow.
-  if (/git\s+worktree\s+add/i.test(prompt)) return null;
+  // Match "worktree add" robustly: bare `git worktree add` AND the `git -C <path>
+  // worktree add` form (the `-C <path>` between git and worktree broke the old
+  // `git\s+worktree` regex — a false-negative that blocked a correct brief).
+  if (/\bworktree\s+add\b/i.test(prompt)) return null;
   if (/\bFOREGROUND_OK\b/.test(prompt)) return null; // read-only: no tree to clobber
   if (/\bCROSS_REPO_WORKTREE_RUSSELL_OK\b/.test(prompt)) return null;
 
