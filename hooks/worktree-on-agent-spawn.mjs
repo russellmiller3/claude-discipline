@@ -112,7 +112,10 @@ function main() {
   //     isolation: param can't reach (parent cwd isn't that repo).
   //   - FOREGROUND_OK — a read-only one-shot that writes nothing, so there is no tree to clobber.
   //   - NO_WORKTREE_RUSSELL_OK — Russell's explicit approval (ASK first; never self-grant).
-  const setsUpOwnWorktree = /git\s+worktree\s+add/i.test(prompt);
+  // Match "worktree add" robustly — bare `git worktree add` AND the `git -C <path>
+  // worktree add` form (the `-C <path>` between git and worktree broke the old
+  // `git\s+worktree` regex, a false-negative that blocked a correctly-isolated brief).
+  const setsUpOwnWorktree = /\bworktree\s+add\b/i.test(prompt);
   const readOnlyOneShot = /\bFOREGROUND_OK\b/.test(prompt);
   const russellApproved = /\bNO_WORKTREE_RUSSELL_OK\b/.test(prompt);
   if (setsUpOwnWorktree || readOnlyOneShot || russellApproved) {
