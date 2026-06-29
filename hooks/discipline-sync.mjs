@@ -96,6 +96,16 @@ export function changedHookBasenames(turnEntries) {
   return [...changed];
 }
 
+// Hook basenames REGISTERED in ~/.claude/settings.json (the active global guards). An UNREGISTERED hook — e.g. a
+// project-specific one not wired in (`new-chat-clears-debug-log`) — is NOT forced into the public kit: Russell's
+// curation is that the kit is a portable subset; project-specific hooks stay out (2026-06-29 false-publish).
+function registeredHookBasenames() {
+  try {
+    const settingsText = readFileSync(join(LIVE_REPO_DIR, 'settings.json'), 'utf8');
+    return new Set([...settingsText.matchAll(/([a-z0-9._-]+\.mjs)/gi)].map((nameMatch) => nameMatch[1].toLowerCase()));
+  } catch { return new Set(); }
+}
+
 // `git status --porcelain` for a repo, or '' on any error (fail-open: a non-repo / missing git reads as clean).
 function gitPorcelain(repoDir) {
   try {
@@ -162,14 +172,24 @@ async function main() {
     if (!existsSync(path)) return null;
     try { return readFileSync(path, 'utf8'); } catch { return null; }
   };
-  const needing = hooksNeedingSync(changed, readFileOrNull(LIVE_HOOKS_DIR), readFileOrNull(kitHooksDir));
+
+  // Only hooks that are kit-relevant — REGISTERED in settings.json (or their registered `.mjs` for a `.test.mjs`),
+  // or ALREADY in the kit — are forced into / re-synced with the kit. An unregistered project-specific hook stays
+  // out. The LIVE-repo commit check below still covers ALL your hook work (commit everything locally regardless).
+  const registered = registeredHookBasenames();
+  const kitRelevant = (basename) => registered.has(basename)
+    || registered.has(basename.replace(/\.test\.mjs$/, '.mjs'))
+    || existsSync(join(kitHooksDir, basename));
+  const kitChanged = changed.filter(kitRelevant);
+
+  const needing = hooksNeedingSync(kitChanged, readFileOrNull(LIVE_HOOKS_DIR), readFileOrNull(kitHooksDir));
 
   // Commit enforcement: hook work must be committed in BOTH repos before the turn can end — but ONLY the hooks YOU
   // touched this session (+ settings.json, which hook registration lives in). Now that the scan spans the whole
   // session, a blanket "any uncommitted hook" check would demand committing OTHER sessions' unrelated WIP hooks on
   // every Stop — a yak-shave. `uncommittedForChanged` scopes the porcelain to this session's hook work.
   const liveUncommitted = uncommittedForChanged(gitPorcelain(LIVE_REPO_DIR), changed);
-  const kitUncommitted = uncommittedForChanged(gitPorcelain(kitRoot), changed);
+  const kitUncommitted = uncommittedForChanged(gitPorcelain(kitRoot), kitChanged);
 
   // The published surface (kit README / docs) must move too, and be committed so the push carries it.
   const docsTouched = kitDocsTouchedThisSession(sessionEntries);
