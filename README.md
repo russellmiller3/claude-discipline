@@ -124,6 +124,8 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 | `clean-merged-worktrees` | Stop | Auto-removes spent agent git worktrees whose branch has already merged — keeps the working tree clean with no manual cleanup. |
 | `no-bullshit-tests` | PreToolUse(Write/Edit) | Blocks test files whose only assertions are tautologies (`assert(true)`, `x === x`) or a lone "is a function" smoke check — assert real behavior |
 | `docs-on-feature-commit` | PostToolUse(Bash)+Stop | Blocks stop when the turn committed code but moved no docs (README/docs/CHANGELOG) — unless it's a docs commit. **Override:** `docs-skip: <why>` (or the word `docs` in the commit) |
+| `hook-dry-review` | PreToolUse(Write/Edit/MultiEdit) | Editing or creating a hook forces a DRY review: blocks a hook write that hand-rolls a helper already in the shared `lib/transcript.mjs` (transcript parsing) instead of importing it — so ~20 copy-pasted copies can't grow back. **Override:** `dry-reviewed: <why>` or `HOOK_DRY_OVERRIDE=1` |
+| `self-verify-before-asking` | Stop | "Test it yourself." In builder mode (you wrote/built something this turn), blocks a reply that asks the human to test/verify when a CLI run, unit test, or smoke run was right there — unless you name a genuine environment/hardware/visual reason. **Override:** name the real reason, or `self-verify-override: <why>` |
 
 > **Opinions are configurable.** Tier 3 encodes *my* engineering taste. The point isn't that you adopt my opinions — it's that you encode *yours* as deterministic gates instead of hoping the model remembers them. Fork the hook, change the rule, keep the mechanism.
 
@@ -162,7 +164,7 @@ Full per-skill reference — how to invoke each, its method, and how they compos
 2. **The marker pattern.** A `PostToolUse` hook drops a small JSON marker (`.claude/state/*.json`) when a condition is detected; a `Stop` hook blocks while the marker exists; some later action clears it. This is how you enforce a rule that *spans* events (e.g. "a test failed earlier → can't stop until it's green").
 3. **Always give a clear-path.** Every blocking hook tells you *exactly* how to satisfy it (and offers a dismiss token for genuine exceptions). A gate with no escape hatch trains people to disable it.
 4. **Enforce the human where judgment is needed; automate only the mechanical.** `hookbook-sync` *forces you* to write the hook's description (judgment) but *auto-checks* the hook count (mechanical). Don't auto-generate prose; do auto-verify facts.
-5. **Self-policing meta-hooks.** The system documents and counts itself. The guardrails guard the guardrails.
+5. **Self-policing meta-hooks.** The system documents and counts itself, and stays DRY: `hookbook-sync` blocks an undocumented hook, `discipline-sync` blocks a drifted kit copy, and `hook-dry-review` blocks a hook that re-implements a shared helper instead of importing it. The guardrails guard the guardrails.
 6. **Pattern hooks false-fire on their own subject.** A hook that greps for a banned word will trip when you *document* that word. Give every blocking hook a dismiss token, and keep the trigger as specific as you can.
 
 ---
