@@ -150,8 +150,18 @@ export function assessFilename(filePath) {
     (tokens[0] === 'test' || tokens[0] === 'tests') && tokens.length > 1 ? tokens.slice(1)
     : (tokens[tokens.length - 1] === 'test' && tokens.length > 1) ? tokens.slice(0, -1)
     : tokens;
+  // A "real word" token: alphabetic, ≥2 chars, not itself junk — used to tell a genuine compound
+  // (figure_it_out: sibling "figure") from a junk+digit lazy name (output2: sibling is just "2").
+  const hasRealWordSibling = (current) => meaningfulTokens.some(
+    (other) => other !== current && /^[a-z]{2,}$/.test(other) && !JUNK_STEMS.has(other)
+  );
   for (const token of meaningfulTokens) {
-    if (JUNK_STEMS.has(token) && !JUNK_ONLY_WHEN_STANDALONE.has(token)) {
+    // out/in/data/output are junk only as a whole filename; exempt them at the token level ONLY
+    // when a real word sits beside them (a true compound), not when paired with a digit (output2).
+    if (JUNK_STEMS.has(token) && JUNK_ONLY_WHEN_STANDALONE.has(token) && hasRealWordSibling(token)) {
+      continue;
+    }
+    if (JUNK_STEMS.has(token)) {
       return { ok: false, reason: `"${base}" contains the placeholder word "${token}" — name the file for what it does.`, suggestion: 'Replace the placeholder token with the file\'s real role.' };
     }
     if (token.length >= 5 && !hasVowel(token) && !KNOWN_ACRONYMS.has(token)) {
