@@ -142,8 +142,12 @@ export function looksLikeBenchmark(command) {
   // Only gate when the command actually EXECUTES the bench. A script runner invoking a file, an
   // npm/pnpm/yarn run, or make. Inspection/VCS commands (grep, rg, cat, ls, head, tail, find, wc,
   // git, sed, awk, echo, Select-String, Get-Content) run nothing and are never benchmarks.
+  // `(?<!\.)` guards `py`/`python` against the `*.py` FILE EXTENSION: without it, `git add critic.py`
+  // matches `\bpy\b` and a plain git command looks like a `py` run (it then false-blocked git commits
+  // touching bench/ files). A real `py -m bench.x` still matches (its `py` has no leading dot). 2026-06-30
   const runsSomething = (
-    /\b(node|bun|tsx|deno|ts-node|python3?|py)\b\s/.test(loweredCommand) ||
+    /\b(node|bun|tsx|deno|ts-node)\b\s/.test(loweredCommand) ||
+    /(?<!\.)\b(python3?|py)\b\s/.test(loweredCommand) ||
     /\b(npm|pnpm|yarn)(?:\.cmd)?\s+(?:run\s+)?\S/.test(loweredCommand) ||
     /\b(powershell(?:\.exe)?|pwsh(?:\.exe)?)\b/.test(loweredCommand) ||
     /\bmake\b\s/.test(loweredCommand)
