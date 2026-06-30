@@ -70,6 +70,17 @@ test('ALLOWS the test-file naming convention (pytest test_ prefix, Go _test suff
   }
 });
 
+test('ALLOWS real words (out/in/data/output) INSIDE a compound, blocks them standalone', () => {
+  // "out"/"in"/"data" are lazy only as a whole filename — inside a compound they're meaningful
+  // (figure_it_out, opt_in, user_data, parse_output). The whole-stem check still blocks them alone.
+  for (const good of ['figure_it_out.py', 'opt_in.js', 'roll_out.ts', 'user_data.py', 'parse_output.mjs', 'new_user.ts']) {
+    assert.equal(assessFilename(good).ok, true, `expected ALLOW for ${good} (got: ${JSON.stringify(assessFilename(good))})`);
+  }
+  for (const bad of ['out.py', 'in.ts', 'data.md', 'output.js']) {
+    assert.equal(assessFilename(bad).ok, false, `expected BLOCK for ${bad}`);
+  }
+});
+
 test('still BLOCKS a bare/lazy test name even with the convention prefix', () => {
   // The prefix is structure, but the REST must still be meaningful: `test.py` and
   // `test_tmp.py` are caught (bare junk stem / lazy `tmp` token).

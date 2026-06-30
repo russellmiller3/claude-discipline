@@ -43,6 +43,15 @@ const JUNK_STEMS = new Set([
   'test2', 'untitled1', 'scratch', 'placeholder', 'todo2', 'wip', 'draft1', 'version2', 'v2file',
 ]);
 
+// A subset of JUNK_STEMS that are lazy ONLY as a whole filename ("out.py", "data.md") but are real
+// words that appear inside legitimate COMPOUND names: figure_it_out, opt_in, roll_out, user_data,
+// parse_output, new_user. The whole-stem check above still blocks them standalone; this set exempts
+// them at the per-TOKEN level so a meaningful compound isn't false-blocked. Hard junk (tmp, foo,
+// asdf, xxx, wip…) is NOT here — it stays blocked even as one token of a name.
+const JUNK_ONLY_WHEN_STANDALONE = new Set([
+  'out', 'in', 'new', 'file', 'files', 'doc', 'docs', 'output', 'input', 'copy', 'final', 'data',
+]);
+
 // Standard tech acronyms / short tokens that are legitimately vowelless or terse.
 const KNOWN_ACRONYMS = new Set([
   'html', 'css', 'js', 'ts', 'jsx', 'tsx', 'mjs', 'cjs', 'json', 'yaml', 'yml', 'toml', 'csv', 'tsv',
@@ -142,7 +151,7 @@ export function assessFilename(filePath) {
     : (tokens[tokens.length - 1] === 'test' && tokens.length > 1) ? tokens.slice(0, -1)
     : tokens;
   for (const token of meaningfulTokens) {
-    if (JUNK_STEMS.has(token)) {
+    if (JUNK_STEMS.has(token) && !JUNK_ONLY_WHEN_STANDALONE.has(token)) {
       return { ok: false, reason: `"${base}" contains the placeholder word "${token}" — name the file for what it does.`, suggestion: 'Replace the placeholder token with the file\'s real role.' };
     }
     if (token.length >= 5 && !hasVowel(token) && !KNOWN_ACRONYMS.has(token)) {
