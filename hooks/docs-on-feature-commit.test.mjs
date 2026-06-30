@@ -66,9 +66,13 @@ check('no commit → allowed',
 check('non-docs commit + later docs commit → allowed',
   stopBlocks([bash('git commit -m "feat: thing"'), bash('git commit -m "docs: describe thing"')]) === false);
 
-// ALLOW: docs updated under a docs/ tree (not README).
-check('non-docs commit + docs/ edit → allowed',
-  stopBlocks([bash('git commit -m "feat: thing"'), edit('C:/proj/docs/thing.md')]) === false);
+// BLOCK: a docs/ edit alone no longer satisfies — the README (front door) must move (2026-06-30).
+check('non-docs commit + docs/ edit only → blocked (README required, not a docs/ file)',
+  stopBlocks([bash('git commit -m "feat: thing"'), edit('C:/proj/docs/roadmap.md')]) === true);
+
+// ALLOW: a CHANGELOG counts as a front-door doc.
+check('non-docs commit + CHANGELOG edit → allowed',
+  stopBlocks([bash('git commit -m "feat: thing"'), edit('C:/proj/CHANGELOG.md')]) === false);
 
 // ── PostToolUse branch: real repo, returns whether the hook nudged ─────────────
 function repoWithCommit(files, commitMessage) {
@@ -92,7 +96,7 @@ function nudged(repoDirectory, command) {
     input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: repoDirectory }),
     encoding: 'utf8',
   });
-  return /DOCS WRITE NUDGE/.test(proc.stdout || '');
+  return /README WRITE NUDGE/.test(proc.stdout || '');
 }
 
 check('PostToolUse: commit shipped source, no docs → nudged',
