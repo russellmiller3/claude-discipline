@@ -38,18 +38,29 @@ export function isPlanPath(filePath) {
     /[-_]plan\.md$/.test(normalized);
 }
 
-/** Parse NORTH_STAR.md content → { coreJourney, proof } (both optional). */
-export function parseNorthStar(northStarText) {
-  const coreJourney = (northStarText.match(/^\s*core[_\s-]?journey\s*:\s*(.+)$/im) || [])[1]?.trim() || '';
-  const proof = (northStarText.match(/^\s*proof\s*:\s*(.+)$/im) || [])[1]?.trim() || '';
+/**
+ * Parse a core-journey declaration → { coreJourney, proof } (both optional). Source-agnostic:
+ * the two `core_journey:` / `proof:` markers can live in the README (preferred — the product's
+ * one job belongs in its front-door doc) or a dedicated NORTH_STAR.md. Inside a README they may
+ * sit in a fenced code block, a list item, or an HTML comment; only the two lines matter.
+ */
+export function parseNorthStar(declarationText) {
+  const coreJourney = (declarationText.match(/^\s*(?:[-*>]\s*)?core[_\s-]?journey\s*:\s*(.+)$/im) || [])[1]?.trim() || '';
+  const proof = (declarationText.match(/^\s*(?:[-*>]\s*)?proof\s*:\s*(.+)$/im) || [])[1]?.trim() || '';
   return { coreJourney, proof };
+}
+
+/** Whether a doc actually carries a core-journey declaration (the `core_journey:` marker). */
+function hasDeclaration(declarationText) {
+  return !!declarationText && /^\s*(?:[-*>]\s*)?core[_\s-]?journey\s*:/im.test(declarationText);
 }
 
 /**
  * Decide on one PreToolUse Write/Edit event. Pure: callers inject `projectRoot`,
- * `readNorthStar(root) -> content|null`, and `fileExists(absPath) -> bool`.
+ * `readDeclaration(root) -> content|null` (the README/NORTH_STAR text carrying the markers),
+ * and `fileExists(absPath) -> bool`.
  */
-export function decidePlanGate(event, { projectRoot, readNorthStar, fileExists, readFile }) {
+export function decidePlanGate(event, { projectRoot, readDeclaration, fileExists, readFile }) {
   const eventName = event.hook_event_name || event.hookEventName || '';
   if (eventName !== 'PreToolUse') return null;
   const toolName = event.tool_name || event.toolName || '';
@@ -73,19 +84,19 @@ export function decidePlanGate(event, { projectRoot, readNorthStar, fileExists, 
   const planContent = `${existingPlan}\n${editText}`;
   if (/\bNORTH_STAR_DEFER_OK\b/.test(planContent)) return null;
 
-  const northStarText = readNorthStar(projectRoot);
-  if (!northStarText) {
+  const declarationText = readDeclaration(projectRoot);
+  if (!hasDeclaration(declarationText)) {
     return deny(
       `Plan BLOCKED — declare the product's CORE JOURNEY first.\n\n` +
       `Russell's rule (2026-06-29): before planning more COMPONENTS, state the ONE end-to-end thing the product must do for a user — so every plan is checked against it (the failure this prevents: shipping parts that each pass tests while the whole stays inert).\n\n` +
-      `Create NORTH_STAR.md at the repo root:\n` +
+      `Add these two markers to your README.md (preferred — the product's one job belongs in its front-door doc), or to a dedicated NORTH_STAR.md at the repo root:\n` +
       `  core_journey: <one sentence — the user-facing thing it must do end to end>\n` +
       `  proof: <path to the integration test that exercises the WHOLE journey>\n\n` +
       `Then re-write this plan. (Override for a genuinely non-product repo: NORTH_STAR_DEFER_OK in the plan.)`
     );
   }
 
-  const { coreJourney, proof } = parseNorthStar(northStarText);
+  const { coreJourney, proof } = parseNorthStar(declarationText);
   if (!proof) return null; // north-star exists but declares no proof path — nothing to check
 
   const proofAbs = isAbsolute(proof) ? proof : resolve(projectRoot, proof);
@@ -115,6 +126,22 @@ function deny(reason) {
   return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
 }
 
+/**
+ * Read the project's core-journey declaration from wherever it lives. Prefers the README
+ * (the product's one job belongs in its front-door doc — so the gate "just goes off the
+ * readme"), then a dedicated NORTH_STAR.md. Returns the first doc that actually carries the
+ * `core_journey:` marker, or null. README variants are tried case-first then common casings.
+ */
+function readCoreJourneyDeclaration(root) {
+  const candidates = ['README.md', 'Readme.md', 'readme.md', 'NORTH_STAR.md'];
+  for (const fileName of candidates) {
+    let docText = null;
+    try { docText = readFileSync(join(root, fileName), 'utf8'); } catch { docText = null; }
+    if (docText && /^\s*(?:[-*>]\s*)?core[_\s-]?journey\s*:/im.test(docText)) return docText;
+  }
+  return null;
+}
+
 /** Walk up to the nearest ancestor containing a `.git` (the project root). */
 function findProjectRoot(startDir) {
   let current = startDir;
@@ -136,7 +163,7 @@ function main() {
   const projectRoot = findProjectRoot(startDir) || event.cwd || process.cwd();
   const decision = decidePlanGate(event, {
     projectRoot,
-    readNorthStar: (root) => { try { return readFileSync(join(root, 'NORTH_STAR.md'), 'utf8'); } catch { return null; } },
+    readDeclaration: (root) => readCoreJourneyDeclaration(root),
     fileExists: (candidate) => existsSync(candidate),
     readFile: (candidate) => { try { return readFileSync(candidate, 'utf8'); } catch { return null; } },
   });

@@ -19,7 +19,7 @@ const planEvent = (filePath, content) => ({
 const ROOT = 'C:/proj';
 const deps = ({ northStar = null, proofExists = false, existingPlan = '' } = {}) => ({
   projectRoot: ROOT,
-  readNorthStar: () => northStar,
+  readDeclaration: () => northStar,
   fileExists: () => proofExists,
   readFile: () => existingPlan,
 });
@@ -139,6 +139,43 @@ test('NORTH_STAR_DEFER_OK in the existing plan bypasses a later section Edit', (
     }),
   );
   assert.equal(decision, null);
+});
+
+// 11. The declaration can live in README-style content: fenced block, list item, blockquote.
+test('parseNorthStar reads markers from README-style content (fenced / list / blockquote)', () => {
+  const readmeFenced = '# My Product\n\nsome intro\n\n```\ncore_journey: talk -> it acts\nproof: tests/e2e.py\n```\n';
+  assert.equal(parseNorthStar(readmeFenced).coreJourney, 'talk -> it acts');
+  assert.equal(parseNorthStar(readmeFenced).proof, 'tests/e2e.py');
+  const readmeList = '## North star\n- core_journey: a user talks and it operates an app\n- proof: tests/integration/test_core.py\n';
+  assert.equal(parseNorthStar(readmeList).proof, 'tests/integration/test_core.py');
+  const readmeQuote = '> core_journey: x\n> proof: t/p.py\n';
+  assert.equal(parseNorthStar(readmeQuote).coreJourney, 'x');
+});
+
+// 12. A doc with NO core_journey marker counts as undeclared (blocks), even if non-empty.
+test('blocks when the declaration doc exists but carries no core_journey marker', () => {
+  const decision = decidePlanGate(
+    planEvent('C:/proj/plans/plan-x.md', '# Plan\nbuild a thing'),
+    deps({ northStar: '# README\n\nA fine readme with no markers at all.' }),
+  );
+  assert.ok(decision, 'expected a deny');
+  assert.match(decision.hookSpecificOutput.permissionDecisionReason, /declare the product's CORE JOURNEY/i);
+});
+
+// 13. The gate works the SAME whether the markers came from a README or a NORTH_STAR — the
+//     decision function only sees declaration TEXT, so a README source allows/blocks identically.
+test('a README-sourced declaration drives the gate (allows a wiring plan, proof missing)', () => {
+  const readmeDeclaration = '# Product\n```\ncore_journey: talk -> acts\nproof: tests/test_e2e.py\n```\n';
+  const blocked = decidePlanGate(
+    planEvent('C:/proj/plans/plan-component.md', '# Plan\nadd another component'),
+    deps({ northStar: readmeDeclaration, proofExists: false }),
+  );
+  assert.ok(blocked, 'a component plan is blocked while proof missing');
+  const allowed = decidePlanGate(
+    planEvent('C:/proj/plans/plan-wire.md', '# Plan\nwire it end-to-end, create tests/test_e2e.py'),
+    deps({ northStar: readmeDeclaration, proofExists: false }),
+  );
+  assert.equal(allowed, null);
 });
 
 console.log(`\n${passedCount} passed`);

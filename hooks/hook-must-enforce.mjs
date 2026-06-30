@@ -5,9 +5,10 @@
  * but never actually denies, blocks, exits non-zero, or performs a side-effect. A hook with no teeth is a
  * comment with extra steps — it enforces the PRESENCE of a suggestion, not the OUTCOME.
  *
- * Why: it's easy to write a "guardrail" that only prints advice — a hook that "enforced" that a brief SAID to
- * commit, while the agent ignored it and lost work. This meta-hook makes the rule mechanical: present-as-
- * enforcement + no-teeth = blocked at write time. A hook must ENFORCE the OUTCOME, not nudge toward it.
+ * Why (Russell, 2026-06-22, furious — correctly): the commit-cadence hook only checked that an agent's brief
+ * SAID to commit; the agent ignored it and died with hours uncommitted. "Why would you ever build a hook that
+ * makes suggestions? When building a hook, it must ENFORCE what it's supposed to enforce." This meta-hook makes
+ * that rule mechanical: present-as-enforcement + no-teeth = blocked at write time.
  *
  * Scope: only files under a `hooks/` dir ending in `.mjs` (and not `*.test.mjs`). Override (rare — a genuinely
  * informational context-injector that only adds additionalContext and is NOT pretending to block): put the
@@ -57,13 +58,22 @@ function main() {
   const input = event.tool_input || {};
   if (!isHookFile(input.file_path)) process.exit(0);
 
-  // The content being written: Write gives the whole file; Edit/MultiEdit give the replacement text.
-  const content = input.content
+  // The text of THIS write/edit: Write gives the whole file; Edit/MultiEdit give the replacement text(s).
+  const editText = input.content
     || input.new_string
     || (Array.isArray(input.edits) ? input.edits.map((edit) => edit.new_string || '').join('\n') : '')
     || '';
 
-  const verdict = evaluateHookTeeth(content);
+  // Judge the WHOLE hook, not just this fragment. A hook's TEETH (the `deny()` helper, an exit(2),
+  // a side-effect call) usually live OUTSIDE the region a given Edit touches — so an incremental
+  // edit to a guard's message text would look toothless on its own. For an Edit/MultiEdit, fold in
+  // the file's current content so the teeth check sees the real, complete hook. (Fail-safe: if the
+  // file can't be read, fall back to the fragment alone.)
+  let existingHook = '';
+  if (event.tool_name !== 'Write') {
+    try { existingHook = readFileSync(input.file_path, 'utf8'); } catch { existingHook = ''; }
+  }
+  const verdict = evaluateHookTeeth(`${existingHook}\n${editText}`);
   if (verdict.ok) process.exit(0);
 
   const reason = `Hook write BLOCKED — "${String(input.file_path).split(/[\\/]/).pop()}" presents as enforcement but has NO TEETH.
@@ -74,9 +84,9 @@ It writes a refusal/guard message (BLOCKED / deny / STOP / "must enforce") but n
   - exits with process.exit(2), or
   - performs a real side-effect (execFileSync/git commit, writeFileSync, etc.).
 
-The rule: a hook must ENFORCE the OUTCOME, not nudge toward it. A hook that only prints advice is a comment
-with extra steps — a guard that "enforced" that a brief SAID to commit while the agent ignored it and lost
-work is no guard at all. Give this hook real teeth (deny / block / exit 2 / DO the thing).
+Russell's rule (2026-06-22): a hook must ENFORCE the OUTCOME, not nudge toward it. A hook that only prints advice
+is a comment with extra steps — the commit-cadence hook "enforced" that a brief SAID to commit, the agent ignored
+it and died losing hours. Give this hook real teeth (deny / block / exit 2 / DO the thing).
 
 Override (rare — a genuinely informational context-injector that is NOT pretending to block): add the marker
 ADVISORY_ONLY_OK to the file.`;

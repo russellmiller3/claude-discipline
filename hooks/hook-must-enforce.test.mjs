@@ -39,6 +39,17 @@ test('PASSES a hook that exits 2 (block)', () => {
   assert.equal(evaluateHookTeeth(`if (bad) { console.error('STOP'); process.exit(2); }`).ok, true);
 });
 
+test('a message-only fragment looks toothless ALONE but PASSES folded into the whole hook', () => {
+  // Why main() folds the existing file in: an Edit that only touches a guard's MESSAGE text
+  // has no teeth in isolation, but the hook's real teeth (its deny() helper) live elsewhere.
+  // Judging the fragment alone would false-block; judging the union is correct.
+  const messageFragment = `return deny(\`Plan BLOCKED — declare the core journey first.\`);`;
+  assert.equal(evaluateHookTeeth(messageFragment).ok, false, 'fragment alone reads as toothless');
+
+  const wholeHook = `function deny(reason) { return { hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: reason } }; }\n${messageFragment}`;
+  assert.equal(evaluateHookTeeth(wholeHook).ok, true, 'union with the deny() helper has teeth');
+});
+
 test('PASSES a genuine context-injector with the ADVISORY_ONLY_OK opt-out', () => {
   const injector = `// ADVISORY_ONLY_OK — SessionStart context, must inform only\nprocess.stdout.write(JSON.stringify({ hookSpecificOutput: { additionalContext: 'you should consider X' } }));`;
   assert.equal(evaluateHookTeeth(injector).ok, true);
@@ -56,9 +67,16 @@ test('isHookFile: only .mjs hooks, not tests, not other files', () => {
   assert.equal(isHookFile('/c/Users/r/proj/src/app.mjs'), false);
 });
 
-test('the real enforcement hooks in this kit pass their own rule (dogfood)', () => {
-  for (const hookName of ['hook-must-enforce.mjs', 'agent-autocommit.mjs', 'ross-perot-guard.mjs']) {
-    const source = readFileSync(join(here, hookName), 'utf8');
+test('the REAL hooks we just built pass their own rule (dogfood)', () => {
+  // Only check hooks PRESENT in this checkout — the kit is a curated subset of the global
+  // hooks dir, so a global-only name (e.g. agent-commit-cadence) is absent there. Skipping
+  // missing files keeps the dogfood portable across global + kit instead of ENOENT-failing.
+  let checkedCount = 0;
+  for (const hookName of ['hook-must-enforce.mjs', 'agent-autocommit.mjs', 'agent-commit-cadence.mjs']) {
+    let source;
+    try { source = readFileSync(join(here, hookName), 'utf8'); } catch { continue; }
     assert.equal(evaluateHookTeeth(source).ok, true, `${hookName} should have teeth`);
+    checkedCount += 1;
   }
+  assert.ok(checkedCount >= 1, 'expected at least hook-must-enforce.mjs to be present to dogfood');
 });
