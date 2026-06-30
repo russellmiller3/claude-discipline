@@ -50,6 +50,13 @@ check('allows cd+report reader', !isDenied('cd extension && node bench/realworld
 check('allows an analyze/summarize reader', !isDenied('node scripts/analyze-sweep.mjs runs/latest.jsonl'));
 check('allows a python stats reader', !isDenied('python evals/stats.py'));
 
+// 2026-06-30 FALSE-BLOCK: a git commit touching *.py files in bench/ — the `.py` EXTENSION matched the
+// `py` interpreter pattern, so a plain git command (with a 'bench'/'migrate' keyword in a path) looked
+// like a long python run. A git command runs no script; it must pass.
+check('allows git add of .py files in bench/', !isDenied('git add bench/critic.py bench/gan.py'));
+check('allows a git commit touching bench .py files',
+  !isDenied('cd /x && git add bench/critic.py bench/gan.py && git commit -m "feat: gan kintsugi migrate sync"'));
+
 // REGRESSION: genuinely long jobs with NO chunk/progress evidence must STILL be blocked.
 check('still blocks a backfill script with no run-shape evidence', isDenied('node backfill-users.mjs'));
 check('still blocks a scrape with a long-keyword and no evidence', isDenied('python crawl_sites.py'));

@@ -219,7 +219,10 @@ function extractScriptPaths(command) {
 }
 
 function scriptRunnerPattern() {
-	return /\b(node|bun|tsx|python|python3|py|powershell(?:\.exe)?|pwsh(?:\.exe)?)\b/i;
+	// `(?<!\.)` keeps the `*.py` FILE EXTENSION from matching `py`/`python` — else `git add critic.py`
+	// reads as a python RUN and (with a `bench`/`migrate` keyword in a path) false-blocks a git command.
+	// A real `py -m …` / `python x.py` still matches (its interpreter token has no leading dot). 2026-06-30
+	return /\b(?:node|bun|tsx|powershell(?:\.exe)?|pwsh(?:\.exe)?)\b|(?<!\.)\b(?:python3?|py)\b/i;
 }
 
 function readProjectConfig(cwd) {
