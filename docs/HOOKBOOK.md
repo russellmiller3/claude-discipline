@@ -56,6 +56,9 @@ Blocks fresh identifiers named after their type (`text`, `data`, `result`, `tmp`
 ### `filename-quality-guard` · PreToolUse(Write)
 Blocks creating a file with a low-quality NAME — typos (a token one edit away from a known word but not itself a word, e.g. `findigns`→`findings`, `lenght`→`length`), lazy/scratch stems (`tmp`, `output2`, `asdf`, `untitled`, `stuff`), and dropped-vowel tokens (`fndngs`). Allowlists conventional caps files (README, LICENSE, FINDINGS, HANDOFF…), dotfiles, and tech acronyms; only blocks CLOSE misspellings, so unknown-but-plausible domain words pass (low false-positive). Has teeth (`permissionDecision: deny`). **Override:** `FILENAME_GUARD_OVERRIDE=1`.
 
+### `design-md-check` · PreToolUse(Write|Edit|MultiEdit)
+Non-blocking. On a UI/style edit — a style file (`.css/.scss/.sass/.less/.html/.svg/.svelte/.vue/.jsx/.tsx`) or JS/TS carrying style signals (`.style.`, `classList`, `createElement`, `innerHTML`…) — injects your design system as `additionalContext` so the change follows the house style. Reads the design doc from `~/Desktop/programming/context/design.md` (falling back to the legacy `~/.claude/design.md`); if neither exists it silently no-ops, so the hook is harmless on a machine without that doc. Personal hook — point the two paths at wherever your own design system lives.
+
 ### `agent-autocommit` · PostToolUse(Write|Edit)
 Auto-commits WIP inside a linked git worktree after every edit, so a background agent that dies loses at most one edit — git is the only checkpoint that survives a silent death, and this needs no cooperation from the agent.
 
