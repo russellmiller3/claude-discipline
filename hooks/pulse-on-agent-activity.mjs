@@ -63,11 +63,14 @@ function activeRepo() {
 
 function runPulse() {
   if (!existsSync(PULSE_SCRIPT)) return null;
-  const result = spawnSync('node', [PULSE_SCRIPT], { encoding: 'utf8', shell: false, timeout: 4000 });
-  if (result.error || result.status !== 0) return null;
-  const out = (result.stdout || '').trim();
-  if (!out) return null;
-  return out;
+  // --active-only: show ONLY genuinely-live agents (recent, non-finished, excluding the
+  // orchestrator's own Main-thread card) and print NOTHING when none are live — so a heartbeat
+  // with no running agent stays silent instead of re-dumping stale/finished events into chat.
+  const pulseRun = spawnSync('node', [PULSE_SCRIPT, '--active-only'], { encoding: 'utf8', shell: false, timeout: 4000 });
+  if (pulseRun.error || pulseRun.status !== 0) return null;
+  const pulseText = (pulseRun.stdout || '').trim();
+  if (!pulseText) return null;
+  return pulseText;
 }
 
 function currentTopSha() {
