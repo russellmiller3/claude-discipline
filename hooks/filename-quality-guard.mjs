@@ -64,6 +64,7 @@ const COMMON_WORDS = new Set([
   'parse', 'decode', 'encode', 'stream', 'streaming', 'socket', 'sockets', 'audio', 'transcript',
   'transcription', 'model', 'models', 'provider', 'providers', 'pricing', 'cost', 'tokens', 'token',
   'usage', 'config', 'settings', 'options', 'helper', 'helpers', 'utils', 'utility', 'common', 'shared',
+  'mode', 'modes',
   'module', 'modules', 'component', 'components', 'service', 'services', 'adapter', 'adapters', 'bridge',
   'storage', 'memory', 'database', 'query', 'queries', 'index', 'router', 'route', 'routes', 'routing',
   'dispatch', 'dispatcher', 'registry', 'register', 'handler', 'handlers', 'middleware', 'feature',
@@ -131,7 +132,16 @@ export function assessFilename(filePath) {
   }
 
   const tokens = tokenizeStem(stem);
-  for (const token of tokens) {
+  // The test-file naming CONVENTION is structural, not lazy: pytest mandates a `test_` prefix
+  // (`test_live_bridge.py`), Go mandates a `_test` suffix (`bridge_test.go`). In those positions
+  // the `test`/`tests` token names the file's ROLE (it's a test for X) -- so drop it before the
+  // junk check and judge the REST (`live_bridge` must still be meaningful). A bare `test.py`
+  // is still caught above by the exact-stem JUNK check, so this never lets a lazy name through.
+  const meaningfulTokens =
+    (tokens[0] === 'test' || tokens[0] === 'tests') && tokens.length > 1 ? tokens.slice(1)
+    : (tokens[tokens.length - 1] === 'test' && tokens.length > 1) ? tokens.slice(0, -1)
+    : tokens;
+  for (const token of meaningfulTokens) {
     if (JUNK_STEMS.has(token)) {
       return { ok: false, reason: `"${base}" contains the placeholder word "${token}" — name the file for what it does.`, suggestion: 'Replace the placeholder token with the file\'s real role.' };
     }

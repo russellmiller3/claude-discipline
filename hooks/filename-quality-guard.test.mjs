@@ -61,3 +61,19 @@ test('camelCase and kebab tokenization both split correctly', () => {
   assert.equal(assessFilename('realtimeClients.mjs').ok, true);
   assert.equal(assessFilename('voice-latency-bakeoff.mjs').ok, true);
 });
+
+test('ALLOWS the test-file naming convention (pytest test_ prefix, Go _test suffix)', () => {
+  // The `test`/`tests` token is STRUCTURAL in these positions (the file IS a test for X),
+  // not a lazy placeholder — judge the rest of the name instead.
+  for (const good of ['test_live_bridge.py', 'tests/integration/test_core_journey.py', 'bridge_test.go', 'test_brain_act.py']) {
+    assert.equal(assessFilename(good).ok, true, `expected ALLOW for ${good} (got: ${JSON.stringify(assessFilename(good))})`);
+  }
+});
+
+test('still BLOCKS a bare/lazy test name even with the convention prefix', () => {
+  // The prefix is structure, but the REST must still be meaningful: `test.py` and
+  // `test_tmp.py` are caught (bare junk stem / lazy `tmp` token).
+  for (const bad of ['test.py', 'tests.py', 'test_tmp.py']) {
+    assert.equal(assessFilename(bad).ok, false, `expected BLOCK for ${bad}`);
+  }
+});
