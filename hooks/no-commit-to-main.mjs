@@ -54,15 +54,28 @@ function main() {
     return sessionDirectory;
   }
 
+  // A chained branch switch BEFORE the commit changes where the commit lands:
+  // `git switch -c fix/x && git add ... && git commit` never touches main. Honor the LAST
+  // explicit branch switch preceding the first `git commit` (only `switch` and `checkout -b`
+  // — a plain `checkout <target>` may be a file restore, not a branch change). Without this,
+  // the standard branch-then-commit one-liner was false-blocked (2026-07-01).
   let branch;
-  try {
-    branch = execSync('git branch --show-current', {
-      encoding: 'utf8',
-      cwd: effectiveDirectory(c, event.cwd || process.cwd()),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
-  } catch {
-    process.exit(0); // fail open — don't block on git errors (incl. a bad cd path: git itself will error)
+  const commandBeforeCommit = c.slice(0, c.search(/\bgit\s+commit\b/));
+  const branchSwitches = [...commandBeforeCommit.matchAll(
+    /\bgit\s+(?:switch\s+(?:-[cC]\s+)?|checkout\s+-[bB]\s+)(?:"([^"]+)"|'([^']+)'|([^\s"';&|]+))/g
+  )].map((match) => (match[1] || match[2] || match[3] || '').trim()).filter((name) => name && !name.startsWith('-'));
+  if (branchSwitches.length) {
+    branch = branchSwitches[branchSwitches.length - 1];
+  } else {
+    try {
+      branch = execSync('git branch --show-current', {
+        encoding: 'utf8',
+        cwd: effectiveDirectory(c, event.cwd || process.cwd()),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+    } catch {
+      process.exit(0); // fail open — don't block on git errors (incl. a bad cd path: git itself will error)
+    }
   }
 
   if (branch !== 'main' && branch !== 'master') process.exit(0);

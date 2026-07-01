@@ -120,3 +120,32 @@ test('still BLOCKS `cd <other repo on main> && git commit` even from a branch se
   const hookOutput = JSON.parse(hookRun.stdout);
   assert.equal(hookOutput.hookSpecificOutput.permissionDecision, 'deny');
 });
+
+test('allows the branch-then-commit one-liner: `git switch -c fix/x && ... && git commit` on main', () => {
+  const repoOnMain = makeGitRepo('main');
+  const command = 'git switch -c fix/docs && git add -A && git commit --no-verify -m "docs"';
+  const hookRun = runHook(command, repoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('still BLOCKS a chain that switches BACK to main before committing', () => {
+  const repoOnBranch = makeGitRepo('feature/wip');
+  const command = 'git switch main && git commit -m "sneaky direct-to-main"';
+  const hookRun = runHook(command, repoOnBranch);
+
+  assert.equal(hookRun.status, 0);
+  const hookOutput = JSON.parse(hookRun.stdout);
+  assert.equal(hookOutput.hookSpecificOutput.permissionDecision, 'deny');
+});
+
+test('a `checkout -- <file>` restore is NOT treated as a branch switch (still judged by repo branch)', () => {
+  const repoOnMain = makeGitRepo('main');
+  const command = 'git checkout -- readme.txt && git commit -m "oops on main"';
+  const hookRun = runHook(command, repoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  const hookOutput = JSON.parse(hookRun.stdout);
+  assert.equal(hookOutput.hookSpecificOutput.permissionDecision, 'deny');
+});
