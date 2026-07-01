@@ -32,6 +32,9 @@ The transcript-reading Stop / UserPromptSubmit hooks share one set of JSONL help
 ### `block-dangerous-commands` · PreToolUse(Bash)
 Refuses catastrophic shell commands: `rm -rf /`/`~`/`/*`, `dd` to a raw block device, `mkfs` on a device, block-device shred/overwrite, the classic fork bomb, recursive `chmod`/`chown` on `/` or `~`, and `curl|sh`/`wget|sh` remote-pipe-to-shell. Intentionally narrow — `rm -rf node_modules` passes (the recursive-delete rule has a second guard requiring a root/home/wildcard target). **Override:** `ALLOW_DANGEROUS_COMMAND=1` (env or inline prefix).
 
+### `live-ui-focus-guard` · PreToolUse(Bash|PowerShell|Agent)
+Blocks launching focus-stealing live-UI / integration tests on your active desktop: a `pytest` run that SELECTS the `integration` marker (quoted or bare, but NOT `not integration`) or a direct `*_live.py` run — in a shell command OR an Agent brief. Such tests drive a real app (Calculator/Notepad via `uiautomation`, a browser, etc.) and physically take over the screen — fine on headless CI, disruptive when an unattended agent runs them while you're working. The safe default suite (`-m "not integration"`) is never blocked. **Override** (you're away / it's safe to grab the screen): the token `live-ui-ok: <why>` in the command/brief, or env `LIVE_UI_TEST_OK=1`. Locked by `live-ui-focus-guard.test.mjs` (13 cases).
+
 ### `protect-secrets` · PreToolUse(Read|Edit|Write|Bash)
 Blocks reading/editing/writing credential files (`.env*`, `*.pem`/`*.key`/`*.p12`, `id_rsa`, `.npmrc`, `.pypirc`, `.aws/credentials`, `.netrc`, `secrets.*`, `service-account*.json`) and blocks Bash commands that would `cat` one into the transcript. `.env.example`/`.sample`/`.template` are allowed; writing a *new* secret file (scaffolding) is allowed. **Override:** `SECRETS_OK=1`.
 
