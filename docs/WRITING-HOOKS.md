@@ -112,6 +112,15 @@ Define a "turn" as everything since the previous `user` message, so you only ins
 - **Make paths and thresholds env-configurable.** A hook hardcoded to your repo layout won't survive being shared. Defaults plus an env override (`ROOT_CAUSE_FILES`, `READ_BEFORE_WRITE_LINES`, `HOOKBOOK_PATH`) is the difference between "my hook" and "a hook."
 - **`cwd` is the project root, not your `-C` target.** A hook that shells out to `git` sees the *session's* repo, not whatever directory your command names. Resolve the project root from the event's file path or `cwd` when you need a specific repo.
 
+## Avoid false positives — match narrow, scope tight, test the ALLOW path
+
+An over-broad guard blocks legitimate work and trains people to reach for the override, which defeats the guard. Five guards in this kit false-fired the same handful of ways in one session. Build against each:
+
+1. **Match WHOLE WORDS / tokens, never raw substrings.** `command.includes('train')` also matches `pretrained` and `--training-batch-size`; `'model'` is one edit from `'modal'`. Use word boundaries (`(?:^|[^a-z0-9])train(?:[^a-z0-9]|$)`) or a real-word allowlist — not `.includes()` on a keyword, and not a bare edit-distance check against a small vocabulary.
+2. **Scope the scan to the relevant slice; strip the rest first.** A path argument (`python "C:\...\validate.py"`), a commit message (`git commit -m "...git push..."`), a quoted string, a heredoc body, and a `--flag-name` are NOT what you're policing. Blank quotes / heredocs / flags / inline-code before matching, and scan only the executable structure.
+3. **Exempt the hook's own file and documentation of it.** A phrase-ban hook trips on its own reason string, its test, and any README/HOOKBOOK row that names it. Blank the hook's own identifiers before matching, and skip edits whose `file_path` IS the hook or its test.
+4. **Test the ALLOW path, not just the DENY path.** A test asserting only "this input is blocked" proves the guard FIRES — never that it doesn't OVER-fire. Every blocking hook MUST ship a `*.test.mjs` with at least one must-allow case covering the legitimate input it might wrongly match. The `hook-negative-case-required` Stop guard enforces this: it blocks a session that created/edited a guard hook whose test has no negative (must-allow) case.
+
 ## Registering and testing
 
 Add the hook to `settings.json` under the right event (the installer's `settings.fragment.json` shows the shape: `{ "type": "command", "command": "node ~/.claude/hooks/<name>.mjs", "timeout": 5 }`, optionally with a `matcher`).

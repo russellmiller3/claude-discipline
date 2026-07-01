@@ -74,6 +74,9 @@ Blocks asking the user for a discoverable fact (a path, a key, an env var) when 
 ### `hook-must-enforce` · PreToolUse(Write|Edit)
 Meta-guard: blocks writing a "guardrail" hook that only PRINTS advice — no `decision:'block'`, no non-zero exit, no real side-effect. A hook with no teeth is false safety; if it presents as enforcement it must actually deny or act.
 
+### `hook-negative-case-required` · Stop
+Meta-guard: blocks stop when a guard hook (one with teeth) was created/edited this SESSION but its `*.test.mjs` has no NEGATIVE (must-allow / must-not-fire) case. A deny-only test proves the guard FIRES, never that it doesn't OVER-fire — the blind spot behind five same-session false-fires. Pure context-injectors are exempt; scope is the hooks you touched. **Override:** `hook-negative-case-waived: <why>`. See "Avoid false positives" in WRITING-HOOKS.md.
+
 ---
 
 ## Tier 2 — Memory system (needs the companion files)

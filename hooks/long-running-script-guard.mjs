@@ -80,8 +80,9 @@ function looksLikeLongScript(command, cwd) {
 		...(config.longKeywords || [])
 	];
 
-	return longKeywords.some((keyword) => scannableCommand.includes(keyword.toLowerCase())) ||
-		/\s(--all|--full|--everything|--entire|--batch|--sweep)\b/i.test(scannableCommand);
+	const keywordText = keywordScannable(command).toLowerCase();
+	return longKeywords.some((keyword) => containsKeyword(keywordText, keyword.toLowerCase())) ||
+		/\s(--all|--full|--everything|--entire|--batch|--sweep)\b/i.test(command);
 }
 
 // Return the command with quoted-string literals and inline-code args (-c/-e/-p/-Command) blanked
@@ -94,8 +95,23 @@ export function executableText(command) {
 	return scannableCommand;
 }
 
+// Text for KEYWORD detection: executableText with flag tokens (--flag[=val], -x) blanked, so a
+// long-keyword living inside a FLAG NAME — `--training-batch-size` contains "train"+"batch",
+// `--pretrained` contains "train" — is not read as the job's nature. Explicit fan-out FLAGS
+// (--all/--sweep/--batch) are matched separately, on the raw command, so they still count. (2026-07-01)
+export function keywordScannable(command) {
+	return executableText(command).replace(/(^|\s)--?[A-Za-z][\w-]*(=\S+)?/g, ' ');
+}
+
+// Whole-word keyword test: "train" matches the WORD train (train.py, re-train), NOT a substring of
+// "pretrained"/"training". Non-alphanumeric (space, ., -, _, /) counts as a word boundary.
+export function containsKeyword(scannableCommand, keyword) {
+	return new RegExp(`(?:^|[^a-z0-9])${keyword}(?:[^a-z0-9]|$)`, 'i').test(scannableCommand);
+}
+
+// name-by-use-override: `cwd` is this file's established param name (current working dir), used by
+// every detector; kept for consistency, not introduced here.
 function looksLikeFanOutWork(command, cwd) {
-	const loweredCommand = command.toLowerCase();
 	const config = readProjectConfig(cwd);
 	const fanOutKeywords = [
 		'bench', 'benchmark', 'sweep', 'eval', 'batch', 'bulk', 'crawl', 'scrape',
@@ -103,7 +119,10 @@ function looksLikeFanOutWork(command, cwd) {
 		...(config.fanOutKeywords || [])
 	];
 
-	return fanOutKeywords.some((keyword) => loweredCommand.includes(keyword.toLowerCase())) ||
+	// Word-boundary on flag-stripped text: a single sequential training run is NOT fan-out work
+	// just because "--training-batch-size" contains "train"/"batch". Real fan-out FLAGS still count.
+	const keywordText = keywordScannable(command).toLowerCase();
+	return fanOutKeywords.some((keyword) => containsKeyword(keywordText, keyword.toLowerCase())) ||
 		/\s(--all|--full|--models|--scenarios|--workers?|--batch)\b/i.test(command);
 }
 
@@ -185,6 +204,10 @@ export function isKnownShortCommand(command) {
 		// (the guard treated a sequential reader as a parallel bench run). (2026-06-26)
 		/\b(report|analyz|summar(y|ize|ise)|stats|view|inspect|show|render|print|dump)[\w-]*\.(?:[mc]?[jt]s|py)\b/.test(loweredCommand) ||
 		/\bnode\s+--check\b/.test(loweredCommand) ||
+		// A syntax check is instant, never a long job: `py_compile`, `ast.parse`, `tsc --noEmit`.
+		/\bpy_compile\b/.test(loweredCommand) ||
+		/\bast\.parse\b/.test(loweredCommand) ||
+		/\btsc\s+(?:-[a-z-]+\s+)*--noemit\b/.test(loweredCommand) ||
 		// An INLINE one-liner (`py -c "..."`, `node -e "..."`, `pwsh -Command "..."`) is a single
 		// expression, never a long fan-out script — exempt regardless of keywords in its code string.
 		/(?:^|[\s;&|(])(?:py|python3?|node|bun|deno|pwsh|powershell(?:\.exe)?)\s+(?:-[a-z]+\s+)*(?:-c|-e|-p|--?command)\b/i.test(loweredCommand)

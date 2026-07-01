@@ -72,5 +72,19 @@ check('allows ls|grep with a long-keyword in the grep pattern', !isDenied('ls ho
 // REGRESSION: a real long script FILE (not -c) with a long-keyword in its NAME is still gated.
 check('still blocks a real migrate script file', isDenied('node run-migrate.mjs'));
 
+// 2026-07-01 FALSE-BLOCKS (this session): substring keyword matching + no py_compile exemption.
+// (a) a py_compile syntax check is instant, never a long job.
+check('allows a py_compile syntax check', !isDenied('python -m py_compile a.py b.py'));
+// (b) "pretrained" in a filename must not match the "train" keyword (substring false-match).
+check('allows a filename containing "pretrained" (not the word "train")',
+  !isDenied('python -m modal run test_b_pretrained_fusion.py --sizes 20'));
+// (c) "train"/"batch" inside FLAG NAMES must not demand fan-out parallelism on a single run.
+check('allows a single training run whose FLAGS contain train/batch substrings',
+  !isDenied('python run_fusion_sizes.py --sizes 20 --training-steps 1500 --training-batch-size 16'));
+// REGRESSION: the WORD train (train.py) is still a real training job and stays gated.
+check('still blocks a bare train.py with no run-shape evidence', isDenied('python train.py'));
+// REGRESSION: an explicit --batch fan-out FLAG (standalone) still counts as fan-out.
+check('still blocks a real batch job with the --batch flag and no evidence', isDenied('node process-orders.mjs --batch'));
+
 if (failures.length) { console.error(`\n${failures.length} check(s) failed.`); process.exit(1); }
 console.log('\nAll long-running-script-guard checks passed.');

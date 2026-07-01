@@ -50,6 +50,9 @@ const JUNK_STEMS = new Set([
 // asdf, xxx, wip…) is NOT here — it stays blocked even as one token of a name.
 const JUNK_ONLY_WHEN_STANDALONE = new Set([
   'out', 'in', 'new', 'file', 'files', 'doc', 'docs', 'output', 'input', 'copy', 'final', 'data',
+  // "test" as a MID-name token (validate_test_b) names a role beside a real word; only a bare
+  // "test.py" (exact junk stem, caught earlier) is lazy. (2026-07-01 false-fire.)
+  'test', 'tests',
 ]);
 
 // Standard tech acronyms / short tokens that are legitimately vowelless or terse.
@@ -85,6 +88,12 @@ const COMMON_WORDS = new Set([
   'page', 'pages', 'browser', 'navigate', 'extract', 'reader', 'writer', 'loader', 'builder', 'factory',
   'validate', 'validator', 'normalize', 'serialize', 'deserialize', 'aggregate', 'percentile', 'trial',
   'trials', 'concurrency', 'parallel', 'resume', 'durable', 'idempotent', 'checkpoint', 'progress',
+  // ML / systems vocabulary — real words that were flagged as near-typos of a listed word because
+  // they weren't themselves listed ("train"→brain, "modal"→model). Listing them = known-good.
+  'train', 'training', 'trainer', 'pretrained', 'modal', 'fusion', 'tensor', 'gradient', 'encoder',
+  'decoder', 'transformer', 'embedding', 'embeddings', 'dataset', 'datasets', 'epoch', 'neural',
+  'network', 'solver', 'satisfiability', 'checker', 'proposer', 'pipeline', 'scaffold', 'orchestrator',
+  'clause', 'clauses', 'variable', 'variables', 'literal', 'assignment', 'heuristic', 'fixture',
 ]);
 
 // Optimal String Alignment distance (Levenshtein + adjacent transposition counted as one edit). Bounded

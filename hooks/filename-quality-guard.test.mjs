@@ -40,6 +40,12 @@ test('ALLOWS the real files we just created (no false positives)', () => {
     'bench/voice-latency/smoke.mjs',
     'bench/voice-latency/package.json',
     'filename-quality-guard.mjs',
+    // 2026-07-01 false-fires: real ML words wrongly flagged as typos, and mid-name "test".
+    'train.py',                        // "train" was flagged as a typo of "brain"
+    'test_b_modal.py',                 // "modal" was flagged as a typo of "model"
+    'test_b_pretrained_fusion.py',     // "pretrained"/"fusion" — real words
+    'validate_test_b.py',              // mid-name "test" beside real word "validate"
+    'run_fusion_sizes.py',
   ]) {
     assert.equal(assessFilename(good).ok, true, `expected ALLOW for ${good} (got: ${JSON.stringify(assessFilename(good))})`);
   }
