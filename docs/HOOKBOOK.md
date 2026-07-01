@@ -109,6 +109,9 @@ When you add a new branch/case/function to a configured "hot" pipeline file, req
 ### `decay-footer` · Stop
 If you wrote/edited code files this turn, the reply must end with a debt-surface footer (Files touched / Invariants relied on / Smells introduced / Suggested follow-up). **Override for trivial edits:** the line `decay-footer override: trivial change — <what>`, or `DECAY_FOOTER_OVERRIDE=1`.
 
+### `jargon-gloss-guard` · Stop
+On an EXPLAINING turn (no code file written this turn), blocks if the reply's FIRST use of a jargon term (BCE, RL, fine-tuning, GNN, etc.) has no plain-English gloss nearby (a parenthetical, a dash-explanation, or a signal phrase like "which means"). Skips terms the transcript's "Already known ... :" reminder already covers, and skips coding turns (different narration style). **Override:** the line `jargon-gloss override: <why>`, or `JARGON_GLOSS_OVERRIDE=1`.
+
 ### `hookbook-sync` · Stop
 If a hook `.mjs` changed this turn but HOOKBOOK wasn't touched, or the "N hooks" headline drifts from the count registered in settings.json, blocks until you fix it. The system documents itself. **Config:** `HOOKBOOK_PATH`, `HOOK_SETTINGS_PATH`. **Override:** `HOOKBOOK_SYNC_OVERRIDE=1`.
 
