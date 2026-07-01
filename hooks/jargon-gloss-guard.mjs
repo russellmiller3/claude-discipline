@@ -9,11 +9,13 @@
  * after Russell asked. A system-prompt instruction alone didn't stop the repeat — this hook
  * enforces the OUTCOME: the first use of a jargon term in a reply must have a gloss nearby.
  *
- * Scope: only fires on turns where no Write/Edit landed a code file (explaining turns — the
- * CODING narration style is different and this isn't where the mistake happened). Only checks
- * the FIRST occurrence of each term per reply — once glossed, later mentions are fine. Skips
- * any term the system prompt already told us is "already known" this session (dynamically
- * read from the transcript's "Already known ... :" reminder line, e.g. "embedding").
+ * Scope: fires on EXPLAINING turns always. On a turn that ALSO wrote code, it fires only when
+ * the final message is a SUBSTANTIAL explanation (>= 40 words), not a terse status beat — because
+ * a whole page of jargon slipped through once JUST because the same turn also edited a file. The
+ * old "skip every code turn" rule WAS the bug (2026-07-01, Russell: "pages of jargon i didnt
+ * follow, need to follow hook no jargon. fix hook"). Only checks the FIRST occurrence of each term
+ * per reply — once glossed, later mentions are fine. Skips any term the "Already known ... :"
+ * reminder line lists (dynamically read from the transcript, e.g. "embedding").
  */
 import { readFileSync, existsSync } from 'node:fs';
 
@@ -27,14 +29,24 @@ function isCodeFile(path) {
   return CODE_EXTENSIONS.test(normalizedPath);
 }
 
-// Terms worth glossing when they appear UNEXPLAINED. Kept to what actually shows up in
-// ML/logic explaining turns — extend as new repeat-offenders surface.
+// Terms worth glossing when they appear UNEXPLAINED. Extend as new repeat-offenders surface.
+// Multi-word terms are matched literally; put the more-specific one first (e.g. 'gradient descent'
+// before 'gradient') so it's the one reported.
 const JARGON_TERMS = [
-  'BCE', 'SGD', 'RLHF', 'RLVR', 'GRPO', 'PPO', 'SFT', 'GNN', 'MLP', 'LoRA',
+  // training / neural nets
+  'BCE', 'SGD', 'RLHF', 'RLVR', 'GRPO', 'PPO', 'SFT', 'GNN', 'MLP', 'LoRA', 'MiniLM', 'BERT',
   'backpropagation', 'backprop', 'fine-tuning', 'fine-tune', 'pretraining', 'pretrained',
-  'tokenizer', 'tokenization', 'logits', 'softmax', 'sigmoid', 'hyperparameter',
-  'checkpoint', 'epoch', 'cross-entropy', 'quantization', 'distillation',
+  'tokenizer', 'tokenization', 'logits', 'logit', 'softmax', 'sigmoid', 'hyperparameter',
+  'checkpoint', 'epoch', 'cross-entropy', 'quantization', 'distillation', 'embedding',
   'policy gradient', 'reward model', 'latent space', 'activation function',
+  'encoder', 'decoder', 'transformer', 'proposer', 'readout', 'forward pass', 'end-to-end',
+  'gradient descent', 'gradient', 'stochastic', 'inference', 'overfit', 'overfitting',
+  'generalize', 'generalizes', 'generalization', 'plateau', 'ablation',
+  'parameter group', 'param group', 'warmup', 'learning rate', 'discriminative',
+  'marginals', 'marginal', 'argmax', 'differentiable', 'relaxation', 'seed quality',
+  // logic / solver
+  'soft-Z3', 'soft Z3', 'soft-sat', 'soft satisfaction', 'soft checker', 'combinatorial',
+  'satisfiability', 'CNF', 'SMT', 'formalization', 'formalizer', 'clause',
 ];
 
 // A gloss marker: a parenthetical, an explanatory dash/colon, or a plain-English signal phrase.
@@ -132,8 +144,14 @@ function main() {
     }
   }
 
-  if (codeWasWritten) process.exit(0);      // coding turns use a different narration style
   if (!lastAssistantText.trim()) process.exit(0);
+  // The gloss rule is ALWAYS on (Russell's output style). But a terse coding status beat
+  // ("wired the loss into the loop") isn't where jargon-walls happen — a long EXPLANATION is.
+  // So on a turn that also wrote code, only check when the final message is substantial. A
+  // pure explaining turn (no code) is always checked, at any length.
+  const CODE_TURN_EXPLANATION_MIN_WORDS = 40;
+  const wordCount = lastAssistantText.trim().split(/\s+/).filter(Boolean).length;
+  if (codeWasWritten && wordCount < CODE_TURN_EXPLANATION_MIN_WORDS) process.exit(0);
   if (/jargon-gloss override:/i.test(lastAssistantText)) process.exit(0);
 
   const alreadyKnownTerms = extractAlreadyKnownTerms(transcriptText);

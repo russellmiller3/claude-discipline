@@ -111,7 +111,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 |------|-------|------------------|
 | `no-backcompat` | PreToolUse(Write/Edit) | Pre-1.0 projects: replace old code outright; no fallback shims kept alive "just in case" |
 | `root-cause-first` | PostToolUse | After repeated same-symptom fixes, forces a state-probe before the next swing |
-| `jargon-gloss-guard` | Stop | On explaining turns, blocks a reply whose first use of jargon (RL, BCE, fine-tuning...) has no plain-English gloss nearby |
+| `jargon-gloss-guard` | Stop | Blocks a reply whose first use of jargon has no plain-English gloss nearby — fires on explaining turns AND on any substantial (>=40 word) explanation even when the turn also edited code; wide ML/logic word list (argmax, gradient, overfit, generalize, ...) |
 | `decay-footer` | Stop | Code-changing turns must end with a "files touched / smells introduced" footer |
 | `hookbook-sync` | Stop | Change a hook → blocks until `HOOKBOOK.md` documents it (and the count matches) |
 | `discipline-sync` | Stop | The sibling of `hookbook-sync` for this published kit. A hook change must complete the full publish loop before the turn ends: the kit copy matches the live `~/.claude/hooks/` source, the kit's **README/docs are updated**, both repos are committed, and the kit is **pushed to GitHub** — the hook auto-pushes it (kit repo only) and only blocks if commits remain unpushed. So a shipped guard never drifts from the version that runs, and "published" means actually on GitHub, not just committed locally. Override: `DISCIPLINE_NO_PUSH=1` (gate without push) or `DISCIPLINE_SYNC_OVERRIDE=1` |
