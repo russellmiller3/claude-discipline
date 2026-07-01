@@ -50,6 +50,10 @@ function contentOf(entry) {
   return entry?.message?.content ?? entry?.content ?? '';
 }
 
+function targetPathOf(toolUseBlock) {
+  return String(toolUseBlock.input?.file_path || '').replace(/\\/g, '/');
+}
+
 function entryTextOf(entry) {
   const content = contentOf(entry);
   if (typeof content === 'string') return content;
@@ -66,19 +70,34 @@ function entryTextOf(entry) {
   }).join('\n');
 }
 
-// Text the ASSISTANT authored this entry: message text + tool INPUTS (command / new_string /
-// content / file_path). Deliberately EXCLUDES tool_results — block messages advertise their own
-// override tokens, and quoting a block must not read as using its escape hatch.
-function authoredTextOf(entry) {
+// Files where override tokens legitimately appear as CONTENT, not as escape hatches:
+// hook sources (token lists like this file's own OVERRIDE_TOKENS), HOOKBOOK docs, the
+// rules file, and settings. Without this, WRITING a hook that documents overrides read
+// as USING them — the hook flagged itself on its first live stop (2026-07-01).
+const HOOK_AUTHORING_TARGET = /(?:[\\/]hooks[\\/][a-z0-9-]+(?:\.test)?\.mjs|HOOKBOOK\.md|CLAUDE\.md|settings\.json)$/i;
+
+// Reply-level override tokens take effect in plain MESSAGE TEXT (Stop-hook escapes).
+// Everything else (env vars, sentinel comments) only works inside a tool INPUT.
+const TEXT_LEVEL_TOKEN = /override:|true-positive:/i;
+
+// The assistant-authored text of an entry, split by channel: tool INPUTS (minus hook-authoring
+// targets) vs message TEXT. tool_results are excluded entirely — a block message advertising
+// its own escape hatch must not read as using it.
+function authoredChannelsOf(entry) {
   const role = entry?.message?.role || entry?.role;
-  if (role !== 'assistant') return '';
+  if (role !== 'assistant') return { inputText: '', messageText: '' };
   const content = contentOf(entry);
-  if (!Array.isArray(content)) return typeof content === 'string' ? content : '';
-  return content.map((block) => {
-    if (block?.type === 'text') return block.text || '';
-    if (block?.type === 'tool_use') return JSON.stringify(block.input ?? {});
-    return '';
-  }).join('\n');
+  if (!Array.isArray(content)) return { inputText: '', messageText: typeof content === 'string' ? content : '' };
+  let inputText = '';
+  let messageText = '';
+  for (const block of content) {
+    if (block?.type === 'text') messageText += `${block.text || ''}\n`;
+    if (block?.type === 'tool_use') {
+      if (HOOK_AUTHORING_TARGET.test(targetPathOf(block))) continue;   // writing ABOUT hooks ≠ dodging one
+      inputText += `${JSON.stringify(block.input ?? {})}\n`;
+    }
+  }
+  return { inputText, messageText };
 }
 
 function hookEditsOf(entry) {
@@ -88,8 +107,7 @@ function hookEditsOf(entry) {
   for (const block of content) {
     if (block?.type !== 'tool_use') continue;
     if (!['Edit', 'Write', 'MultiEdit'].includes(block.name)) continue;
-    const filePath = String(block.input?.file_path || '').replace(/\\/g, '/');
-    const match = filePath.match(/\/hooks\/([a-z0-9-]+)(?:\.test)?\.mjs$/i);
+    const match = targetPathOf(block).match(/\/hooks\/([a-z0-9-]+)(?:\.test)?\.mjs$/i);
     if (match) editedHookNames.push(match[1].toLowerCase());
   }
   return editedHookNames;
@@ -127,16 +145,19 @@ export function findWorkedAroundHooks(transcriptText) {
     }
     for (const editedHookName of hookEditsOf(entry)) editedHooks.add(editedHookName);
 
-    const authored = authoredTextOf(entry);
-    if (authored) {
-      finalAssistantText = authored;
+    const { inputText, messageText } = authoredChannelsOf(entry);
+    if (messageText.trim()) finalAssistantText = messageText;
+    if (inputText || messageText) {
       for (const [hookName, blockIndex] of blockIndexByHook) {
         if (overrideIndexByHook.has(hookName) || entryIndex <= blockIndex) continue;
         const tokens = OVERRIDE_TOKENS[hookName] || [];
         const genericOverride = new RegExp(`\\b${hookName}[-_ ]?override`, 'i');
-        if (tokens.some((token) => authored.includes(token)) || genericOverride.test(authored)) {
-          overrideIndexByHook.set(hookName, entryIndex);
-        }
+        // Input-level tokens (env vars, sentinels) only take effect inside a tool input; the
+        // generic <hook>-override form is input-level too. Reply-level tokens (the `... override:`
+        // family) also count in message text — but a prose MENTION of an input-level token doesn't.
+        const usedInInput = tokens.some((token) => inputText.includes(token)) || genericOverride.test(inputText);
+        const usedInText = tokens.some((token) => TEXT_LEVEL_TOKEN.test(token) && messageText.includes(token));
+        if (usedInInput || usedInText) overrideIndexByHook.set(hookName, entryIndex);
       }
     }
   });

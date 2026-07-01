@@ -87,6 +87,50 @@ test('the block message advertising its own override token does not self-trigger
   assert.deepEqual(findWorkedAroundHooks(transcript), []);
 });
 
+test('WRITING a hook whose source lists override tokens does not count as using them (self-flag regression)', () => {
+  // The hook flagged ITSELF on its first live stop: its own OVERRIDE_TOKENS map contains
+  // 'name-by-use-override', and that Write read as "used name-by-use's override".
+  const transcript = [
+    blockResult('STOP. Name-by-use violation.\n  - line 34: `cwd` (cryptic acronym)'),
+    assistantToolUse('Write', {
+      file_path: 'C:\\Users\\rmill\\.claude\\hooks\\fix-false-positive-hooks.mjs',
+      content: "const OVERRIDE_TOKENS = { 'name-by-use': ['name-by-use-override', 'NAME_BY_USE_OVERRIDE=1'] };",
+    }),
+  ].join('\n');
+  assert.deepEqual(findWorkedAroundHooks(transcript), []);
+});
+
+test('a HOOKBOOK/CLAUDE.md edit documenting override tokens does not count either', () => {
+  const transcript = [
+    blockResult('STOP. Name-by-use violation.'),
+    assistantToolUse('Edit', {
+      file_path: 'C:/Users/rmill/.claude/hooks/HOOKBOOK.md',
+      new_string: 'Override: `name-by-use-override` in the text, or NAME_BY_USE_OVERRIDE=1.',
+    }),
+    assistantToolUse('Edit', {
+      file_path: 'C:/Users/rmill/.claude/CLAUDE.md',
+      new_string: 'escape = NAME_BY_USE_OVERRIDE=1',
+    }),
+  ].join('\n');
+  assert.deepEqual(findWorkedAroundHooks(transcript), []);
+});
+
+test('a prose MENTION of an input-level token in the reply does not count as usage', () => {
+  const transcript = [
+    blockResult('STOP. Name-by-use violation.'),
+    assistantText('The escape hatch would be name-by-use-override, but I renamed the variables instead.'),
+  ].join('\n');
+  assert.deepEqual(findWorkedAroundHooks(transcript), []);
+});
+
+test('a reply-level override (jargon-gloss override:) in message text DOES count', () => {
+  const transcript = [
+    blockResult('STOP — jargon used without a gloss (Russell, 2026-07-01).'),
+    assistantText('jargon-gloss override: term was already explained earlier this turn.'),
+  ].join('\n');
+  assert.deepEqual(findWorkedAroundHooks(transcript), ['jargon-gloss-guard']);
+});
+
 test('end-to-end spawn: workaround transcript ⇒ decision block; stop_hook_active ⇒ silent', () => {
   const workDirectory = mkdtempSync(join(tmpdir(), 'ffph-'));
   const transcriptPath = join(workDirectory, 'transcript.jsonl');
