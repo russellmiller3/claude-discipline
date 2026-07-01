@@ -90,6 +90,9 @@ While the ack marker exists, blocks edits to *code* files until you Read the sur
 ### `learnings-write-nudge` · PostToolUse(Bash) + Stop
 After a `fix`/`feat` commit with lesson-worthy language, nudges you to add a learnings bullet. The Stop half is commit-independent: if the turn diagnosed a real error and applied a fix but wrote no learning, it blocks. **Dismiss:** the token `no-learning-needed`. **Override:** `LEARNINGS_NUDGE_OVERRIDE=1`.
 
+### `getty-no-repeat-mistakes` · UserPromptSubmit + Stop
+"You can make any mistake you want. Just never make the same one twice." Detects a correction in the user's own wording (background-agent completions and system reminders are explicitly excluded — never counted as "the user speaking," even when they quote correction-like phrases). First-time correction: satisfied by adding a learnings bullet. REPEAT correction (wording signals "you've done this before"): a learning already failed once, so only building/strengthening a hook clears it — and the agent must ask before building, never build unilaterally. **Override:** `getty-override: <reason>`.
+
 ### `handoff-continuity` · SessionStart + UserPromptSubmit + Stop
 Reminds you to read `HANDOFF.md` at start; marks a checkpoint "due" every N turns (default 5) — or when you say "handoff"/"save context"/report a compaction — and blocks Stop until `HANDOFF.md` is updated past the due time. The checkpoint message demands a WHOLE-FILE review + **PRUNE** (keep what's live, cut what's stale/done), not just an append, and to create `learnings.md` if it's missing. **Config:** `HANDOFF_CHECKPOINT_EVERY_TURNS` (default 5), `HANDOFF_CONTINUITY_STATE_PATH`.
 

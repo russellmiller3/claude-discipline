@@ -102,6 +102,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 | `learnings-error-match` | PostToolUse | When an error appears, surfaces the matching past lesson — *and drops a marker* |
 | `require-learnings-ack` | PreToolUse(Edit) | Blocks code edits until you've actually read the surfaced lesson |
 | `learnings-write-nudge` | PostToolUse+Stop | Blocks stop when you fixed a real bug but wrote no learning |
+| `getty-no-repeat-mistakes` | UserPromptSubmit+Stop | On a correction, requires a learning; on a REPEAT correction, a learning already failed — requires asking to build a hook instead |
 | `handoff-continuity` | SessionStart+UserPromptSubmit+Stop | Fires every ~5 turns (and on compaction/"handoff"); blocks stop until `HANDOFF.md` is re-pruned whole-file, not just appended |
 | `new-repo-scaffold` | PostToolUse(Bash) | On `git init`, writes a README (North Star / user-stories / roadmap / GTM), `HANDOFF.md`, `learnings.md` + a commit-gate config; never overwrites |
 

@@ -62,7 +62,10 @@ const CORRECTION_PATTERNS = [
 // completion notices, harness reminders, hook output. The reward signal is Russell's OWN correction
 // wording — never a notification. Detecting "you skipped"/"again" inside an agent's design doc or a
 // task result is a false positive that wrongly armed the Getty gate (twice, 2026-06-19). Skip these.
-const SYSTEM_INJECTED = /<task-notification\b|<\/task-notification>|<system-reminder\b|<task-id>|<tool-use-id>|came to rest/i;
+// 2026-07-01: a THIRD vector in the same family — the harness re-presents a prior "Stop hook feedback"
+// / "Stop hook blocking error" denial (this hook's OWN output, quoting "never make the same one TWICE")
+// back as the next turn's prompt. That re-armed the marker on its own text, an infinite self-trigger.
+const SYSTEM_INJECTED = /<task-notification\b|<\/task-notification>|<system-reminder\b|<task-id>|<tool-use-id>|came to rest|^\s*stop hook (feedback|blocking error)|stop-blocked\s*—/i;
 
 const OVERRIDE = /getty-override:/i;
 const MUTATING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
