@@ -22,7 +22,7 @@
  * Fail-open on any internal error — never brick a legitimate Write.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 // Conventional all-caps / standard stems that are correct AS-IS regardless of dictionary status.
@@ -94,6 +94,9 @@ const COMMON_WORDS = new Set([
   'decoder', 'transformer', 'embedding', 'embeddings', 'dataset', 'datasets', 'epoch', 'neural',
   'network', 'solver', 'satisfiability', 'checker', 'proposer', 'pipeline', 'scaffold', 'orchestrator',
   'clause', 'clauses', 'variable', 'variables', 'literal', 'assignment', 'heuristic', 'fixture',
+  // Plain verbs that sit one edit from their agent nouns ("write"→writer, "watch"→watcher) — real
+  // words, not typos ("write" false-blocked no-write-to-main.test.mjs, 2026-07-01).
+  'write', 'writes', 'watch', 'merge', 'merged', 'clean', 'build', 'builds', 'fetch', 'batch',
 ]);
 
 // Optimal String Alignment distance (Levenshtein + adjacent transposition counted as one edit). Bounded
@@ -145,6 +148,18 @@ export function assessFilename(filePath) {
   const stemLower = stem.toLowerCase();
   if (!stem) return { ok: true };
   if (ALLOWED_STEMS.has(stemLower)) return { ok: true };
+  // A name whose stem matches an EXISTING sibling file is consistent-by-construction — the
+  // canonical case is creating `X.test.mjs` beside `X.mjs` (a test MUST mirror its subject's
+  // name; "write"→"writer" false-blocked no-write-to-main.test.mjs, 2026-07-01). Fail-closed
+  // to the normal checks when the directory can't be read (e.g. unit tests with fake paths).
+  try {
+    const normalizedPath = String(filePath).replace(/\\/g, '/');
+    const parentDirectory = normalizedPath.slice(0, normalizedPath.lastIndexOf('/')) || '.';
+    const siblingMatchesStem = readdirSync(parentDirectory).some(
+      (siblingName) => siblingName !== base && siblingName.split('.')[0].toLowerCase() === stemLower
+    );
+    if (siblingMatchesStem) return { ok: true };
+  } catch { /* directory unreadable — fall through to the normal checks */ }
   if (JUNK_STEMS.has(stemLower)) {
     return { ok: false, reason: `"${base}" is a lazy/scratch name — it says nothing about what the file holds.`, suggestion: 'Name it for its role (e.g. voice-latency-findings, sheets-client, retry-policy).' };
   }

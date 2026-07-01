@@ -1,6 +1,8 @@
 // Tests for filename-quality-guard's pure verdict. Run: node --test filename-quality-guard.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { assessFilename } from './filename-quality-guard.mjs';
 
 test('blocks the motivating typo: findigns -> findings', () => {
@@ -93,4 +95,19 @@ test('still BLOCKS a bare/lazy test name even with the convention prefix', () =>
   for (const bad of ['test.py', 'tests.py', 'test_tmp.py']) {
     assert.equal(assessFilename(bad).ok, false, `expected BLOCK for ${bad}`);
   }
+});
+
+test('ALLOWS plain verbs beside their agent nouns (write vs writer, 2026-07-01 false-fire)', () => {
+  // "write" is a real word one edit from "writer" — it was flagged as a typo and blocked
+  // no-write-to-main.test.mjs. Verbs like write/watch/merge/build are known-good now.
+  for (const good of ['no-write-to-main.mjs', 'watch-and-rebuild.mjs', 'merge-check.mjs']) {
+    assert.equal(assessFilename(good).ok, true, `expected ALLOW for ${good} (got: ${JSON.stringify(assessFilename(good))})`);
+  }
+});
+
+test('ALLOWS a new file whose stem matches an EXISTING sibling (X.test.mjs beside X.mjs)', () => {
+  // Uses this real hooks directory: no-write-to-main.mjs exists, so a companion named
+  // no-write-to-main.<anything> is consistent-by-construction even if a token looked bad.
+  const hooksDirectory = dirname(fileURLToPath(import.meta.url));
+  assert.equal(assessFilename(join(hooksDirectory, 'no-write-to-main.test.mjs')).ok, true);
 });

@@ -42,16 +42,27 @@ function main() {
   // Only fire on git commit
   if (!/\bgit\s+commit\b/.test(c)) process.exit(0);
 
-  // Determine current branch — same pattern as no-feature-branch-push.mjs:
-  // use process.cwd() since Claude Code sets hook process cwd to the project root.
+  // The command may target ANOTHER repo than the session cwd: `cd <kit> && git commit ...`
+  // or `git -C <kit> commit ...`. Check the branch of the repo the commit actually runs in —
+  // checking the session repo's branch false-blocked a commit on another repo's fix branch
+  // just because the SESSION repo sat on main (2026-07-01).
+  function effectiveDirectory(normalizedCommand, sessionDirectory) {
+    const cdPrefixMatch = normalizedCommand.match(/^cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*(?:&&|;)/);
+    if (cdPrefixMatch) return cdPrefixMatch[1] || cdPrefixMatch[2] || cdPrefixMatch[3];
+    const dashCMatch = normalizedCommand.match(/\bgit\s+-C\s+(?:"([^"]+)"|'([^']+)'|(\S+))/);
+    if (dashCMatch) return dashCMatch[1] || dashCMatch[2] || dashCMatch[3];
+    return sessionDirectory;
+  }
+
   let branch;
   try {
     branch = execSync('git branch --show-current', {
       encoding: 'utf8',
+      cwd: effectiveDirectory(c, event.cwd || process.cwd()),
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
   } catch {
-    process.exit(0); // fail open — don't block on git errors
+    process.exit(0); // fail open — don't block on git errors (incl. a bad cd path: git itself will error)
   }
 
   if (branch !== 'main' && branch !== 'master') process.exit(0);

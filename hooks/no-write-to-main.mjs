@@ -78,14 +78,19 @@ function isInsideRepo(target, cwd, repoRoot) {
 function extractWriteTargets(command) {
   const targets = [];
 
-  // cp source dest  (last positional argument is destination)
-  // handles: cp foo.js src/lib/  or  cp foo.js src/lib/foo.js
-  const cpMatch = command.match(/\bcp\s+(?:-[rRfpn]+\s+)*(\S+)\s+(\S+)/);
-  if (cpMatch) targets.push({ pattern: 'cp', target: cpMatch[2] });
-
-  // mv source dest
-  const mvMatch = command.match(/\bmv\s+(?:-[fn]+\s+)*(\S+)\s+(\S+)/);
-  if (mvMatch) targets.push({ pattern: 'mv', target: mvMatch[2] });
+  // cp/mv: the DESTINATION is the LAST positional argument — everything before it is a
+  // SOURCE (a read, not a write). The old 2-arg pattern grabbed the 2nd token, so a
+  // multi-file copy (`cp a.mjs b.mjs c.mjs dest/`) false-positived on a SOURCE file
+  // and blocked a legit copy into another repo's feature branch (2026-07-01).
+  for (const copyLike of ['cp', 'mv']) {
+    const argListMatch = command.match(new RegExp(`\\b${copyLike}\\s+([^;|&]+)`));
+    if (argListMatch) {
+      const positionalArguments = argListMatch[1].trim().split(/\s+/).filter(token => !token.startsWith('-'));
+      if (positionalArguments.length >= 2) {
+        targets.push({ pattern: copyLike, target: positionalArguments[positionalArguments.length - 1] });
+      }
+    }
+  }
 
   // shell redirect:  command > file  or  command >> file
   // strip quoted strings first to avoid false positives inside heredocs

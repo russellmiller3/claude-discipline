@@ -85,3 +85,38 @@ test('a non-Bash tool is ignored entirely', () => {
   assert.equal(hookRun.status, 0);
   assert.equal(hookRun.stdout, '');
 });
+
+// ── cross-repo targeting: judge the repo the COMMIT runs in, not the session repo ─────────
+// (Regression 2026-07-01: session repo on main + `cd <other-repo-on-fix-branch> && git commit`
+//  was false-blocked because the hook read the session repo's branch.)
+
+test('allows `cd <other repo on a fix branch> && git commit` while session repo is on main', () => {
+  const sessionRepoOnMain = makeGitRepo('main');
+  const targetRepoOnBranch = makeGitRepo('fix/kit-sync');
+  const command = `cd "${targetRepoOnBranch.replace(/\\/g, '/')}" && git add -A && git commit -m "sync"`;
+  const hookRun = runHook(command, sessionRepoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('allows `git -C <other repo on a branch> commit` while session repo is on main', () => {
+  const sessionRepoOnMain = makeGitRepo('main');
+  const targetRepoOnBranch = makeGitRepo('feature/away');
+  const command = `git -C "${targetRepoOnBranch.replace(/\\/g, '/')}" commit -m "fine"`;
+  const hookRun = runHook(command, sessionRepoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('still BLOCKS `cd <other repo on main> && git commit` even from a branch session', () => {
+  const sessionRepoOnBranch = makeGitRepo('feature/safe');
+  const targetRepoOnMain = makeGitRepo('main');
+  const command = `cd "${targetRepoOnMain.replace(/\\/g, '/')}" && git commit -m "oops"`;
+  const hookRun = runHook(command, sessionRepoOnBranch);
+
+  assert.equal(hookRun.status, 0);
+  const hookOutput = JSON.parse(hookRun.stdout);
+  assert.equal(hookOutput.hookSpecificOutput.permissionDecision, 'deny');
+});
