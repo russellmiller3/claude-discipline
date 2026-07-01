@@ -91,7 +91,10 @@ While the ack marker exists, blocks edits to *code* files until you Read the sur
 After a `fix`/`feat` commit with lesson-worthy language, nudges you to add a learnings bullet. The Stop half is commit-independent: if the turn diagnosed a real error and applied a fix but wrote no learning, it blocks. **Dismiss:** the token `no-learning-needed`. **Override:** `LEARNINGS_NUDGE_OVERRIDE=1`.
 
 ### `handoff-continuity` · SessionStart + UserPromptSubmit + Stop
-Reminds you to read `HANDOFF.md` at start; marks a checkpoint "due" every N turns (or when you say "handoff"/"save context"/report a compaction); blocks Stop until `HANDOFF.md` is updated past the due time. **Config:** `HANDOFF_CONTINUITY_TURN_INTERVAL` (default 3), `HANDOFF_CONTINUITY_STATE_PATH`.
+Reminds you to read `HANDOFF.md` at start; marks a checkpoint "due" every N turns (default 5) — or when you say "handoff"/"save context"/report a compaction — and blocks Stop until `HANDOFF.md` is updated past the due time. The checkpoint message demands a WHOLE-FILE review + **PRUNE** (keep what's live, cut what's stale/done), not just an append, and to create `learnings.md` if it's missing. **Config:** `HANDOFF_CHECKPOINT_EVERY_TURNS` (default 5), `HANDOFF_CONTINUITY_STATE_PATH`.
+
+### `new-repo-scaffold` · PostToolUse(Bash)
+On `git init`, WRITES the repo's missing scaffolding — it has teeth (creates files, never overwrites an existing one): `README.md` with a **NORTH STAR** + main user-stories + tech-stack-via-interview + roadmap + go-to-market skeleton (and the message tells you to INTERVIEW the owner before guessing the stack), `HANDOFF.md` (compaction parachute), `learnings.md` (long-term memory), plus the commit gate — `.pre-commit-config.yaml` for Python, a husky reminder for Node. Turns "a fresh repo starts empty" into "a fresh repo starts with its purpose, memory, and gate in place."
 
 ---
 
