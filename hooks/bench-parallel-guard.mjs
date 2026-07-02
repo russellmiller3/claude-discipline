@@ -114,11 +114,32 @@ function deny(reason) {
 // Strip quoted-string literals and inline-code args (-c/-e/-p/-Command) so keyword detection sees
 // only the executable structure — never text inside quotes/code. Without this, `grep "bench"` and
 // `echo "...py -c..."` (which run nothing) false-tripped the guard. (2026-06-29)
+// Blank HEREDOC BODIES first: `head ... > f && cat >> f <<'EOF' ... EOF` writes file DATA (often
+// prose documenting already-finished work, e.g. a HANDOFF.md rewrite that just MENTIONS a path like
+// `bench/filebrain_bench.py`), not shell structure. Without this, a heredoc body that merely names a
+// bench/ path — combined with an unrelated real run-word (node/python/etc.) anywhere else in the same
+// compound command — satisfied both `mentionsBench` and `runsSomething` and false-blocked a doc-only
+// write that invoked no benchmark at all. Reuses long-running-script-guard.mjs's stripHeredocBodies
+// (same class of bug, fixed there first the same day) rather than reinventing it. (2026-07-02)
 export function executableText(command) {
   let scannableCommand = String(command);
+  scannableCommand = stripHeredocBodies(scannableCommand);
   scannableCommand = scannableCommand.replace(/(\s-(?:c|e|p)\b|\s--?command\b)\s*(["'])(?:\\.|(?!\2).)*\2/gi, '$1 ""');
   scannableCommand = scannableCommand.replace(/(\s-(?:c|e|p)\b|\s--?command\b)\s+[^\s"'|&;]+/gi, '$1 ');
   return scannableCommand.replace(/"(?:\\.|[^"\\])*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''");
+}
+
+// Blank the body of every heredoc, keeping only the `<<DELIM` redirection token. Matches `<<DELIM`,
+// `<< 'DELIM'`, `<<"DELIM"`, and the `<<-DELIM` indented form; the body runs up to a line that is the
+// bare delimiter (leading tabs allowed for `<<-`). A heredoc writes DATA to a file/stdin — its content
+// is never the shell's executable structure, so keyword scanning must not see it. Copied verbatim from
+// long-running-script-guard.mjs to keep both hooks' heredoc handling in sync (DRY: same helper, same
+// regex, same behavior — see HOOKBOOK.md for the shared-pattern note). (2026-07-02)
+export function stripHeredocBodies(command) {
+  return String(command).replace(
+    /<<-?\s*(['"]?)([A-Za-z_]\w*)\1[\s\S]*?^[ \t]*\2[ \t]*$/gm,
+    '<<$2'
+  );
 }
 
 export function looksLikeBenchmark(command) {
