@@ -44,6 +44,15 @@
 #
 # This script NEVER needs COMMIT_MAIN_OVERRIDE=1 or any other guard bypass: it is
 # itself the sanctioned path those guards exist to funnel agents toward.
+#
+# KNOWN SIDE EFFECT (2026-07-02, discovered right after first production use): landing
+# via update-ref moves refs/heads/main WITHOUT ever checking anything out, so if the
+# PRIMARY working directory has `main` checked out (the common case), its on-disk files
+# now lag behind its own HEAD -- `git status` there shows a pile of confusing "modified"/
+# "deleted" files that are actually just staleness, not real uncommitted work. This is
+# harmless (nothing is lost, it's the working tree catching up) but looks alarming. Fix
+# in the primary directory: `git status --short` to eyeball it looks like plain
+# staleness (not someone's genuine WIP), then `git checkout -- .` to sync it to HEAD.
 
 set -euo pipefail
 
