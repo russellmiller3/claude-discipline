@@ -109,7 +109,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 ### Tier 3 — Opinionated (great defaults; some teams will disagree — that's fine, toggle them off)
 | Hook | Event | What it enforces |
 |------|-------|------------------|
-| `no-backcompat` | PreToolUse(Write/Edit) | Pre-1.0 projects: replace old code outright; no fallback shims kept alive "just in case" |
+| `no-backcompat` | PreToolUse(Write/Edit)+Stop | Pre-1.0 projects: replace old code outright; no fallback shims kept alive "just in case". Fires only on code-adjacent evidence (fenced code, API/syntax vocabulary, code punctuation) near the trigger word — a markdown doc's unrelated "deprecated" prose (e.g. a UI color palette note) no longer false-fires (fixed 2026-07-02, see HOOKBOOK) |
 | `root-cause-first` | PostToolUse | After repeated same-symptom fixes, forces a state-probe before the next swing |
 | `jargon-gloss-guard` | Stop | Blocks a reply whose first use of jargon has no plain-English gloss nearby — fires on explaining turns AND on any substantial (>=40 word) explanation even when the turn also edited code; wide ML/logic word list (argmax, gradient, overfit, generalize, ...) |
 | `decay-footer` | Stop | Code-changing turns must end with a "files touched / smells introduced" footer |
