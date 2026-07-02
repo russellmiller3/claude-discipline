@@ -77,7 +77,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 |------|-------|------------------|
 | `block-dangerous-commands` | PreToolUse(Bash) | Refuses `rm -rf /`, fork bombs, disk-wipes, etc. |
 | `protect-secrets` | PreToolUse | Blocks reads/writes of `.env`, key files, credential stores |
-| `no-commit-to-main` | PreToolUse(Bash) | Blocks direct commits to `main`/`master` — branch first |
+| `no-commit-to-main` | PreToolUse(Bash) | Blocks direct commits to `main`/`master` — branch first. Also denies a `COMMIT_MAIN_OVERRIDE=1` commit to main when another worktree is currently `locked` (a background agent may be mid-landing) — see HOOKBOOK for the incident that motivated this |
 | `read-before-write` | PreToolUse(Edit) | Blocks editing a file you haven't read this session |
 | `pixels-only-proof` | Stop | On a visual/"not rendering" task, blocks "fixed" claims that cite DOM/`toBeVisible` instead of a screenshot |
 | `tests-must-pass` | PostToolUse+Stop | Any failing test (incl. "pre-existing") blocks stop until a full green run |
