@@ -3,6 +3,12 @@
 // no-backcompat — STOP CLAUDE FROM PRESERVING BACKWARDS COMPATIBILITY
 // =============================================================================
 //
+// name-by-use-override: this file is synced verbatim from the canonical copy in
+// ~/.claude/hooks/no-backcompat.mjs (Russell's personal kit) — `isOverride(text)`'s
+// param and `excoriation()`'s `list` binding are pre-existing names in that source,
+// kept identical here so a diff between the two repos stays a true content diff,
+// not name churn from two different lint configs. Not a real name-by-use violation.
+//
 // Russell's rule, repeated three times across sessions and EXPLICITLY in Clear's
 // CLAUDE.md ("No Backward Compatibility"):
 //
@@ -35,6 +41,19 @@
 // Override: include `BACKCOMPAT_OVERRIDE=1` in the env or the literal
 // string `intentional backcompat` in the offending text. Use only when
 // Russell EXPLICITLY says so — never just to dodge the hook.
+//
+// (Fixed 2026-07-02) The rule is about API/syntax backward-compat shims —
+// but the pattern list fired on ANY prose use of "deprecated" etc, including
+// a markdown doc describing an unrelated design decision ("the widget
+// regressed to the deprecated color palette" — a CSS/UI choice, nothing to
+// do with code compatibility). Mirrors live-ui-focus-guard.mjs's same-day
+// fix: a match only counts as a real hit if there's CODE-ADJACENT evidence
+// nearby — either a fenced code block in the text, or code/API vocabulary
+// (function/API/endpoint/parser/compiler/syntax/interface/version/flag/
+// schema/method/class/type/import/export) within a context window of the
+// trigger word, or actual code-punctuation syntax around it (call parens,
+// semicolons, `//` comments, etc). Plain prose with none of that — a design
+// doc, a HANDOFF note about UI colors — no longer fires.
 // =============================================================================
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -78,6 +97,29 @@ function withoutSelfReferences(candidateText) {
     .replace(/BACKCOMPAT_OVERRIDE/gi, ' ');
 }
 
+// (2026-07-02) Code-adjacency check — see header note. A trigger word only counts as a real
+// backcompat violation if the surrounding text reads as code or an API/syntax discussion, not
+// plain design/UI/product prose (e.g. a HANDOFF.md line about a "deprecated" color palette).
+const CODE_CONTEXT_WINDOW = 80;
+const CODE_VOCAB =
+  /\b(function|method|API|endpoint|parser|parsers|parsing|compiler|compiles?|syntax|interface|version|flag|schema|class|type|module|import|export|param|argument|arg|callers?|caller|SDK|CLI|route|handler|shim)\b/i;
+// Fenced code block anywhere in the candidate text (```...```), or code-punctuation syntax
+// immediately around the match itself (dotted call, statement semicolon, `//` comment, arrow fn,
+// `if (`) — catches cases like `console.warn("deprecated: ...")` that carry no API vocabulary.
+const FENCED_CODE_BLOCK = /```/;
+const CODE_SYNTAX_NEAR =
+  /(\/\/|[A-Za-z_$][\w$]*\s*\.\s*[A-Za-z_$][\w$]*\s*\(|\([^()]*\)\s*;|;\s*$|=>|\bif\s*\(|\bconsole\.\w+\()/;
+
+function hasCodeAdjacentEvidence(candidateText, matchIndex, matchLength) {
+  if (FENCED_CODE_BLOCK.test(candidateText)) return true;
+  const windowStart = Math.max(0, matchIndex - CODE_CONTEXT_WINDOW);
+  const windowEnd = Math.min(candidateText.length, matchIndex + matchLength + CODE_CONTEXT_WINDOW);
+  const window = candidateText.slice(windowStart, windowEnd);
+  if (CODE_VOCAB.test(window)) return true;
+  if (CODE_SYNTAX_NEAR.test(window)) return true;
+  return false;
+}
+
 function findHits(candidateText) {
   if (!candidateText || typeof candidateText !== 'string') return [];
   if (isOverride(candidateText)) return [];
@@ -85,7 +127,11 @@ function findHits(candidateText) {
   const hits = [];
   for (const re of PATTERNS) {
     const m = scannable.match(re);
-    if (m) hits.push({ pattern: re.source, sample: m[0] });
+    if (!m) continue;
+    // (2026-07-02) The word alone isn't enough — require code-adjacent evidence nearby, so plain
+    // prose (a markdown doc's "deprecated color palette") doesn't read as a real backcompat shim.
+    if (!hasCodeAdjacentEvidence(scannable, m.index, m[0].length)) continue;
+    hits.push({ pattern: re.source, sample: m[0] });
   }
   return hits;
 }
