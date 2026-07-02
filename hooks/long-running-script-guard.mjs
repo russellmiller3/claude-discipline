@@ -89,10 +89,26 @@ function looksLikeLongScript(command, cwd) {
 // out, so keyword detection sees only the executable structure — never text inside quotes or code.
 export function executableText(command) {
 	let scannableCommand = String(command);
+	// Blank HEREDOC BODIES first: `cat > f <<'TAG' … TAG` writes file DATA, not shell structure, so a
+	// long-keyword inside the written file (e.g. `import x` in a py script) must not read as the job's
+	// nature — the false-block that hit a short `cat > probe.py <<'PY' import … PY; py probe.py` write.
+	// Keep the `<<TAG` redirection token, drop everything up to the closing delimiter line. (2026-07-02)
+	scannableCommand = stripHeredocBodies(scannableCommand);
 	scannableCommand = scannableCommand.replace(/(\s-(?:c|e|p)\b|\s--?command\b)\s*(["'])(?:\\.|(?!\2).)*\2/gi, '$1 ""');
 	scannableCommand = scannableCommand.replace(/(\s-(?:c|e|p)\b|\s--?command\b)\s+[^\s"'|&;]+/gi, '$1 ');
 	scannableCommand = scannableCommand.replace(/"(?:\\.|[^"\\])*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''");
 	return scannableCommand;
+}
+
+// Blank the body of every heredoc, keeping only the `<<DELIM` redirection token. Matches `<<DELIM`,
+// `<< 'DELIM'`, `<<"DELIM"`, and the `<<-DELIM` indented form; the body runs up to a line that is the
+// bare delimiter (leading tabs allowed for `<<-`). A heredoc writes DATA to a file/stdin — its content
+// is never the shell's executable structure, so keyword scanning must not see it.
+export function stripHeredocBodies(command) {
+	return String(command).replace(
+		/<<-?\s*(['"]?)([A-Za-z_]\w*)\1[\s\S]*?^[ \t]*\2[ \t]*$/gm,
+		'<<$2'
+	);
 }
 
 // Text for KEYWORD detection: executableText with flag tokens (--flag[=val], -x) blanked, so a

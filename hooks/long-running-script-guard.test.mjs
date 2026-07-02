@@ -10,6 +10,7 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { stripHeredocBodies } from './long-running-script-guard.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const GUARD = join(here, 'long-running-script-guard.mjs');
@@ -85,6 +86,25 @@ check('allows a single training run whose FLAGS contain train/batch substrings',
 check('still blocks a bare train.py with no run-shape evidence', isDenied('python train.py'));
 // REGRESSION: an explicit --batch fan-out FLAG (standalone) still counts as fan-out.
 check('still blocks a real batch job with the --batch flag and no evidence', isDenied('node process-orders.mjs --batch'));
+
+// 2026-07-02 FALSE-BLOCK: a short `cat > probe.py <<'PY' … import subprocess … PY; py probe.py` write
+// was denied because the long-keyword "import" appeared inside the HEREDOC BODY (file data written to
+// disk, not shell structure). A heredoc body must never count toward the job's nature.
+check('allows a cat-heredoc that writes a py file containing "import" (the 2026-07-02 false-block)',
+  !isDenied("cat > probe.py <<'PY'\nimport subprocess, time\nprint('hi')\nPY\npy probe.py"));
+check('allows a heredoc whose body mentions bench/migrate/sync but the run is short',
+  !isDenied("cat > t.py <<'PY'\n# bench migrate sync import\nprint(1)\nPY\npy t.py"));
+// REGRESSION: a heredoc body must not MASK a real long run in the actual executed command. The runner
+// AFTER the heredoc (a bare bench harness with no evidence) is still gated.
+check('still blocks a real bench harness run even when preceded by a heredoc write',
+  isDenied("cat > x.txt <<'EOF'\nhello\nEOF\nnode some-bench-harness.mjs --all"));
+
+// Unit-test the heredoc stripper directly: the body is gone, the redirection token survives.
+{
+  const stripped = stripHeredocBodies("cat > f.py <<'PY'\nimport os\nbench sweep\nPY\npy f.py");
+  check('stripHeredocBodies removes the body keywords', !/import|bench|sweep/.test(stripped));
+  check('stripHeredocBodies keeps the trailing runner', /py f\.py/.test(stripped));
+}
 
 if (failures.length) { console.error(`\n${failures.length} check(s) failed.`); process.exit(1); }
 console.log('\nAll long-running-script-guard checks passed.');
