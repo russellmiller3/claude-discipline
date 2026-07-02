@@ -210,7 +210,10 @@ claude-discipline/
 │   ├── learnings.md          ← starter memory file (topic-organized, with TOC)
 │   └── HANDOFF.md            ← starter session-state file
 ├── scripts/
-│   └── install.mjs           ← copy hooks + merge settings.json + drop templates
+│   ├── install.mjs           ← copy hooks + merge settings.json + drop templates
+│   └── safe-merge-to-main.sh ← the safe way a background agent lands work onto main
+│                                (locked compare-and-swap update-ref — see HOOKBOOK's
+│                                 unsafe-main-ref-write-guard entry for why)
 └── settings.fragment.json    ← the exact hook registrations (installer merges these)
 ```
 
