@@ -149,3 +149,107 @@ test('a `checkout -- <file>` restore is NOT treated as a branch switch (still ju
   const hookOutput = JSON.parse(hookRun.stdout);
   assert.equal(hookOutput.hookSpecificOutput.permissionDecision, 'deny');
 });
+
+// ── concurrency check: COMMIT_MAIN_OVERRIDE=1 must not race a background agent's ──────────
+// safe-merge-to-main.sh landing (a real incident: a plain override commit's stale parent
+// silently produced a 991-line regression while another agent's landing raced in).
+
+function addWorktree(repoDirectory, branchName) {
+  const worktreeDirectory = mkdtempSync(join(tmpdir(), 'no-commit-to-main-wt-'));
+  execSync(`git worktree add "${worktreeDirectory.replace(/\\/g, '/')}" -b ${branchName}`, {
+    cwd: repoDirectory,
+    stdio: 'ignore',
+  });
+  return worktreeDirectory;
+}
+
+function lockWorktree(repoDirectory, worktreeDirectory, reason = 'agent active') {
+  execSync(`git worktree lock "${worktreeDirectory.replace(/\\/g, '/')}" --reason "${reason}"`, {
+    cwd: repoDirectory,
+    stdio: 'ignore',
+  });
+}
+
+test('COMMIT_MAIN_OVERRIDE=1 on main is DENIED when another worktree is locked (concurrent agent)', () => {
+  const repoOnMain = makeGitRepo('main');
+  const agentWorktree = addWorktree(repoOnMain, 'agent/in-flight');
+  lockWorktree(repoOnMain, agentWorktree);
+
+  const hookRun = runHook('COMMIT_MAIN_OVERRIDE=1 git commit -m "doc-only update"', repoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  const hookOutput = JSON.parse(hookRun.stdout);
+  assert.equal(hookOutput.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(hookOutput.hookSpecificOutput.permissionDecisionReason, /concurrency detected/i);
+  assert.match(hookOutput.hookSpecificOutput.permissionDecisionReason, /safe-merge-to-main\.sh/);
+});
+
+test('COMMIT_MAIN_OVERRIDE=1 on main is ALLOWED when the other worktree is present but NOT locked', () => {
+  const repoOnMain = makeGitRepo('main');
+  addWorktree(repoOnMain, 'agent/finished'); // present, never locked (idle/already done)
+
+  const hookRun = runHook('COMMIT_MAIN_OVERRIDE=1 git commit -m "doc-only update"', repoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('CONCURRENT_COMMIT_OK=1 alongside COMMIT_MAIN_OVERRIDE=1 is ALLOWED even with a locked worktree', () => {
+  const repoOnMain = makeGitRepo('main');
+  const agentWorktree = addWorktree(repoOnMain, 'agent/in-flight-2');
+  lockWorktree(repoOnMain, agentWorktree);
+
+  const hookRun = runHook(
+    'COMMIT_MAIN_OVERRIDE=1 CONCURRENT_COMMIT_OK=1 git commit -m "verified safe"',
+    repoOnMain
+  );
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('CONCURRENT_COMMIT_OK=1 as a real env var (not inline) also honors the override with a locked worktree', () => {
+  const repoOnMain = makeGitRepo('main');
+  const agentWorktree = addWorktree(repoOnMain, 'agent/in-flight-3');
+  lockWorktree(repoOnMain, agentWorktree);
+
+  const hookRun = runHook('git commit -m "verified safe"', repoOnMain, {
+    COMMIT_MAIN_OVERRIDE: '1',
+    CONCURRENT_COMMIT_OK: '1',
+  });
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('COMMIT_MAIN_OVERRIDE=1 in a genuinely solo repo (no other worktrees at all) is ALLOWED, unaffected', () => {
+  const repoOnMain = makeGitRepo('main'); // no addWorktree call — only the primary checkout exists
+
+  const hookRun = runHook('COMMIT_MAIN_OVERRIDE=1 git commit -m "solo doc update"', repoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('fails open (ALLOWS) when `git worktree list` errors — never block on a plumbing hiccup', () => {
+  // Point the hook at a directory that has no real git repository, so `git worktree
+  // list` (run by the concurrency check) fails.
+  const notARepoDirectory = mkdtempSync(join(tmpdir(), 'no-commit-to-main-not-a-repo-'));
+
+  const hookRun = spawnSync(process.execPath, [hookPath], {
+    input: JSON.stringify({
+      tool_name: 'Bash',
+      tool_input: { command: 'COMMIT_MAIN_OVERRIDE=1 git commit -m "whatever"' },
+    }),
+    cwd: notARepoDirectory,
+    encoding: 'utf8',
+    env: { ...process.env },
+  });
+
+  // Outside a repo, `git branch --show-current` inside the non-override path would also
+  // fail open — but here the override IS present, so the only path that runs is the
+  // concurrency check, whose `git worktree list` call fails identically. Either way this
+  // must never deny: fail open on plumbing errors.
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
