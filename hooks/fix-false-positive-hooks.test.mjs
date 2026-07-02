@@ -123,6 +123,41 @@ test('a prose MENTION of an input-level token in the reply does not count as usa
   assert.deepEqual(findWorkedAroundHooks(transcript), []);
 });
 
+test('block → override → dispatched to a BACKGROUND agent naming the hook file ⇒ clean (2026-07-02: delegated fix)', () => {
+  const transcript = [
+    blockResult(LANGDOCS_BLOCK),
+    assistantToolUse('Edit', { file_path: 'C:/proj/page.html', new_string: '<!-- api-docs-read: dodge -->' }),
+    assistantToolUse('Agent', {
+      run_in_background: true,
+      prompt: 'Open ~/.claude/hooks/require-langdocs-read.mjs and fix the false-positive trigger, add a regression test.',
+    }),
+  ].join('\n');
+  assert.deepEqual(findWorkedAroundHooks(transcript), []);
+});
+
+test('dispatching a FOREGROUND agent (no run_in_background) does NOT count — that still blocks the main thread', () => {
+  const transcript = [
+    blockResult(LANGDOCS_BLOCK),
+    assistantToolUse('Edit', { file_path: 'C:/proj/page.html', new_string: '<!-- api-docs-read: dodge -->' }),
+    assistantToolUse('Agent', {
+      prompt: 'Open ~/.claude/hooks/require-langdocs-read.mjs and fix it.',
+    }),
+  ].join('\n');
+  assert.deepEqual(findWorkedAroundHooks(transcript), ['require-langdocs-read']);
+});
+
+test('a background agent dispatch that names a DIFFERENT hook does not clear this one', () => {
+  const transcript = [
+    blockResult(LANGDOCS_BLOCK),
+    assistantToolUse('Edit', { file_path: 'C:/proj/page.html', new_string: '<!-- api-docs-read: dodge -->' }),
+    assistantToolUse('Agent', {
+      run_in_background: true,
+      prompt: 'Open ~/.claude/hooks/some-other-guard.mjs and fix it.',
+    }),
+  ].join('\n');
+  assert.deepEqual(findWorkedAroundHooks(transcript), ['require-langdocs-read']);
+});
+
 test('a reply-level override (jargon-gloss override:) in message text DOES count', () => {
   const transcript = [
     blockResult('STOP — jargon used without a gloss (Russell, 2026-07-01).'),

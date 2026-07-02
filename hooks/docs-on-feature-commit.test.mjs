@@ -75,8 +75,11 @@ check('non-docs commit + CHANGELOG edit → allowed',
   stopBlocks([bash('git commit -m "feat: thing"'), edit('C:/proj/CHANGELOG.md')]) === false);
 
 // ── PostToolUse branch: real repo, returns whether the hook nudged ─────────────
+// Prefix deliberately avoids the substring "docs" — a temp repo path embedded in a `cd <path> &&`
+// test command must NOT accidentally satisfy DOCS_COMMIT_RE (see stripRepoTargetingPrefix's own
+// regression test below for the case that caught this).
 function repoWithCommit(files, commitMessage) {
-  const repoDirectory = mkdtempSync(join(tmpdir(), 'docs-post-'));
+  const repoDirectory = mkdtempSync(join(tmpdir(), 'dofc-post-'));
   cleanups.push(repoDirectory);
   const git = (args) => execSync(`git ${args}`, { cwd: repoDirectory, stdio: ['ignore', 'pipe', 'pipe'] });
   git('init -q');
@@ -107,6 +110,42 @@ check('PostToolUse: commit included README → no nudge',
 
 check('PostToolUse: docs commit → no nudge',
   nudged(repoWithCommit({ 'src/app.js': 'x' }, 'docs: notes'), 'git commit -m "docs: notes"') === false);
+
+// 2026-07-02 false positive: a `cd <otherRepo> && git commit` was checked against the SESSION
+// repo (hookEvent.cwd) instead of the repo the commit actually landed in. Build two repos whose
+// docs status is opposite, so checking the wrong one flips the answer.
+check('PostToolUse: cd into another repo before commit → checks the cd-TARGET repo, not the session cwd',
+  (() => {
+    const sessionRepo = repoWithCommit({ 'README.md': '# session repo has docs' }, 'chore: session seed');
+    const targetRepo = repoWithCommit({ 'src/app.js': 'x' }, 'feat: target repo has no docs');
+    // Checking sessionRepo (old buggy default) would see README.md and wrongly say "no nudge".
+    // Checking targetRepo (correct, via the cd prefix) sees only src/app.js and should nudge.
+    return nudged(sessionRepo, `cd "${targetRepo}" && git commit -m "feat: y"`) === true;
+  })());
+
+check('PostToolUse: a repo PATH containing "docs" does not exempt a real non-docs commit (2026-07-02)',
+  (() => {
+    const dogDocsRepo = mkdtempSync(join(tmpdir(), 'docs-site-'));
+    cleanups.push(dogDocsRepo);
+    const git = (args) => execSync(`git ${args}`, { cwd: dogDocsRepo, stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init -q'); git('config user.email t@t.t'); git('config user.name t');
+    mkdirSync(join(dogDocsRepo, 'src'), { recursive: true });
+    writeFileSync(join(dogDocsRepo, 'src', 'app.js'), 'x');
+    git('add src/app.js');
+    git('commit -q -m "seed"');
+    // The command's cd-target path contains "docs" (docs-site-XXXX) but the commit message itself
+    // does NOT mention docs and touched no README — must still nudge. (Message deliberately avoids
+    // the word "docs" so this isolates the PATH-collision bug from the "docs in message" exemption,
+    // which is separate, intentional behavior.)
+    return nudged(dogDocsRepo, `cd "${dogDocsRepo}" && git commit -m "feat: a completely unrelated feature"`) === true;
+  })());
+
+check('PostToolUse: cd into another repo whose commit DID touch docs → no nudge (not the session repo\'s)',
+  (() => {
+    const sessionRepo = repoWithCommit({ 'src/app.js': 'x' }, 'chore: session repo has no docs');
+    const targetRepo = repoWithCommit({ 'src/app.js': 'x', 'README.md': '# target repo has docs' }, 'feat: target seed');
+    return nudged(sessionRepo, `cd "${targetRepo}" && git commit -m "feat: y"`) === false;
+  })());
 
 for (const path of cleanups) { try { rmSync(path, { recursive: true, force: true }); } catch { /* ignore */ } }
 

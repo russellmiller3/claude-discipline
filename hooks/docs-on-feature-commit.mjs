@@ -46,6 +46,30 @@ function commandUpdatesDocs(command) {
   return /(>>|>|\bgit\s+add\b|\btee\b|Set-Content|Out-File|writeFileSync|cp\b|mv\b)/i.test(command);
 }
 
+// The command may target ANOTHER repo than the session cwd: `cd <kit> && git commit ...` or
+// `git -C <kit> commit ...`. Mirrors no-commit-to-main.mjs's effectiveDirectory — checking the
+// SESSION repo's last commit false-flagged a commit made in a different repo entirely (its own
+// README/HOOKBOOK move got attributed to whatever the session repo's HEAD happened to be) (2026-07-02).
+function effectiveRepoDirectory(command, sessionDirectory) {
+  const normalizedCommand = command.replace(/\s+/g, ' ').trim();
+  const cdPrefixMatch = normalizedCommand.match(/^cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*(?:&&|;)/);
+  if (cdPrefixMatch) return cdPrefixMatch[1] || cdPrefixMatch[2] || cdPrefixMatch[3];
+  const dashCMatch = normalizedCommand.match(/\bgit\s+-C\s+(?:"([^"]+)"|'([^']+)'|(\S+))/);
+  if (dashCMatch) return dashCMatch[1] || dashCMatch[2] || dashCMatch[3];
+  return sessionDirectory;
+}
+
+// DOCS_COMMIT_RE/OVERRIDE_RE must read the git subcommand + message, not a repo PATH that happens to
+// contain the word "docs" (a `cd <path> &&`/`git -C <path>` prefix, or the path a cp/mv writes into) —
+// a repo living at ".../docs-site/" or a temp dir named "docs-post-XXXX" would otherwise short-circuit
+// as if it were a docs commit and skip enforcement entirely (2026-07-02, found via a test whose temp
+// dir prefix happened to contain "docs"). Strip the leading cd/-C targeting before scanning for intent.
+function stripRepoTargetingPrefix(command) {
+  const normalizedCommand = command.replace(/\s+/g, ' ').trim();
+  const withoutCd = normalizedCommand.replace(/^cd\s+(?:"[^"]+"|'[^']+'|\S+)\s*(?:&&|;)\s*/, '');
+  return withoutCd.replace(/\bgit\s+-C\s+(?:"[^"]+"|'[^']+'|\S+)/, 'git');
+}
+
 import { readTranscript, roleOf, contentBlocks, currentTurnEntries } from './lib/transcript.mjs';
 
 // ── Stop: hard gate ────────────────────────────────────────────────────────────
@@ -66,10 +90,11 @@ function onStop(hookEvent) {
       }
       if (toolName === 'Bash' || toolName === 'PowerShell') {
         const command = toolInput.command || '';
+        const commandIntent = stripRepoTargetingPrefix(command);
         if (COMMIT_RE.test(command)) {
           // Any commit triggers the requirement — UNLESS its message says "docs" (it IS the docs
           // commit) which both exempts it and counts as the docs being moved.
-          if (DOCS_COMMIT_RE.test(command)) updatedDocs = true;
+          if (DOCS_COMMIT_RE.test(commandIntent)) updatedDocs = true;
           else committedNonDocs = true;
         }
         if (commandUpdatesDocs(command)) updatedDocs = true;
@@ -105,10 +130,10 @@ function onPostToolUse(hookEvent) {
   if (hookEvent.tool_name !== 'Bash') return;
   const command = hookEvent.tool_input?.command || '';
   if (!COMMIT_RE.test(command)) return;
-  if (DOCS_COMMIT_RE.test(command) || OVERRIDE_RE.test(command)) return; // docs commit / exempt
+  const commandIntent = stripRepoTargetingPrefix(command);
+  if (DOCS_COMMIT_RE.test(commandIntent) || OVERRIDE_RE.test(commandIntent)) return; // docs commit / exempt
 
-  const explicitRepo = command.match(/\bgit\s+-C\s+("([^"]+)"|'([^']+)'|(\S+))/);
-  const repoDirectory = (explicitRepo && (explicitRepo[2] || explicitRepo[3] || explicitRepo[4])) || hookEvent.cwd || process.cwd();
+  const repoDirectory = effectiveRepoDirectory(command, hookEvent.cwd || process.cwd());
 
   let committedFiles = [];
   try {

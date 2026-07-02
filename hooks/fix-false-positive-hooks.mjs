@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
- * fix-false-positive-hooks — Stop hook. ENFORCES Russell's rule (2026-07-01):
- * "A hook that FALSE-POSITIVES gets fixed THIS TURN — never sentinel-comment, env-override,
- *  or route around a wrong block and keep working."
+ * fix-false-positive-hooks — Stop hook. ENFORCES Russell's rule (2026-07-01, amended 2026-07-02):
+ * "A hook that FALSE-POSITIVES gets fixed — never sentinel-comment, env-override, or route
+ *  around a wrong block and keep working. But the fix itself is ALWAYS dispatched to a
+ *  background Agent, never done inline on the main thread — hook-fixing must not interrupt
+ *  whatever the main thread was actually doing when the false positive got in its way."
  *
  * The failure it targets (same session it was born): require-langdocs false-blocked a static
  * HTML edit; instead of fixing the regex I kept working via `api-docs-read:` sentinel comments.
@@ -11,7 +13,9 @@
  * MECHANICAL DEFINITION of "worked around a false positive", all three in ONE session:
  *   1. a hook BLOCKED a tool call (block event carries the hook's identity), then
  *   2. a LATER tool input / assistant message used that same hook's OVERRIDE token, and
- *   3. by Stop time that hook's file was never Edited/Written (no fix landed).
+ *   3. by Stop time that hook was neither (a) Edited/Written inline NOR (b) handed to a
+ *      background Agent (a tool_use named `Agent` with `run_in_background: true` whose prompt
+ *      names that hook's `.mjs` file) — i.e. no fix landed and none was even dispatched.
  * Escape: if the block was a TRUE positive and the override legitimate, SAY SO explicitly in
  * the final reply: `true-positive: <hook-name> — <why>`. An override used with NO preceding
  * block from that hook (e.g. a sanctioned COMMIT_MAIN_OVERRIDE doc-commit flow) never fires.
@@ -113,6 +117,28 @@ function hookEditsOf(entry) {
   return editedHookNames;
 }
 
+// A background Agent dispatch counts as "handling" a hook just like an inline edit does — the
+// fix is delegated, not skipped. Only `run_in_background: true` qualifies (a foreground Agent
+// call blocks the main thread exactly like doing the edit inline would, defeating the point of
+// delegating); the prompt must name the hook's own `.mjs` file so a stray mention elsewhere
+// can't accidentally clear an unrelated hook's gate.
+function dispatchedFixesOf(entry) {
+  const content = contentOf(entry);
+  if (!Array.isArray(content)) return [];
+  const dispatchedHookNames = [];
+  for (const block of content) {
+    if (block?.type !== 'tool_use') continue;
+    if (block.name !== 'Agent') continue;
+    const input = block.input || {};
+    if (input.run_in_background !== true) continue;
+    const prompt = String(input.prompt || '');
+    for (const match of prompt.matchAll(/([a-z0-9][a-z0-9-]*)\.mjs\b/gi)) {
+      dispatchedHookNames.push(match[1].toLowerCase());
+    }
+  }
+  return dispatchedHookNames;
+}
+
 function blocksOf(entryText) {
   const blockedHookNames = new Set();
   // Path-style: "PreToolUse:Edit hook error: [node ~/.claude/hooks/require-langdocs-read.mjs]: BLOCKED"
@@ -136,6 +162,7 @@ export function findWorkedAroundHooks(transcriptText) {
   const blockIndexByHook = new Map();     // hookName -> first entry index where it blocked
   const overrideIndexByHook = new Map();  // hookName -> first entry index (post-block) using its override
   const editedHooks = new Set();
+  const dispatchedFixHooks = new Set();
   let finalAssistantText = '';
 
   entries.forEach((entry, entryIndex) => {
@@ -144,6 +171,7 @@ export function findWorkedAroundHooks(transcriptText) {
       if (!blockIndexByHook.has(hookName)) blockIndexByHook.set(hookName, entryIndex);
     }
     for (const editedHookName of hookEditsOf(entry)) editedHooks.add(editedHookName);
+    for (const dispatchedHookName of dispatchedFixesOf(entry)) dispatchedFixHooks.add(dispatchedHookName);
 
     const { inputText, messageText } = authoredChannelsOf(entry);
     if (messageText.trim()) finalAssistantText = messageText;
@@ -164,7 +192,8 @@ export function findWorkedAroundHooks(transcriptText) {
 
   const unresolved = [];
   for (const [hookName] of overrideIndexByHook) {
-    if (editedHooks.has(hookName)) continue;                                   // fixed this session
+    if (editedHooks.has(hookName)) continue;                                   // fixed inline this session
+    if (dispatchedFixHooks.has(hookName)) continue;                            // handed to a background Agent
     const declaration = new RegExp(`true-positive:\\s*\`?${hookName}`, 'i');
     if (declaration.test(finalAssistantText)) continue;                        // declared legit
     unresolved.push(hookName);
@@ -190,14 +219,18 @@ function main() {
   if (unresolvedHooks.length === 0) process.exit(0);
 
   const reason =
-    `STOP — a hook blocked you, you used its override, and the hook was never fixed (Russell's rule, 2026-07-01: a false-positiving hook gets fixed THIS TURN, not worked around).\n\n` +
+    `STOP — a hook blocked you, you used its override, and the hook was neither fixed nor handed off (Russell's rule, 2026-07-01, amended 2026-07-02: a false-positiving hook gets fixed, not worked around — and the fix is ALWAYS dispatched to a background Agent, never done inline).\n\n` +
     `Worked-around hook(s): ${unresolvedHooks.map((name) => `${name}.mjs`).join(', ')}\n\n` +
     `Do ONE of these before stopping, per hook:\n` +
-    `  1. FIX it: open ~/.claude/hooks/<name>.mjs, correct the trigger, add a regression test,\n` +
-    `     rerun the tests, sync it to the claude-discipline kit. (The edit itself clears this gate.)\n` +
-    `  2. If the block was CORRECT and the override was the sanctioned flow, say so explicitly in\n` +
+    `  1. DISPATCH it (preferred): call Agent with run_in_background: true and a prompt that names\n` +
+    `     ~/.claude/hooks/<name>.mjs — open it, correct the trigger, add a regression test, rerun the\n` +
+    `     tests, sync it to the claude-discipline kit. Then keep going on whatever you were doing; the\n` +
+    `     dispatch itself clears this gate, you don't have to wait for it to finish.\n` +
+    `  2. FIX it inline yourself only if you're already deep in that hook's own code for another\n` +
+    `     reason — editing ~/.claude/hooks/<name>.mjs directly also clears the gate.\n` +
+    `  3. If the block was CORRECT and the override was the sanctioned flow, say so explicitly in\n` +
     `     your final reply: true-positive: <hook-name> — <why the block was right>.\n\n` +
-    `An override after a wrong block leaves the trap armed for next session — that's the whole point.`;
+    `An override after a wrong block with no fix and no dispatch leaves the trap armed for next session.`;
 
   console.log(JSON.stringify({ decision: 'block', reason }));
 }

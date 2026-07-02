@@ -27,29 +27,55 @@ import { fileURLToPath } from 'node:url';
 
 const GUARDED_TOOLS = new Set(['Bash', 'PowerShell', 'Agent']);
 
+// A brief/command can legitimately MENTION the marker while prohibiting it ("do NOT run anything
+// marked -m integration"). Only treat a match as a real invocation if there's no negation cue
+// (not/never/don't/avoid/off-limits/...) in the text immediately before it.
+const NEGATION_WINDOW = 60;
+const NEGATION_CUE = /\b(not|never|don't|do not|doesn't|without|avoid|off-limits|forbidden|excluded|isn't|skip|disallow)\b/i;
+
+function isNegatedImmediatelyBefore(commandOrPrompt, matchIndex) {
+  const windowStart = Math.max(0, matchIndex - NEGATION_WINDOW);
+  return NEGATION_CUE.test(commandOrPrompt.slice(windowStart, matchIndex));
+}
+
+/** Scan `commandOrPrompt` with a global `pattern`; true if any match has no negation cue right before it. */
+function hasUnnegatedMatch(commandOrPrompt, pattern) {
+  const re = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g');
+  let match;
+  while ((match = re.exec(commandOrPrompt)) !== null) {
+    if (!isNegatedImmediatelyBefore(commandOrPrompt, match.index)) return true;
+    if (match[0].length === 0) re.lastIndex++; // guard against zero-width infinite loop
+  }
+  return false;
+}
+
 /**
  * Does this command/brief launch a live-UI / integration test run? Pure string check.
  * TRUE for: a pytest run selecting the `integration` marker (quoted or bare) that is NOT
- * `not integration`, OR a direct run of a `*_live.py` test file under pytest/python.
+ * `not integration`, OR a direct run of a `*_live.py` test file under pytest/python — in either
+ * case only when that mention isn't itself a prohibition ("do NOT run ... -m integration").
  */
 export function runsLiveUiTests(commandOrPrompt) {
   if (!commandOrPrompt) return false;
   const hasPytest = /\b(pytest|py(thon)?\s+-m\s+pytest)\b/.test(commandOrPrompt);
   if (!hasPytest) return false;
 
-  // Directly invoking a *_live test file (e.g. tests/integration/test_calculator_live.py).
-  if (/_live\.py\b/.test(commandOrPrompt)) return true;
-
   // Collapse the `python -m pytest` MODULE-run flag so it can't be mistaken for a `-m <marker>` select
   // (otherwise "python -m pytest -m integration" reads the first `-m pytest` as the marker).
   const withoutModuleRun = commandOrPrompt.replace(/\bpy(thon)?\s+-m\s+pytest\b/g, 'pytest');
 
+  // Directly invoking a *_live test file (e.g. tests/integration/test_calculator_live.py).
+  if (hasUnnegatedMatch(withoutModuleRun, /\S*_live\.py\b/)) return true;
+
   // `-m <marker expression>` selecting `integration` — quoted form first, then a bare single token.
-  const quoted = withoutModuleRun.match(/-m\s*(['"])([^'"]*)\1/);
-  const bare = withoutModuleRun.match(/-m\s+([A-Za-z_][A-Za-z0-9_ ]*)/);
-  const markerExpression = (quoted && quoted[2]) || (bare && bare[1]) || '';
-  if (/\bintegration\b/.test(markerExpression) && !/\bnot\s+integration\b/.test(markerExpression)) {
-    return true;
+  for (const pattern of [/-m\s*(['"])([^'"]*)\1/, /-m\s+([A-Za-z_][A-Za-z0-9_ ]*)/]) {
+    const re = new RegExp(pattern.source, 'g');
+    let match;
+    while ((match = re.exec(withoutModuleRun)) !== null) {
+      const markerExpression = match[2] || match[1] || '';
+      const isIntegrationMarker = /\bintegration\b/.test(markerExpression) && !/\bnot\s+integration\b/.test(markerExpression);
+      if (isIntegrationMarker && !isNegatedImmediatelyBefore(withoutModuleRun, match.index)) return true;
+    }
   }
   return false;
 }

@@ -32,6 +32,24 @@ test('does NOT flag a non-pytest command that merely says integration', () => {
   assert.equal(runsLiveUiTests('git commit -m "wire integration layer"'), false);
 });
 
+test('does NOT flag an agent brief that PROHIBITS -m integration in prose (2026-07-02 false positive)', () => {
+  const brief =
+    'Verify green with the SPECIFIC test files: py -m pytest tests/test_app_storage.py -q --rootdir . ' +
+    "Do NOT run anything under tests/integration or anything marked -m integration — that's live-UI gated and off-limits to you.";
+  assert.equal(runsLiveUiTests(brief), false);
+});
+
+test('does NOT flag a brief that prohibits a *_live.py file by name', () => {
+  const brief = 'Run the headless suite only. Do NOT run tests/integration/test_calculator_live.py — that steals focus.';
+  assert.equal(runsLiveUiTests(brief), false);
+});
+
+test('still DENIES when the same brief also contains a real invocation later', () => {
+  const brief =
+    "Do NOT run anything marked -m integration normally, but for this one-off go ahead: py -m pytest -m integration -q";
+  assert.equal(runsLiveUiTests(brief), true);
+});
+
 // ---- decideLiveUiFocusGate (the gate) ----
 
 test('DENIES a Bash pytest -m integration run', () => {
