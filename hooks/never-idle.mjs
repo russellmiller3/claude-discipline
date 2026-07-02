@@ -2,7 +2,7 @@
 /**
  * Stop hook — block stop if background tasks are still running.
  *
- * The rule: "main Claude should never stay idle. Always find something
+ * Russell's rule: "main Claude should never stay idle. Always find something
  * to work on AND start work while agents/background tasks are running."
  *
  * v2 (2026-04-27 evening): scan the FULL transcript text (not per-entry, not
@@ -83,6 +83,27 @@ function main() {
       kind: 'spawn-task',
       descriptor: (m[2] || '').slice(0, 60),
     });
+  }
+
+  // 1b) A spawn_task chip never runs anything itself (it's a suggestion the USER may click), so it
+  // never produces a <task-notification> the way an Agent/background-bash spawn does — the completion
+  // scan below (step 2) can NEVER resolve it, which meant a spawn_task call blocked every Stop for the
+  // rest of the session, forever, even after being explicitly resolved. The only real resolution
+  // signal is a matching `mcp__ccd_session__dismiss_task` call. Correlate each spawn-task's OWN task_id
+  // (returned in its tool_result text, e.g. "Noted (position 1, task_id: task_6bfdf773)") with any
+  // dismiss_task call's `task_id` input, and clear the spawn if they match. (Fixed 2026-07-02.)
+  const dismissedTaskIds = new Set();
+  const dismissRe = /"name"\s*:\s*"mcp__ccd_session__dismiss_task"[\s\S]{0,1000}?"task_id"\s*:\s*"([A-Za-z0-9_]+)"/g;
+  for (const m of raw.matchAll(dismissRe)) dismissedTaskIds.add(m[1]);
+
+  if (dismissedTaskIds.size > 0) {
+    for (const [id, meta] of spawnIds) {
+      if (meta.kind !== 'spawn-task') continue;
+      const resultTaskIdRe = new RegExp(`"tool_use_id"\\s*:\\s*"${id}"[\\s\\S]{0,3000}?task_id[:\\s]+([A-Za-z0-9_]+)`);
+      const resultTaskIdMatch = raw.match(resultTaskIdRe);
+      const realTaskId = resultTaskIdMatch ? resultTaskIdMatch[1].replace(/[).,]+$/, '') : null;
+      if (realTaskId && dismissedTaskIds.has(realTaskId)) spawnIds.delete(id);
+    }
   }
 
   if (spawnIds.size === 0) process.exit(0);

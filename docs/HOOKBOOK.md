@@ -179,7 +179,7 @@ After a `git merge`/`push` to `main`, auto-deletes every local branch whose comm
 Blocks stop while throwaway/scratch files (`tmp-*`, `scan-*`, `probe-*`, stray `COMMIT_*.txt`, etc.) sit in the repo. **Override:** put `keep-junk: <reason>` in the reply.
 
 ### `never-idle` · Stop
-Blocks stop while background work is still running (async Agents, background Bash, spawned tasks) — so you salvage their results instead of ending the turn on top of them. Clears automatically once the work completes.
+Blocks stop while background work is still running (async Agents, background Bash, spawned tasks) — so you salvage their results instead of ending the turn on top of them. Clears automatically once the work completes. **(Fixed 2026-07-02)** a `spawn_task` chip never runs anything itself (it's a user-clickable suggestion), so it never produced the `<task-notification>` the old completion check required — one chip blocked every Stop for the rest of the session, even after being explicitly dismissed. Now correlates the chip's own `task_id` against any `dismiss_task` call's `task_id` input and clears it on a match. Locked by `never-idle.test.mjs` (7 tests).
 
 ### `husky-on-new-projects` · SessionStart
 Nudges (never blocks) when a Node + git project has no husky installed — no git hooks means commits/pushes run no test gate. This is the second enforcement layer the README recommends pairing with.
