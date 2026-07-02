@@ -20,12 +20,15 @@ function test(name, testBody) {
 }
 
 const SESSION_ROOT = 'C:/Users/rmill/Desktop/programming/claude-voice';
-// In this layout, skaffen-desktop is a sibling git repo; claude-voice is the session.
+// In this layout, skaffen-desktop, context, and some-other-repo are sibling git repos;
+// claude-voice is the session.
 const isGitRepo = (candidate) => {
   const normalized = candidate.replace(/\\/g, '/').toLowerCase();
   return (
     normalized === 'c:/users/rmill/desktop/programming/skaffen-desktop' ||
-    normalized === 'c:/users/rmill/desktop/programming/claude-voice'
+    normalized === 'c:/users/rmill/desktop/programming/claude-voice' ||
+    normalized === 'c:/users/rmill/desktop/programming/context' ||
+    normalized === 'c:/users/rmill/desktop/programming/some-other-repo'
   );
 };
 const opts = { sessionRepoRoot: SESSION_ROOT, isGitRepo };
@@ -122,6 +125,62 @@ test('extractAbsolutePaths finds Windows + MSYS paths', () => {
   const paths = extractAbsolutePaths('see C:\\Users\\rmill\\a and /c/Users/rmill/b here');
   assert.ok(paths.includes('c:/users/rmill/a'));
   assert.ok(paths.includes('/c/users/rmill/b'));
+});
+
+// ---- Read/write intent carve-out (2026-07-02) ----
+
+// 10. REGRESSION — a second phrasing of the original 2026-06-29 incident shape: git
+//     checkout -b and editing directly in a sibling CODE repo, no worktree add, no
+//     escape token. Must still DENY.
+test('denies a sibling-repo brief that edits files directly (second phrasing)', () => {
+  const decision = decideCrossRepoGate(
+    agentEvent(
+      'Build the feature by editing files directly in C:\\Users\\rmill\\Desktop\\programming\\skaffen-desktop\\src\\main.py, then commit.',
+    ),
+    opts,
+  );
+  assert.ok(decision, 'expected a deny');
+  assert.equal(decision.hookSpecificOutput.permissionDecision, 'deny');
+});
+
+// 11. NEW REGRESSION — mixed read+write in the SAME sibling repo is NOT the safe
+//     case. Reading one file for context but editing another in the same repo must
+//     still DENY (ambiguous/mixed near that repo = conservative deny).
+test('denies a brief that reads one file but edits another in the same sibling repo', () => {
+  const decision = decideCrossRepoGate(
+    agentEvent(
+      'Read C:\\Users\\rmill\\Desktop\\programming\\skaffen-desktop\\README.md for context, then edit C:\\Users\\rmill\\Desktop\\programming\\skaffen-desktop\\src\\main.py to add the feature.',
+    ),
+    opts,
+  );
+  assert.ok(decision, 'expected a deny');
+  assert.equal(decision.hookSpecificOutput.permissionDecision, 'deny');
+});
+
+// 12. NEW — a brief that only reads a file under programming/context/ (Russell's
+//     documented docs-only shared reference dir) for reference, doing all actual
+//     writing inside the session repo, must now ALLOW.
+test('allows a brief that only reads a file under programming/context/ for reference', () => {
+  const decision = decideCrossRepoGate(
+    agentEvent(
+      'Read C:\\Users\\rmill\\Desktop\\programming\\context\\design.md in full for the palette and layout rules, then build the mock in C:\\Users\\rmill\\Desktop\\programming\\claude-voice\\ui\\mock.html.',
+    ),
+    opts,
+  );
+  assert.equal(decision, null);
+});
+
+// 13. NEW — a generic read-only sentence pointing at some OTHER sibling repo's file
+//     for reference, no write signal anywhere near that path, and no other work
+//     happening in that sibling repo, must now ALLOW.
+test('allows a generic read-only mention of another sibling repo for reference', () => {
+  const decision = decideCrossRepoGate(
+    agentEvent(
+      'read C:\\Users\\rmill\\Desktop\\programming\\some-other-repo\\README.md for the API shape, then implement the client in the session repo.',
+    ),
+    opts,
+  );
+  assert.equal(decision, null);
 });
 
 console.log(`\n${passedCount} passed`);
