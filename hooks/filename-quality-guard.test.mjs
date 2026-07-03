@@ -111,3 +111,11 @@ test('ALLOWS a new file whose stem matches an EXISTING sibling (X.test.mjs besid
   const hooksDirectory = dirname(fileURLToPath(import.meta.url));
   assert.equal(assessFilename(join(hooksDirectory, 'no-write-to-main.test.mjs')).ok, true);
 });
+
+test('ALLOWS "audit" (real word wrongly flagged as a typo of "audio", 2026-07-03 false-fire)', () => {
+  // "audit" is one OSA edit from "audio" — it was false-blocked as a likely misspelling even
+  // though it's a common, correctly-spelled word in its own right.
+  for (const good of ['delete-audit-guard.mjs', 'audit.mjs', 'auditor-report.md', 'auditing-rules.mjs']) {
+    assert.equal(assessFilename(good).ok, true, `expected ALLOW for ${good} (got: ${JSON.stringify(assessFilename(good))})`);
+  }
+});

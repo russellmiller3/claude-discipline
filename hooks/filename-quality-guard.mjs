@@ -97,6 +97,9 @@ const COMMON_WORDS = new Set([
   // Plain verbs that sit one edit from their agent nouns ("write"→writer, "watch"→watcher) — real
   // words, not typos ("write" false-blocked no-write-to-main.test.mjs, 2026-07-01).
   'write', 'writes', 'watch', 'merge', 'merged', 'clean', 'build', 'builds', 'fetch', 'batch',
+  // "audit" sits one edit from "audio" (OSA distance 1) and was false-blocked as a likely typo
+  // ("delete-audit-guard.mjs", 2026-07-03) — a real, common word, not a misspelling.
+  'audit', 'audits', 'auditing', 'auditor',
 ]);
 
 // Optimal String Alignment distance (Levenshtein + adjacent transposition counted as one edit). Bounded
