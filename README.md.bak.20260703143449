@@ -91,7 +91,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 | `delete-merged-branches` | PostToolUse(Bash) | After a merge/push to `main`, auto-deletes local branches whose commits are fully reachable from `main` (current/worktree/protected branches kept) |
 | `no-junk-files` | Stop | Blocks stop while throwaway/scratch files (`tmp-*`, `probe-*`, `scan-*`, stray `COMMIT_*.txt`) linger in the repo |
 | `never-idle` | Stop | Blocks stop while background work (async agents, background Bash) is still running — salvage it, don't abandon it |
-| `compass-line-guard` | Stop | Blocks stop when the reply doesn't OPEN with a plain-English "Mission / this step / why" line — advisory versions of this get compressed out under context pressure, so this one enforces it. Widened 2026-07-03 to fire on every reply, chat-only turns included (no more exemption) |
+| `compass-line-guard` | Stop | Blocks stop when a working turn's reply doesn't OPEN with a plain-English "Mission / this step / why" line — advisory versions of this get compressed out under context pressure, so this one enforces it. Chat-only turns are exempt |
 | `husky-on-new-projects` | SessionStart | Nudges husky setup when a Node+git project has no git hooks (so there's a real commit-time test gate) |
 | `rebuild-after-commit` | Stop | Edited buildable source but `dist/` is stale (by content hash)? Blocks until you rebuild — the running artifact is the build, not the commit. Ships `lib/buildFingerprint.mjs` |
 | `stamp-build-fingerprint` | PostToolUse(Bash) | On a successful build, records a content fingerprint of the source it built from, so freshness checks compare by hash, not mtime (companion to `rebuild-after-commit`) |

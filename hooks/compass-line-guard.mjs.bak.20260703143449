@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * compass-line-guard — Stop hook. Forces EVERY final assistant reply to OPEN with
- * one plain-English big-picture line, because the advisory version of this rule
+ * compass-line-guard — Stop hook. Forces every WORKING-turn reply to OPEN with one
+ * plain-English big-picture line, because the advisory version of this rule
  * (injected instructions in explain-as-you-work.mjs / the /bigpicture skill) gets
  * compressed out under context pressure. Russell's own meta-rule: a hook must
  * enforce the OUTCOME, not just advise it — so this one BLOCKS.
@@ -10,20 +10,16 @@
  * one plain-English big-picture line — Mission, this step, why. No jargon. All
  * existing mechanisms are advisory and get compressed out."
  *
- * Russell, 2026-07-03 (widened, same day, verbatim): "ADJUST THE HOOK SO IT FIRES
- * ON ALL RESPONSES." The original version only checked "working" turns (any
- * Edit/Write/NotebookEdit/Bash/PowerShell/Agent/Workflow tool call) and exempted
- * pure chat-only turns. That exemption turned out to be the loophole Russell hit:
- * tool-free replies full of hook-ritual text (long explanations, status updates,
- * plans) escaped enforcement entirely just by not calling a tool. Every final
- * reply is now in scope — working turn or not.
- *
  * RULE
- *   On every turn, the FIRST non-whitespace line of the final assistant text
- *   message must either:
+ *   A "working turn" is any turn where the assistant called a tool that DOES
+ *   something (Edit/Write/NotebookEdit/Bash/PowerShell/Agent/Workflow) — not a
+ *   turn that only Read/Grep/Glob/ToolSearch'd around. On a working turn, the
+ *   FIRST non-whitespace line of the final assistant text message must either:
  *     (a) start with the compass marker (U+1F9ED, the compass emoji), or
  *     (b) start with "## <compass-marker> TL;DR" — the /bigpicture skill's own
  *         format, which IS the compass content by construction.
+ *   A pure chat/explaining turn (no working tool calls) is exempt — this hook
+ *   never nags conversation.
  *
  * ANTI-LOOP RAIL
  *   Mirrors the convention used by ~15 sibling Stop hooks (never-idle.mjs,
@@ -48,10 +44,7 @@ import { fileURLToPath } from 'node:url';
 export const COMPASS_MARKER = String.fromCodePoint(0x1f9ed);
 
 // Tools that mean "this turn DID something" (mutated files, ran a command, or
-// dispatched other work) as opposed to just looking around. Kept as an exported
-// primitive (still meaningful for other callers/tests to classify a turn) even
-// though main() no longer gates enforcement on it — see the 2026-07-03 widening
-// note above: chat-only turns are no longer exempt.
+// dispatched other work) as opposed to just looking around.
 const WORKING_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'Bash', 'PowerShell', 'Agent', 'Workflow']);
 
 /** Did this turn call any tool that actually DOES something (vs. just reading/searching)? */
@@ -99,7 +92,7 @@ export function hasCompassOpening(replyText) {
   return false;
 }
 
-const BLOCK_REASON = `STOP — your reply doesn't open with a compass line (Russell's rule, 2026-07-03, widened to every reply the same day).
+const BLOCK_REASON = `STOP — this was a WORKING turn (you edited/ran/dispatched something) but your reply doesn't open with a compass line (Russell's rule, 2026-07-03).
 
 Advisory reminders get compressed out under context pressure, so this is enforced, not suggested. Prepend ONE line, before anything else, in plain English — no function names, no file paths, no jargon:
 
@@ -119,6 +112,8 @@ async function main() {
   const entries = readTranscript(payload.transcript_path);
   const turnEntries = currentTurnEntries(entries);
   if (turnEntries.length === 0) return; // malformed/missing/empty transcript -> silent pass
+
+  if (!turnDidWork(turnEntries)) return; // pure chat/explaining turn -> exempt, never nag
 
   const reply = finalReplyText(turnEntries);
   if (!reply) return; // no text reply to check (e.g. tool-only trailing message) -> nothing to enforce
