@@ -96,6 +96,10 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 | `rebuild-after-commit` | Stop | Edited buildable source but `dist/` is stale (by content hash)? Blocks until you rebuild — the running artifact is the build, not the commit. Ships `lib/buildFingerprint.mjs` |
 | `stamp-build-fingerprint` | PostToolUse(Bash) | On a successful build, records a content fingerprint of the source it built from, so freshness checks compare by hash, not mtime (companion to `rebuild-after-commit`) |
 
+*2026-07-03 fix: `filename-quality-guard` was wrongly blocking "audit" as a one-edit misspelling
+of "audio" (e.g. `delete-audit-guard.mjs`). `audit`/`audits`/`auditing`/`auditor` are now in its
+known-words list; regression test added.*
+
 ### Tier 2 — Needs the companion files (the memory system)
 | Hook | Event | What it enforces |
 |------|-------|------------------|
