@@ -14,6 +14,7 @@
     "delete-merged-branches":   [{ "event": "PostToolUse", "matcher": "Bash|PowerShell", "timeout": 5 }],
     "no-junk-files":            [{ "event": "Stop", "timeout": 5 }],
     "never-idle":               [{ "event": "Stop", "timeout": 5 }],
+    "compass-line-guard":       [{ "event": "Stop", "timeout": 5 }],
     "husky-on-new-projects":    [{ "event": "SessionStart", "timeout": 5 }],
     "rebuild-after-commit":     [{ "event": "Stop", "timeout": 5 }],
     "stamp-build-fingerprint":  [{ "event": "PostToolUse", "matcher": "Bash", "timeout": 5 }]
