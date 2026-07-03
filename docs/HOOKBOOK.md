@@ -160,6 +160,9 @@ SessionStart injects the "decompose → fan out" reflex: independent work units 
 ### `bench-pattern-guard` · PreToolUse(Write)
 Blocks writing a benchmark/eval/sweep runner that isn't parallel + event-emitting + durable/resumable — a bounded worker pool with a concurrency knob, live progress, and per-task checkpoints with `--resume`. No serial for-loop benches that can't stream progress or resume.
 
+### `tone-copy-check` · PreToolUse(Write|Edit|MultiEdit)
+Blocks writing/editing a file that looks like external-facing copy (filename contains `email`/`proposal`/`pitch`/`outreach`/`cover-letter`, underscore/hyphen-aware) if the new text matches a curated list of condescension shapes: flattening a real accomplishment into a diminishing scoreboard ("you've built exactly one"), "you've only built X," explaining economics the recipient obviously already knows ("that buys X, not Y"), "well, actually," or "as you probably know." Not a general tone classifier — a specific-pattern catch, same philosophy as `bench-pattern-guard`. **Override:** `tone-check-override` or `TONE_CHECK_OVERRIDE=1`. Locked by `tone-copy-check.test.mjs` (13 checks).
+
 ### `agent-monitor-cadence` · Stop
 Forces the orchestrator to actually watch its background agents — blocks stop while a spawned agent has sat idle/unattended past a threshold, so you inspect and salvage its committed work instead of letting it rot unnoticed.
 
