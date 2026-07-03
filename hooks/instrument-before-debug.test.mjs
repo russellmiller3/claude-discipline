@@ -1,6 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { debugSignal, isInstrumentationEdit, isSourceLogicFile, decideEdit } from './instrument-before-debug.mjs';
+import {
+  debugSignal,
+  isInstrumentationEdit,
+  isSourceLogicFile,
+  decideEdit,
+  mentionedFileBasenames,
+  isTargetInScope,
+  isTurnStale,
+  humanTurnsSince,
+  lastHumanPromptIndex,
+} from './instrument-before-debug.mjs';
+
+// Minimal transcript-entry builders matching what lib/transcript.mjs expects (message.role/content).
+const humanTurn = (text) => ({ message: { role: 'user', content: [{ type: 'text', text }] } });
+const toolResultTurn = () => ({ message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } });
+const assistantTurn = (text) => ({ message: { role: 'assistant', content: [{ type: 'text', text }] } });
 
 test('debugSignal catches in-app failure complaints (differently worded)', () => {
   assert.ok(debugSignal('still calls claude, still searches fandango. you failed'));
@@ -52,4 +67,132 @@ test('decideEdit does NOT block a test-file edit, or once already instrumented, 
   assert.equal(decideEdit({ gateActive: true, instrumented: false, filePath: 'lib/x.test.js', editText: 'expect(1).toBe(1)' }).block, false);
   assert.equal(decideEdit({ gateActive: true, instrumented: true, filePath: 'lib/x.js', editText: 'fix();' }).block, false);
   assert.equal(decideEdit({ gateActive: false, instrumented: false, filePath: 'lib/x.js', editText: 'fix();' }).block, false);
+});
+
+// ── signal decay (2026-07-03 false positive: a stale "hook not working" debug signal from
+// hours/several turns earlier blocked unrelated feature edits) ──────────────────────────────
+
+test('mentionedFileBasenames extracts file names named in the debug-signal message', () => {
+  assert.deepEqual(mentionedFileBasenames('chatRouter.js keeps routing to the wrong tier'), ['chatrouter.js']);
+  assert.deepEqual(
+    mentionedFileBasenames('extension/lib/chatRouter.js and extension/lib/chatRouter.js both broke'),
+    ['chatrouter.js'],
+  );
+  assert.deepEqual(mentionedFileBasenames('still broken, you failed'), []); // no file named — nothing to scope to
+});
+
+test('isTargetInScope: no files named in the signal means everything stays in scope (unscoped fallback)', () => {
+  assert.equal(isTargetInScope('trainingHarness.py', []), true);
+  assert.equal(isTargetInScope('anything/at/all.js', undefined), true);
+});
+
+test('isTargetInScope: files WERE named — only a basename match is in scope', () => {
+  const mentioned = ['chatrouter.js'];
+  assert.equal(isTargetInScope('extension/lib/chatRouter.js', mentioned), true);
+  assert.equal(isTargetInScope('chatRouter.js', mentioned), true);
+  assert.equal(isTargetInScope('training/newExperimentArm.py', mentioned), false);
+});
+
+test('isTurnStale: fires at the configured turn count, not before', () => {
+  assert.equal(isTurnStale(0), false);
+  assert.equal(isTurnStale(2), false);
+  assert.equal(isTurnStale(3), true);
+  assert.equal(isTurnStale(10), true);
+  assert.equal(isTurnStale(undefined), false); // unknown → don't decay on this axis
+});
+
+test('lastHumanPromptIndex finds the most recent real human turn, skipping tool results', () => {
+  const entries = [humanTurn('first'), assistantTurn('ok'), toolResultTurn(), humanTurn('second'), assistantTurn('ok')];
+  assert.equal(lastHumanPromptIndex(entries), 3);
+  assert.equal(lastHumanPromptIndex([]), -1);
+});
+
+test('humanTurnsSince counts only human turns strictly after the gate opened', () => {
+  const entries = [
+    humanTurn('still broken you failed'), // index 0 — opens the gate
+    assistantTurn('ok, widened the hook'),
+    humanTurn('cool thanks'), // index 2 — turn 1 since open
+    assistantTurn('np'),
+    humanTurn('now add a new experiment arm'), // index 4 — turn 2 since open
+    assistantTurn('sure'),
+  ];
+  assert.equal(humanTurnsSince(entries, 0), 2);
+  assert.equal(humanTurnsSince(entries, -1), 3); // unknown open point → conservative, counts from the top
+});
+
+test('REGRESSION: stale signal (many turns back) + unrelated file → edit PASSES', () => {
+  // Mirrors the live incident: a hook-narration gripe several turns ago, now an unrelated
+  // feature edit to a training harness. Both decay axes independently would allow this;
+  // here turn decay does the work even if the file were untracked.
+  const verdict = decideEdit({
+    gateActive: true,
+    instrumented: false,
+    filePath: 'training/newExperimentArm.py',
+    editText: 'ARMS.push({ name: "exp18", lr: 0.05 });',
+    turnsSinceOpen: 5,
+    mentionedBasenames: [],
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('REGRESSION: stale signal + unrelated file, scoped by target too → edit PASSES', () => {
+  const verdict = decideEdit({
+    gateActive: true,
+    instrumented: false,
+    filePath: 'training/newExperimentArm.py',
+    editText: 'ARMS.push({ name: "exp18", lr: 0.05 });',
+    turnsSinceOpen: 5,
+    mentionedBasenames: ['narration-guard.mjs'],
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('REGRESSION: fresh signal + same-file logic edit → still BLOCKS (canonical true positive)', () => {
+  const verdict = decideEdit({
+    gateActive: true,
+    instrumented: false,
+    filePath: 'extension/lib/chatRouter.js',
+    editText: 'tier.model = "sonnet"; // just switch it',
+    turnsSinceOpen: 0,
+    mentionedBasenames: ['chatrouter.js'],
+  });
+  assert.equal(verdict.block, true);
+});
+
+test('REGRESSION: fresh signal, file named in signal, no mention list mismatch → BLOCKS even with 1 elapsed turn', () => {
+  const verdict = decideEdit({
+    gateActive: true,
+    instrumented: false,
+    filePath: 'extension/lib/chatRouter.js',
+    editText: 'tier.model = "sonnet";',
+    turnsSinceOpen: 1,
+    mentionedBasenames: ['chatrouter.js'],
+  });
+  assert.equal(verdict.block, true);
+});
+
+test('instrumentation edit still clears the gate even with decay fields present', () => {
+  const verdict = decideEdit({
+    gateActive: true,
+    instrumented: false,
+    filePath: 'extension/lib/chatRouter.js',
+    editText: 'console.log("tier", tier.name, err);',
+    turnsSinceOpen: 0,
+    mentionedBasenames: ['chatrouter.js'],
+  });
+  assert.equal(verdict.block, false);
+  assert.equal(verdict.clears, true);
+});
+
+test('override token still clears the gate even with decay fields present', () => {
+  const verdict = decideEdit({
+    gateActive: true,
+    instrumented: false,
+    filePath: 'extension/lib/chatRouter.js',
+    editText: '// instrument-override: no logging point exists on this vendored path\nfix();',
+    turnsSinceOpen: 0,
+    mentionedBasenames: ['chatrouter.js'],
+  });
+  assert.equal(verdict.block, false);
+  assert.equal(verdict.clears, true);
 });

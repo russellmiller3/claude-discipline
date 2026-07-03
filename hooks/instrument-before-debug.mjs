@@ -14,11 +14,28 @@
 // DUAL-EVENT, GLOBAL (all projects):
 //   - UserPromptSubmit: if the user's message shows a debugging-an-in-app-failure
 //     signal (a pasted debug artifact, "still broken / doesn't work / still routes /
-//     you failed"), OPEN a debug-gate state file (active, not-yet-instrumented).
-//   - PreToolUse(Write|Edit): while the gate is open and instrumentation has NOT yet
-//     been added, BLOCK any edit to SOURCE LOGIC that is not itself instrumentation.
-//     An edit that ADDS logging clears the gate (you instrumented); a test/doc edit
-//     is allowed; an explicit override clears it. Teeth: permissionDecision 'deny'.
+//     you failed"), OPEN a debug-gate state file (active, not-yet-instrumented), along
+//     with the human-turn count so far and any file paths/basenames named in the message.
+//   - PreToolUse(Write|Edit): while the gate is open, NOT stale, and instrumentation has
+//     NOT yet been added, BLOCK an edit to SOURCE LOGIC that is not itself instrumentation
+//     AND targets a file plausibly involved in the reported failure. An edit that ADDS
+//     logging clears the gate (you instrumented); a test/doc edit is allowed; an explicit
+//     override clears it. Teeth: permissionDecision 'deny'.
+//
+// SIGNAL DECAY (2026-07-03, after a live false positive: Russell's "hook enforced why is
+// hook not working" — a conversation about reply-narration prefs, resolved in two turns by
+// widening a DIFFERENT hook — left this gate armed HOURS later and blocked ordinary feature
+// edits to an unrelated training harness. The orchestrator had to sentinel-comment override
+// tokens into production code to get past it, exactly the pollution the escape hatch
+// shouldn't force.). A debug episode is stale — gate treated as inactive — once ANY of:
+//   (a) TURN decay: STALE_TURN_COUNT human turns have passed since the gate opened. A real
+//       debugging episode gets addressed within a couple of turns; if the conversation has
+//       moved on that far without instrumentation, the signal is almost certainly cold.
+//   (b) TARGET decay: the gate recorded file paths/basenames mentioned in the triggering
+//       message, and the CURRENT edit's file matches none of them (by basename) — the
+//       failure being debugged plausibly lives elsewhere. When the message named no files
+//       at all, this decay does not apply (nothing to scope to) and TURN/TTL decay carry it.
+//   (c) TTL decay: GATE_TTL_MS wall-clock time has passed (unchanged, coarse backstop).
 //
 // Override (escape hatches, both clear the gate for this episode):
 //   - `instrumented: <where>`      — you already captured the cause; name where.
@@ -31,9 +48,11 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readTranscript, isHumanPrompt } from './lib/transcript.mjs';
 
 const GATE_PATH = join(homedir(), '.claude', 'state', 'instrument-gate.json');
 const GATE_TTL_MS = 2 * 60 * 60 * 1000; // a debug episode goes stale after 2h — don't nag a new, unrelated task
+const STALE_TURN_COUNT = 3; // this many human turns with no instrumentation/override → treat the episode as cold
 
 // A debugging-an-in-app-failure signal in the user's message. TIGHT on purpose (the word "fail" alone is
 // everywhere) — match a pasted debug artifact OR an explicit complaint that the running app misbehaved.
@@ -63,6 +82,68 @@ const OVERRIDE = /\b(instrumented|instrument-override)\s*:/i;
 const SOURCE_LOGIC = /\.(js|mjs|cjs|jsx|ts|tsx|svelte|py|go|rs|rb|java)$/i;
 const NOT_LOGIC = /(\.test\.|\.spec\.|\.d\.ts$|\.md$|\.json$|\.css$|\.html$)/i;
 
+// A path-or-basename-looking token in the triggering message, e.g. "chatRouter.js" or
+// "extension/lib/chatRouter.js" or "the tierRouter module". Loose on purpose — this only
+// narrows a BLOCK to plausible targets, it never widens one; a miss just falls back to
+// "no files named" (unscoped, existing behavior), never a false allow on a real episode.
+const FILE_MENTION = /[\w.-]+\.(?:js|mjs|cjs|jsx|ts|tsx|svelte|py|go|rs|rb|java)\b/gi;
+
+/** Basenames of files named in the debug-signal message, lowercased, deduped. Pure. */
+export function mentionedFileBasenames(messageText) {
+  const haystack = String(messageText || '');
+  const matches = haystack.match(FILE_MENTION) || [];
+  const basenames = matches.map((m) => m.replace(/\\/g, '/').split('/').pop().toLowerCase());
+  return [...new Set(basenames)];
+}
+
+/** Basename of a file path, lowercased. Pure. */
+function basenameOf(filePath) {
+  return String(filePath || '').replace(/\\/g, '/').split('/').pop().toLowerCase();
+}
+
+/**
+ * Is this edit's file plausibly part of the failure being debugged? Pure.
+ * No files named in the original signal → can't scope by target, so everything is "in scope"
+ * (existing behavior; turn/TTL decay still apply). Files WERE named → only a basename match
+ * (or the file itself being one of the named ones) counts as in scope.
+ */
+export function isTargetInScope(filePath, mentionedBasenames) {
+  if (!mentionedBasenames || mentionedBasenames.length === 0) return true;
+  return mentionedBasenames.includes(basenameOf(filePath));
+}
+
+/**
+ * Has the debug signal gone cold by TURN count? Pure. Counts human prompts strictly AFTER
+ * the gate-opening prompt; STALE_TURN_COUNT or more such turns with no resolution means the
+ * conversation has moved on and this is very unlikely to still be the live failure.
+ */
+export function isTurnStale(turnsSinceOpen) {
+  return typeof turnsSinceOpen === 'number' && turnsSinceOpen >= STALE_TURN_COUNT;
+}
+
+/**
+ * Count human-prompt turns in a transcript that occur AFTER the gate was opened (i.e. after
+ * the human prompt that carried the debug signal). Pure over a plain entries array so tests
+ * don't need real transcript files. `entries` is the full session transcript; `openedAtIndex`
+ * is the index of the human-prompt entry that opened the gate (-1/unknown → 0, conservative).
+ */
+export function humanTurnsSince(entries, openedAtIndex) {
+  const start = typeof openedAtIndex === 'number' && openedAtIndex >= 0 ? openedAtIndex + 1 : 0;
+  let count = 0;
+  for (let i = start; i < entries.length; i++) {
+    if (isHumanPrompt(entries[i])) count++;
+  }
+  return count;
+}
+
+/** Index of the LAST human-prompt entry in a transcript (the one presumed to carry the debug signal). Pure. */
+export function lastHumanPromptIndex(entries) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (isHumanPrompt(entries[i])) return i;
+  }
+  return -1;
+}
+
 /** Does the message carry a debugging-an-in-app-failure signal? Pure. Returns the matched reason or null. */
 export function debugSignal(messageText) {
   const haystack = String(messageText || '');
@@ -88,12 +169,19 @@ export function isSourceLogicFile(filePath) {
   return true;
 }
 
-/** Pure decision for the PreToolUse path — exported so the test drives every branch without stdin/fs. */
-export function decideEdit({ gateActive, instrumented, filePath, editText }) {
+/**
+ * Pure decision for the PreToolUse path — exported so the test drives every branch without stdin/fs.
+ * `turnsSinceOpen` / `mentionedBasenames` are optional: omitted (undefined) means "unknown, don't decay
+ * on that axis" so callers that don't track them (or old gate files written before this fix) keep the
+ * prior behavior instead of silently disarming.
+ */
+export function decideEdit({ gateActive, instrumented, filePath, editText, turnsSinceOpen, mentionedBasenames }) {
   if (!gateActive || instrumented) return { block: false, clears: false };
+  if (isTurnStale(turnsSinceOpen)) return { block: false, clears: false };             // signal went cold — let it lapse
   if (OVERRIDE.test(String(editText || ''))) return { block: false, clears: true };   // explicitly handled
   if (!isSourceLogicFile(filePath)) return { block: false, clears: false };            // test/doc/etc — fine
   if (isInstrumentationEdit(editText)) return { block: false, clears: true };           // you're instrumenting
+  if (!isTargetInScope(filePath, mentionedBasenames)) return { block: false, clears: false }; // unrelated file — fine
   return { block: true, clears: false };                                                // a blind logic fix — STOP
 }
 
@@ -145,7 +233,15 @@ function main() {
   if (eventName === 'UserPromptSubmit') {
     const reason = debugSignal(event.prompt);
     if (reason) {
-      writeGate({ active: true, instrumented: false, reason, ts: Date.now() });
+      const entries = readTranscript(event.transcript_path);
+      // The prompt that just fired hasn't been appended to the transcript file yet on most
+      // setups, so "the last human prompt currently on disk" is the one BEFORE this one; turn
+      // decay counts forward from here. If it's already on disk (order varies by harness), that's
+      // fine too — worst case decay starts one turn early, which only makes the gate MORE eager
+      // to lapse, never less (never a missed true-positive).
+      const openedAtIndex = lastHumanPromptIndex(entries);
+      const mentionedBasenames = mentionedFileBasenames(event.prompt);
+      writeGate({ active: true, instrumented: false, reason, ts: Date.now(), openedAtIndex, mentionedBasenames });
       // A nudge the model sees this turn (the gate's teeth land on the next edit).
       process.stdout.write(`Debug mode detected ("${reason}"). INSTRUMENT the failing path FIRST — add logging that captures WHY it misbehaves, get a real debug artifact, THEN edit logic. Blind fixes are blocked until you do.`);
     }
@@ -164,7 +260,17 @@ function main() {
   const filePath = input.file_path || input.path || '';
   const editText = input.content ?? input.new_string ?? '';
 
-  const verdict = decideEdit({ gateActive: true, instrumented: false, filePath, editText });
+  const entries = readTranscript(event.transcript_path);
+  const turnsSinceOpen = humanTurnsSince(entries, gate.openedAtIndex);
+
+  const verdict = decideEdit({
+    gateActive: true,
+    instrumented: false,
+    filePath,
+    editText,
+    turnsSinceOpen,
+    mentionedBasenames: gate.mentionedBasenames,
+  });
   if (verdict.clears) { writeGate({ ...gate, instrumented: true }); process.exit(0); return; } // instrumented/overridden
   if (!verdict.block) { process.exit(0); return; }
 
