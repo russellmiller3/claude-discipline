@@ -301,3 +301,77 @@ test('repoOptsIntoPresCycle is false for a repo with no matching AGENTS.md text'
 	assert.equal(repoOptsIntoPresCycle(repoRoot), false);
 	rmSync(repoRoot, { recursive: true, force: true });
 });
+
+// -----------------------------------------------------------------------
+// Regression: two false positives confirmed live 2026-07-03 in the ledger repo
+// -----------------------------------------------------------------------
+
+// BUG A — the runner-token regex matched the "py" INSIDE a ".py" filename
+// extension (the dot is a word boundary), so a read-only `wc -l` over .py
+// files was classified as a training launch and denied.
+test('bug A: read-only commands listing .py files are NOT training launches', () => {
+	assert.equal(looksLikeTrainingLaunch('wc -l northstar-ledger.md evaluate.py gate1.py data.py'), false);
+	assert.equal(looksLikeTrainingLaunch('grep -n foo train.py'), false);
+});
+
+test('bug A: real interpreter invocations are still training launches', () => {
+	assert.equal(looksLikeTrainingLaunch('python gate1.py --single plain64 1337'), true);
+	assert.equal(looksLikeTrainingLaunch('py train.py'), true);
+	assert.equal(looksLikeTrainingLaunch('node sweep_runner.mjs'), true);
+});
+
+test('bug A end-to-end: wc -l over .py files passes even with an unstamped newest plan', () => {
+	const repoRoot = makeFixtureRepo();
+	writePlan(repoRoot, 'plan-unstamped.md', PLAN_WITH_RESEARCH);
+	const hookStdout = runHook({
+		toolName: 'Bash',
+		toolInput: { command: 'wc -l northstar-ledger.md evaluate.py gate1.py data.py' },
+		workingDirectory: repoRoot
+	});
+	assertSilentPass(hookStdout);
+	rmSync(repoRoot, { recursive: true, force: true });
+});
+
+// BUG B — the launch gate read ONLY the single newest plan by mtime, so a
+// sibling agent's unstamped plan that was milliseconds newer blocked a fully
+// stamped plan's legitimate launch. New rule: the gate passes if ANY of the
+// 5 newest plans modified within the last 14 days is red-teamed.
+test('bug B: a stamped plan unlocks a launch even when an unstamped sibling plan is newer', () => {
+	const repoRoot = makeFixtureRepo();
+	writePlan(repoRoot, 'plan-stamped.md', PLAN_RED_TEAMED, { mtimeOffsetMs: 5000 });
+	writePlan(repoRoot, 'plan-sibling-unstamped.md', PLAN_WITH_RESEARCH, { mtimeOffsetMs: 6000 });
+	const hookStdout = runHook({
+		toolName: 'Bash',
+		toolInput: { command: 'python modal_gate1.py --arms plain64 --seeds 1337 --steps 4000' },
+		workingDirectory: repoRoot
+	});
+	assert.equal(wasDenied(hookStdout), false);
+	rmSync(repoRoot, { recursive: true, force: true });
+});
+
+test('bug B guard-rail: an ancient stamped plan (outside the 14-day window) does NOT unlock launches', () => {
+	const repoRoot = makeFixtureRepo();
+	writePlan(repoRoot, 'plan-ancient-stamped.md', PLAN_RED_TEAMED, { mtimeOffsetMs: -15 * 24 * 60 * 60 * 1000 });
+	const hookStdout = runHook({
+		toolName: 'Bash',
+		toolInput: { command: 'python modal_gate1.py --arms plain64 --seeds 1337 --steps 4000' },
+		workingDirectory: repoRoot
+	});
+	assert.equal(wasDenied(hookStdout), true);
+	rmSync(repoRoot, { recursive: true, force: true });
+});
+
+test('bug B guard-rail: a stamped plan pushed out of the 5 newest no longer unlocks', () => {
+	const repoRoot = makeFixtureRepo();
+	writePlan(repoRoot, 'plan-stamped.md', PLAN_RED_TEAMED, { mtimeOffsetMs: 1000 });
+	for (let siblingIndex = 0; siblingIndex < 5; siblingIndex++) {
+		writePlan(repoRoot, `plan-sibling-${siblingIndex}.md`, PLAN_WITH_RESEARCH, { mtimeOffsetMs: 2000 + siblingIndex * 1000 });
+	}
+	const hookStdout = runHook({
+		toolName: 'Bash',
+		toolInput: { command: 'python modal_gate1.py --arms plain64 --seeds 1337 --steps 4000' },
+		workingDirectory: repoRoot
+	});
+	assert.equal(wasDenied(hookStdout), true);
+	rmSync(repoRoot, { recursive: true, force: true });
+});
