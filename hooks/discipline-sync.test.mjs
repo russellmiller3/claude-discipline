@@ -85,6 +85,50 @@ test('detects a Bash cp that targets the live hooks dir', () => {
   assert.deepEqual(got, ['copied.mjs']);
 });
 
+// THE 2026-07-03 FIX: a hook merely READ/GREPPED/TESTED in a Bash command must NOT count as "changed" — only an
+// actual WRITE to it should. A naive substring scan flagged bench-pattern-guard.mjs as "changed this session" from
+// a plain `grep` reference, surfacing its unrelated pre-existing drift as a blocking publish requirement even
+// though nothing about it was touched this session.
+test('ignores a read-only grep referencing a hook path (no false positive)', () => {
+  const got = changedHookBasenames(turn([{ name: 'Bash', input: { command: 'grep -n "OVERRIDE" ~/.claude/hooks/bench-pattern-guard.mjs' } }]));
+  assert.deepEqual(got, []);
+});
+
+test('ignores a read-only cat of a hook path', () => {
+  const got = changedHookBasenames(turn([{ name: 'Bash', input: { command: 'cat ~/.claude/hooks/foo-guard.mjs' } }]));
+  assert.deepEqual(got, []);
+});
+
+test('ignores running a hook\'s own test suite (node --test)', () => {
+  const got = changedHookBasenames(turn([{ name: 'Bash', input: { command: 'node --test ~/.claude/hooks/foo-guard.test.mjs' } }]));
+  assert.deepEqual(got, []);
+});
+
+test('ignores a live smoke-test piping JSON into a hook (executing it, not writing it)', () => {
+  const got = changedHookBasenames(turn([{ name: 'Bash', input: { command: 'echo \'{}\' | node ~/.claude/hooks/foo-guard.mjs' } }]));
+  assert.deepEqual(got, []);
+});
+
+test('still detects a redirect write into a hook path', () => {
+  const got = changedHookBasenames(turn([{ name: 'Bash', input: { command: 'echo "x" > ~/.claude/hooks/foo-guard.mjs' } }]));
+  assert.deepEqual(got, ['foo-guard.mjs']);
+});
+
+test('still detects a heredoc append into a hook path', () => {
+  const got = changedHookBasenames(turn([{ name: 'Bash', input: { command: 'cat >> ~/.claude/hooks/foo-guard.mjs <<EOF\nx\nEOF' } }]));
+  assert.deepEqual(got, ['foo-guard.mjs']);
+});
+
+test('still detects sed -i on a hook path', () => {
+  const got = changedHookBasenames(turn([{ name: 'Bash', input: { command: "sed -i 's/x/y/' ~/.claude/hooks/foo-guard.mjs" } }]));
+  assert.deepEqual(got, ['foo-guard.mjs']);
+});
+
+test('a cp SOURCE from the hooks dir to elsewhere is not a write to that source', () => {
+  const got = changedHookBasenames(turn([{ name: 'Bash', input: { command: 'cp ~/.claude/hooks/foo-guard.mjs /tmp/copy.mjs' } }]));
+  assert.deepEqual(got, []);
+});
+
 test('ignores writes that are not in the hooks dir (no false positives)', () => {
   const got = changedHookBasenames(turn([
     { name: 'Write', input: { file_path: 'C:/Users/rmill/Desktop/programming/jarvis/src/app.mjs' } },

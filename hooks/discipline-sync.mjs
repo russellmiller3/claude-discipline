@@ -76,6 +76,39 @@ const editedPathOf = (toolUse) => toolUse.input?.file_path || toolUse.input?.pat
 
 // Basenames of live hook files (incl. *.test.mjs) written/edited this turn.
 const LIVE_HOOK_PATH_RE = /[/\\]\.claude[/\\]hooks[/\\]([a-z0-9._-]+\.mjs)/i;
+
+// A hook path MENTIONED in a shell command (grep/cat/node --test/python3 reading it, a live smoke-test piping JSON
+// into it) is NOT the same as a hook path WRITTEN by that command — but a naive "does this string appear anywhere"
+// scan can't tell the difference, so a read-only `grep pattern ~/.claude/hooks/foo.mjs` false-flagged `foo.mjs` as
+// "changed this session." That surfaced PRE-EXISTING drift (from before the session, never caused by this session's
+// work) as a blocking publish requirement every time a hook was merely referenced while debugging/testing.
+// (2026-07-03, live incident: bench-pattern-guard.mjs + no-commit-to-main.mjs had stale kit copies from an earlier
+// session; grepping/testing them this session — never editing them — kept re-blocking Stop on THAT unrelated drift.)
+//
+// A shell-command occurrence of a hook path counts as a WRITE only when:
+//   - it's immediately preceded by a redirect (`>` / `>>`) or `tee `, or
+//   - the command uses an in-place-edit tool (`sed -i`, `Set-Content`, `Out-File`) anywhere, or
+//   - the command is a copy/move (`cp`/`copy`/`mv`/`move`) and this occurrence IS the command's destination
+//     argument (its last non-flag whitespace-separated token) — an occurrence in an earlier argument is the
+//     SOURCE being read, not written (`cp ~/.claude/hooks/foo.mjs /tmp/copy.mjs` reads foo.mjs, writes nothing
+//     hook-related; a naive "last hook-path MATCH wins" check got this wrong when only the source matched).
+// Tolerates a `~` (home-dir shorthand) or quote sitting between the redirect operator and the path it targets
+// (`cat >> ~/.claude/hooks/foo.mjs` — the `~` sits right after `>>`, before the part LIVE_HOOK_PATH_RE matches).
+const REDIRECT_BEFORE_RE = /(>>?|\btee\s+)\s*["']?~?\s*["']?$/;
+const IN_PLACE_EDIT_RE = /\bsed\s+-i\b|\bSet-Content\b|\bOut-File\b/i;
+const COPY_MOVE_RE = /^\s*(cp|copy|mv|move)\b/i;
+
+function isWriteOccurrence(command, matchStart, matchedText) {
+  const before = command.slice(0, matchStart);
+  if (REDIRECT_BEFORE_RE.test(before)) return true;
+  if (IN_PLACE_EDIT_RE.test(command)) return true;
+  if (COPY_MOVE_RE.test(command)) {
+    const destinationToken = command.trim().split(/\s+/).filter((token) => !token.startsWith('-')).pop() || '';
+    if (destinationToken.includes(matchedText)) return true;
+  }
+  return false;
+}
+
 export function changedHookBasenames(turnEntries) {
   const changed = new Set();
   for (const entry of turnEntries) {
@@ -87,8 +120,10 @@ export function changedHookBasenames(turnEntries) {
         if (match) changed.add(match[1].toLowerCase());
       }
       if (['Bash', 'PowerShell'].includes(name)) {
-        for (const match of JSON.stringify(toolUse.input || '').matchAll(new RegExp(LIVE_HOOK_PATH_RE, 'gi'))) {
-          changed.add(match[1].toLowerCase());
+        const command = toolUse.input?.command || JSON.stringify(toolUse.input || '');
+        const globalRe = new RegExp(LIVE_HOOK_PATH_RE, 'gi');
+        for (const match of command.matchAll(globalRe)) {
+          if (isWriteOccurrence(command, match.index, match[0])) changed.add(match[1].toLowerCase());
         }
       }
     }
