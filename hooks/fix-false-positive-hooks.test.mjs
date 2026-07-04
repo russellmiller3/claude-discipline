@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { findWorkedAroundHooks } from './fix-false-positive-hooks.mjs';
 
 const hooksDirectory = dirname(fileURLToPath(import.meta.url));
@@ -164,6 +164,80 @@ test('a reply-level override (jargon-gloss override:) in message text DOES count
     assistantText('jargon-gloss override: term was already explained earlier this turn.'),
   ].join('\n');
   assert.deepEqual(findWorkedAroundHooks(transcript), ['jargon-gloss-guard']);
+});
+
+test('true-positive declared several turns EARLIER (not the final reply) still clears it — a stale finalAssistantText-only check was the 2026-07-03 ceremony-loop bug', () => {
+  const transcript = [
+    blockResult(LANGDOCS_BLOCK),
+    assistantToolUse('Edit', { file_path: 'C:/proj/page.html', new_string: '<!-- api-docs-read: static doc -->' }),
+    assistantText('true-positive: require-langdocs-read — the file genuinely integrates the API.'),
+    // Several LATER turns whose final reply says nothing about the declaration at all.
+    assistantText('Continuing on the next task.'),
+    assistantText('Still working on something unrelated.'),
+  ].join('\n');
+  assert.deepEqual(findWorkedAroundHooks(transcript), []);
+});
+
+// --- Persisted satisfaction (2026-07-03): a resolved event must stay silent across SEPARATE Stop
+// invocations that each re-scan the whole transcript from scratch, without needing the declaration
+// repeated — and a NEW, distinct block of the SAME hook must still fire fresh.
+function runFindWorkedAroundHooks(transcriptContent, transcriptKey, statePath) {
+  const hookFileUrl = pathToFileURL(HOOK_PATH).href;
+  const spawned = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { findWorkedAroundHooks } from ${JSON.stringify(hookFileUrl)};
+    const transcriptContent = ${JSON.stringify(transcriptContent)};
+    console.log(JSON.stringify(findWorkedAroundHooks(transcriptContent, ${JSON.stringify(transcriptKey)})));
+  `], { encoding: 'utf8', env: { ...process.env, FIX_FALSE_POSITIVE_HOOKS_STATE_PATH: statePath } });
+  if (spawned.status !== 0 || !spawned.stdout.trim()) {
+    throw new Error(`runFindWorkedAroundHooks subprocess failed: status=${spawned.status}\nstdout=${spawned.stdout}\nstderr=${spawned.stderr}`);
+  }
+  return JSON.parse(spawned.stdout.trim());
+}
+
+test('persisted satisfaction: resolved once (declared) stays silent on a later, separate Stop scan of the SAME transcript', () => {
+  const statePath = join(mkdtempSync(join(tmpdir(), 'ffph-state-')), 'resolved.json');
+  const transcriptKey = 'session-A-transcript.jsonl';
+  const transcript = [
+    blockResult(LANGDOCS_BLOCK),
+    assistantToolUse('Edit', { file_path: 'C:/proj/page.html', new_string: '<!-- api-docs-read: static doc -->' }),
+  ].join('\n');
+
+  // First scan: no declaration yet ⇒ flagged (nothing to persist since it's still unresolved).
+  const firstScanResult = runFindWorkedAroundHooks(transcript, transcriptKey, statePath);
+  assert.deepEqual(firstScanResult, ['require-langdocs-read']);
+
+  // Now the declaration lands (a later turn) ⇒ resolved, and persisted.
+  const declaredTranscript = `${transcript}\n${assistantText('true-positive: require-langdocs-read — legit override.')}`;
+  const secondScanResult = runFindWorkedAroundHooks(declaredTranscript, transcriptKey, statePath);
+  assert.deepEqual(secondScanResult, []);
+
+  // A LATER Stop re-scans the SAME transcript text but the declaration line is no longer the final
+  // reply (compaction / later turns with unrelated text) — persisted state must still keep it silent.
+  const laterTranscript = `${declaredTranscript}\n${assistantText('Unrelated later turn.')}\n${assistantText('Another unrelated turn.')}`;
+  const laterScanResult = runFindWorkedAroundHooks(laterTranscript, transcriptKey, statePath);
+  assert.deepEqual(laterScanResult, []);
+});
+
+test('persisted satisfaction: a NEW distinct block of the SAME hook (different event) still fires fresh, even with prior resolutions on record', () => {
+  const statePath = join(mkdtempSync(join(tmpdir(), 'ffph-state-')), 'resolved.json');
+  const transcriptKey = 'session-B-transcript.jsonl';
+
+  // Event 1: block → override → declared ⇒ resolved + persisted.
+  const event1Transcript = [
+    blockResult(LANGDOCS_BLOCK),
+    assistantToolUse('Edit', { file_path: 'C:/proj/page.html', new_string: '<!-- api-docs-read: static doc -->' }),
+    assistantText('true-positive: require-langdocs-read — legit.'),
+  ].join('\n');
+  assert.deepEqual(runFindWorkedAroundHooks(event1Transcript, transcriptKey, statePath), []);
+
+  // Event 2: a FRESH block→override pair of the SAME hook, later in the same transcript, with NO
+  // declaration this time ⇒ must fire, proving the persisted resolution doesn't blanket-cover the hook.
+  const event2Transcript = [
+    event1Transcript,
+    blockResult(LANGDOCS_BLOCK),
+    assistantToolUse('Edit', { file_path: 'C:/proj/other.html', new_string: '<!-- api-docs-read: static doc, second time -->' }),
+  ].join('\n');
+  assert.deepEqual(runFindWorkedAroundHooks(event2Transcript, transcriptKey, statePath), ['require-langdocs-read']);
 });
 
 test('end-to-end spawn: workaround transcript ⇒ decision block; stop_hook_active ⇒ silent', () => {

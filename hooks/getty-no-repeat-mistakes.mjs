@@ -77,17 +77,26 @@ const isCorrection = (message) => isRepeat(message) || CORRECTION_PATTERNS.some(
 
 import { readTranscript, lastAssistantTextOf } from './lib/transcript.mjs';
 
-// File paths edited by mutating tools since the last user message (this turn).
-function turnEditedPaths(transcriptPath) {
+// SATISFACTION WINDOW (2026-07-03, Russell: the Getty guard re-demanded "Should I build a hook for
+// this?" AFTER it was asked via AskUserQuestion, Russell answered yes, and the build was dispatched):
+// the marker can be armed in one turn and satisfied several turns later (asking, waiting for the
+// answer, and dispatching a background Agent are each their own turn) — a check scoped to ONLY the
+// current turn's edits misses all of that and keeps blocking. Scope to every entry SINCE the marker
+// was armed (its `armedAtEntryIndex`, recorded when the marker file is written), not just the last
+// user message. This mirrors the "widen the trigger to the session, keep satisfaction reading current
+// state" pattern from `discipline-sync.mjs` (learnings.md, 2026-06-28).
+function entriesSinceMarkerArmed(transcriptPath, armedAtEntryIndex) {
   const entries = readTranscript(transcriptPath);
-  let turnStart = 0;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].type === 'user') { turnStart = i; break; }
-  }
+  const startIndex = Number.isInteger(armedAtEntryIndex) ? Math.max(0, armedAtEntryIndex) : 0;
+  return entries.slice(startIndex);
+}
+
+// File paths edited by mutating tools across the given entries.
+function editedPathsIn(entries) {
   const editedPaths = [];
-  for (let i = turnStart; i < entries.length; i++) {
-    if (entries[i].type !== 'assistant') continue;
-    const blocks = entries[i].message?.content;
+  for (const entry of entries) {
+    if (entry.type !== 'assistant') continue;
+    const blocks = entry.message?.content;
     if (!Array.isArray(blocks)) continue;
     for (const block of blocks) {
       if (block?.type === 'tool_use' && MUTATING_TOOLS.has(block.name)) {
@@ -97,6 +106,67 @@ function turnEditedPaths(transcriptPath) {
     }
   }
   return editedPaths;
+}
+
+// A background Agent dispatch naming a hooks/*.mjs file counts as "building/strengthening a hook" —
+// the fix is delegated, not skipped, matching `fix-false-positive-hooks.mjs`'s own dispatch model.
+// Only `run_in_background: true` qualifies; a foreground Agent call blocks the main thread exactly
+// like doing the edit inline, defeating the point of delegating.
+function hookDispatchedIn(entries) {
+  for (const entry of entries) {
+    if (entry.type !== 'assistant') continue;
+    const blocks = entry.message?.content;
+    if (!Array.isArray(blocks)) continue;
+    for (const block of blocks) {
+      if (block?.type !== 'tool_use' || block.name !== 'Agent') continue;
+      const input = block.input || {};
+      if (input.run_in_background !== true) continue;
+      if (/[a-z0-9][a-z0-9-]*\.mjs\b/i.test(String(input.prompt || ''))) return true;
+    }
+  }
+  return false;
+}
+
+// The "ASK Russell explicitly: Should I build a hook for this?" step is satisfied either by that
+// exact sentence in assistant prose, OR by a structured AskUserQuestion tool call whose question
+// text asks about building/strengthening a hook — the live 2026-07-03 case used AskUserQuestion, not
+// plain text, and the hook had no path to recognize that at all before this fix.
+const HOOK_QUESTION_WORDING = /build(?:ing)?\s+(?:a\s+|the\s+)?hook|strengthen(?:ing)?\s+(?:a\s+|the\s+)?hook/i;
+function hookQuestionAskedIn(entries) {
+  for (const entry of entries) {
+    if (entry.type !== 'assistant') continue;
+    const blocks = entry.message?.content;
+    if (!Array.isArray(blocks)) continue;
+    for (const block of blocks) {
+      if (block?.type === 'text' && HOOK_QUESTION_WORDING.test(block.text || '')) return true;
+      if (block?.type === 'tool_use' && block.name === 'AskUserQuestion') {
+        const questions = block.input?.questions;
+        if (Array.isArray(questions) && questions.some((question) => HOOK_QUESTION_WORDING.test(question?.question || ''))) return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Russell's ANSWER to that question — a user-role entry (plain reply, or an AskUserQuestion
+// tool_result) whose text affirms it. Matches a bare "yes" as well as a chosen-option echo.
+const AFFIRMATIVE_ANSWER = /\byes\b|\byeah\b|\byep\b|\bsure\b|\bdo it\b|\bgo ahead\b|\bbuild it\b/i;
+function hookQuestionAnsweredYesIn(entries) {
+  for (const entry of entries) {
+    if (entry.type !== 'user') continue;
+    const blocks = entry.message?.content;
+    if (typeof blocks === 'string' && AFFIRMATIVE_ANSWER.test(blocks)) return true;
+    if (!Array.isArray(blocks)) continue;
+    for (const block of blocks) {
+      if (block?.type === 'text' && AFFIRMATIVE_ANSWER.test(block.text || '')) return true;
+      if (block?.type === 'tool_result') {
+        const inner = block.content;
+        const innerText = typeof inner === 'string' ? inner : Array.isArray(inner) ? inner.map((p) => p?.text || '').join('\n') : '';
+        if (AFFIRMATIVE_ANSWER.test(innerText)) return true;
+      }
+    }
+  }
+  return false;
 }
 
 function clearMarker() {
@@ -116,9 +186,13 @@ async function main() {
     if (SYSTEM_INJECTED.test(message)) return; // a notification/reminder, not Russell correcting me
     if (!isCorrection(message)) return;
     const repeat = isRepeat(message);
+    // Record how far into the transcript we are RIGHT NOW, so the Stop-side satisfaction check can
+    // scan every entry from this correction forward — across as many turns as it takes to ask,
+    // wait for the answer, and dispatch the fix — instead of only the current turn's edits.
+    const armedAtEntryIndex = readTranscript(payload.transcript_path).length;
     try {
       mkdirSync(dirname(MARKER_PATH), { recursive: true });
-      writeFileSync(MARKER_PATH, JSON.stringify({ repeat, correction: message.slice(0, 300), ts: Date.now() }));
+      writeFileSync(MARKER_PATH, JSON.stringify({ repeat, correction: message.slice(0, 300), ts: Date.now(), armedAtEntryIndex }));
     } catch { /* fail open */ }
 
     const checklist = repeat
@@ -148,10 +222,20 @@ Clear by adding a learning. Override: "getty-override: <why no rule is needed>".
   const reply = lastAssistantTextOf(payload.transcript_path);
   if (OVERRIDE.test(reply)) { clearMarker(); return; }
 
-  const editedPaths = turnEditedPaths(payload.transcript_path);
+  const sessionEntries = entriesSinceMarkerArmed(payload.transcript_path, marker.armedAtEntryIndex);
+  const editedPaths = editedPathsIn(sessionEntries);
   const learningAdded = editedPaths.some((filePath) => LEARNINGS_FILE.test(filePath));
   const hookBuilt = editedPaths.some((filePath) => HOOK_FILE.test(filePath));
-  const satisfied = marker.repeat ? hookBuilt : (learningAdded || hookBuilt);
+  const hookDispatched = hookDispatchedIn(sessionEntries);
+  // For a REPEAT: asking Russell + getting an affirmative answer + dispatching (or building) the fix
+  // fully closes the loop — the live 2026-07-03 case asked via AskUserQuestion, got a yes, and
+  // dispatched a background Agent, none of which the old "current-turn file-edit only" check saw.
+  const askedAndApprovedAndActed = hookQuestionAskedIn(sessionEntries)
+    && hookQuestionAnsweredYesIn(sessionEntries)
+    && (hookBuilt || hookDispatched);
+  const satisfied = marker.repeat
+    ? (hookBuilt || hookDispatched || askedAndApprovedAndActed)
+    : (learningAdded || hookBuilt || hookDispatched);
 
   if (satisfied) { clearMarker(); return; }
 

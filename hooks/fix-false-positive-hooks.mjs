@@ -23,11 +23,47 @@
  * Detection windows follow the invariant (session-wide trigger, current-state satisfaction):
  * the whole transcript is scanned for block→override pairs; the fix/declaration check reads
  * the same transcript, so publishing the fix clears the gate immediately.
+ *
+ * PERSISTED SATISFACTION (2026-07-03, Russell: worked-around-hook gate re-fired for HOURS after
+ * the true-positive line was said once): `finalAssistantText` is only the LAST assistant text
+ * block in the transcript — the declaration/dispatch/edit check re-derives "resolved?" from
+ * scratch every Stop, so the moment a later reply doesn't repeat `true-positive: <hook> — <why>`,
+ * an event resolved turns ago flags again, and keeps flagging every Stop for the rest of the
+ * session even though the underlying block→override pair never recurred. Fix: once a specific
+ * triggering event (hookName + the entry-index of ITS block) is found resolved, record it in a
+ * per-session state file keyed by transcript path, so it stays resolved without needing the
+ * declaration repeated. A NEW block of the SAME hook later (a fresh event, different block index)
+ * is a distinct signature — it is not covered by a prior resolution and fires fresh.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { basename } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
+
+const STATE_PATH = process.env.FIX_FALSE_POSITIVE_HOOKS_STATE_PATH
+  || join(homedir(), '.claude', 'state', 'fix-false-positive-hooks-resolved.json');
+
+function loadResolvedState() {
+  try { return JSON.parse(readFileSync(STATE_PATH, 'utf8')); } catch { return {}; }
+}
+
+function saveResolvedState(state) {
+  try {
+    mkdirSync(dirname(STATE_PATH), { recursive: true });
+    writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  } catch { /* fail open — persistence is best-effort, never blocks on write failure */ }
+}
+
+// A stable signature for ONE triggering event: which transcript, which hook, which block. Keyed
+// on the transcript path (a session-scoped file) + hookName + the block's own entry index, so a
+// FRESH block of the same hook later in the same transcript (different index) is a new signature
+// and is never silently covered by an earlier resolution.
+function eventSignature(transcriptPath, hookName, blockIndex) {
+  const key = `${transcriptPath}::${hookName}::${blockIndex}`;
+  return createHash('sha1').update(key).digest('hex');
+}
 
 // Deny-style blocks that do NOT name their hook file in the message — map their stable
 // signature phrase to the hook. Path-style blocks (`[node .../hooks/X.mjs]`) need no entry.
@@ -152,32 +188,52 @@ function blocksOf(entryText) {
   return blockedHookNames;
 }
 
-export function findWorkedAroundHooks(transcriptText) {
+// transcriptKey identifies the session for persisted-satisfaction lookups (omit to skip persistence,
+// e.g. from unit tests exercising the pure transcript-scan logic in isolation).
+export function findWorkedAroundHooks(transcriptText, transcriptKey) {
   const lines = transcriptText.split('\n').filter(Boolean);
   const entries = [];
   for (const line of lines) {
     try { entries.push(JSON.parse(line)); } catch { /* non-JSON line */ }
   }
 
-  const blockIndexByHook = new Map();     // hookName -> first entry index where it blocked
-  const overrideIndexByHook = new Map();  // hookName -> first entry index (post-block) using its override
-  const editedHooks = new Set();
-  const dispatchedFixHooks = new Set();
-  let finalAssistantText = '';
+  const pendingBlockIndexByHook = new Map();  // hookName -> the most recent UN-overridden block's entry index
+  const overrideIndicesByHook = new Map();    // hookName -> [entry index, ...] of EACH override event (one per
+                                               // block→override pair, in order) — not just the first ever, so a
+                                               // fresh block+override pair later in the same transcript is its
+                                               // own distinct event with its own signature (2026-07-03 fix).
+  const editIndicesByHook = new Map();        // hookName -> [entry index, ...] where it was edited inline
+  const dispatchIndicesByHook = new Map();    // hookName -> [entry index, ...] where a fix was dispatched
+  const declarationIndicesByHook = new Map(); // hookName -> [entry index, ...] where declared true-positive
 
   entries.forEach((entry, entryIndex) => {
     const fullText = entryTextOf(entry);
     for (const hookName of blocksOf(fullText)) {
-      if (!blockIndexByHook.has(hookName)) blockIndexByHook.set(hookName, entryIndex);
+      // A hook can block, get overridden, and later block AGAIN — each block starts a new pending
+      // pair. Only arm a new pending block if the previous one (if any) was already paired off.
+      if (!pendingBlockIndexByHook.has(hookName)) pendingBlockIndexByHook.set(hookName, entryIndex);
     }
-    for (const editedHookName of hookEditsOf(entry)) editedHooks.add(editedHookName);
-    for (const dispatchedHookName of dispatchedFixesOf(entry)) dispatchedFixHooks.add(dispatchedHookName);
+    for (const editedHookName of hookEditsOf(entry)) {
+      if (!editIndicesByHook.has(editedHookName)) editIndicesByHook.set(editedHookName, []);
+      editIndicesByHook.get(editedHookName).push(entryIndex);
+    }
+    for (const dispatchedHookName of dispatchedFixesOf(entry)) {
+      if (!dispatchIndicesByHook.has(dispatchedHookName)) dispatchIndicesByHook.set(dispatchedHookName, []);
+      dispatchIndicesByHook.get(dispatchedHookName).push(entryIndex);
+    }
 
     const { inputText, messageText } = authoredChannelsOf(entry);
-    if (messageText.trim()) finalAssistantText = messageText;
+    if (messageText.trim()) {
+      for (const hookName of new Set([...pendingBlockIndexByHook.keys(), ...overrideIndicesByHook.keys()])) {
+        if (new RegExp(`true-positive:\\s*\`?${hookName}`, 'i').test(messageText)) {
+          if (!declarationIndicesByHook.has(hookName)) declarationIndicesByHook.set(hookName, []);
+          declarationIndicesByHook.get(hookName).push(entryIndex);
+        }
+      }
+    }
     if (inputText || messageText) {
-      for (const [hookName, blockIndex] of blockIndexByHook) {
-        if (overrideIndexByHook.has(hookName) || entryIndex <= blockIndex) continue;
+      for (const [hookName, blockIndex] of pendingBlockIndexByHook) {
+        if (entryIndex <= blockIndex) continue;
         const tokens = OVERRIDE_TOKENS[hookName] || [];
         const genericOverride = new RegExp(`\\b${hookName}[-_ ]?override`, 'i');
         // Input-level tokens (env vars, sentinels) only take effect inside a tool input; the
@@ -185,20 +241,43 @@ export function findWorkedAroundHooks(transcriptText) {
         // family) also count in message text — but a prose MENTION of an input-level token doesn't.
         const usedInInput = tokens.some((token) => inputText.includes(token)) || genericOverride.test(inputText);
         const usedInText = tokens.some((token) => TEXT_LEVEL_TOKEN.test(token) && messageText.includes(token));
-        if (usedInInput || usedInText) overrideIndexByHook.set(hookName, entryIndex);
+        if (usedInInput || usedInText) {
+          if (!overrideIndicesByHook.has(hookName)) overrideIndicesByHook.set(hookName, []);
+          overrideIndicesByHook.get(hookName).push(entryIndex);
+          pendingBlockIndexByHook.delete(hookName);  // this block is paired off; a LATER block re-arms fresh
+        }
       }
     }
   });
 
-  const unresolved = [];
-  for (const [hookName] of overrideIndexByHook) {
-    if (editedHooks.has(hookName)) continue;                                   // fixed inline this session
-    if (dispatchedFixHooks.has(hookName)) continue;                            // handed to a background Agent
-    const declaration = new RegExp(`true-positive:\\s*\`?${hookName}`, 'i');
-    if (declaration.test(finalAssistantText)) continue;                        // declared legit
-    unresolved.push(hookName);
+  // Does any resolution-signal index (edit/dispatch/declaration) for this hook fall strictly after
+  // the given override's own entry index? Scoping this way means an OLD declaration/fix from a prior,
+  // already-resolved event does not blanket-cover a FRESH block→override pair later in the transcript.
+  function resolvedAfter(hookName, overrideIndex) {
+    const signalIndices = [
+      ...(editIndicesByHook.get(hookName) || []),
+      ...(dispatchIndicesByHook.get(hookName) || []),
+      ...(declarationIndicesByHook.get(hookName) || []),
+    ];
+    return signalIndices.some((signalIndex) => signalIndex > overrideIndex);
   }
-  return unresolved;
+
+  const resolvedState = transcriptKey ? loadResolvedState() : {};
+  let stateChanged = false;
+  const unresolvedSet = new Set();
+  for (const [hookName, overrideIndices] of overrideIndicesByHook) {
+    for (const overrideIndex of overrideIndices) {
+      const signature = transcriptKey ? eventSignature(transcriptKey, hookName, overrideIndex) : null;
+      if (signature && resolvedState[signature]) continue;                     // already resolved — stays silent
+      if (resolvedAfter(hookName, overrideIndex)) {
+        if (signature) { resolvedState[signature] = { hookName, resolvedAt: new Date().toISOString() }; stateChanged = true; }
+        continue;
+      }
+      unresolvedSet.add(hookName);
+    }
+  }
+  if (transcriptKey && stateChanged) saveResolvedState(resolvedState);
+  return [...unresolvedSet];
 }
 
 function main() {
@@ -215,7 +294,7 @@ function main() {
   if (!transcriptText) process.exit(0);
 
   let unresolvedHooks = [];
-  try { unresolvedHooks = findWorkedAroundHooks(transcriptText); } catch { process.exit(0); }
+  try { unresolvedHooks = findWorkedAroundHooks(transcriptText, transcriptPath); } catch { process.exit(0); }
   if (unresolvedHooks.length === 0) process.exit(0);
 
   const reason =
