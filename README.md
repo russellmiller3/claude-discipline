@@ -254,6 +254,14 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ---
 
+## Recent changes
+
+- **2026-07-03** — `discipline-sync` no longer treats a hook merely *read* by a shell command
+  (`grep`/`cat`/`node --test`/a smoke-test piping input into it) as a change — only a real write
+  (redirect, `tee`, in-place edit, or a `cp`/`mv` destination) counts, so referencing a hook while
+  debugging can't falsely block the publish loop. Hardened `.gitignore` to never track agent
+  `.bak` backup snapshots.
+
 ## License
 
 **[PolyForm Noncommercial License 1.0.0](LICENSE.md)** — free for noncommercial
