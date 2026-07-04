@@ -11,10 +11,15 @@
 //      source (a URL, or an author/year citation, or a named source doc like
 //      Truth-ledger.md). Missing it -> deny (rule 14).
 //   2. TRAINING LAUNCH CHECK (Bash/PowerShell): a command that looks like it
-//      launches training/sweeps is blocked unless the newest file in plans/
-//      has BOTH a `## Research notes` section AND a `red-teamed: YYYY-MM-DD`
-//      stamp (only the red-team-plan skill honestly writes that stamp).
-//      Missing either -> deny (rule 13).
+//      launches training/sweeps is blocked unless at least one RECENT plan in
+//      plans/ — among the 5 newest by mtime AND modified within the last 14
+//      days — has BOTH a `## Research notes` section AND a `red-teamed:
+//      YYYY-MM-DD` stamp (only the red-team-plan skill honestly writes that
+//      stamp). No such plan -> deny (rule 13). Why not just the single
+//      newest plan: parallel agents each own a plan file, so a sibling's
+//      unstamped plan being milliseconds newer must not block a stamped
+//      plan's launch. Why not any plan ever: one ancient stamped plan would
+//      unlock all launches forever.
 //
 // SCOPE: only fires in a repo whose AGENTS.md contains the opt-in rule text
 // ("reviews the research" or a "## Research notes" mention) — so this hook is
@@ -35,6 +40,9 @@ import { fileURLToPath } from 'node:url';
 
 const OVERRIDE_TOKEN = 'PRES_CYCLE_OK';
 const SMOKE_STEPS_CEILING = 100;
+const RECENT_PLANS_CONSIDERED = 5;
+const RECENT_PLAN_WINDOW_DAYS = 14;
+const RECENT_PLAN_WINDOW_MS = RECENT_PLAN_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
 const RESEARCH_NOTES_HEADING = /^##\s*research notes\b/im;
 const RED_TEAM_STAMP = /red-teamed:\s*\d{4}-\d{2}-\d{2}/i;
@@ -232,16 +240,17 @@ function runTrainingLaunchCheck(hookEvent, repoRoot) {
 		return;
 	}
 
-	const newestPlanFile = findNewestPlanFile(repoRoot);
-	if (newestPlanFile && planIsRedTeamedWithResearch(newestPlanFile.content)) {
+	const recentPlanFiles = findRecentPlanFiles(repoRoot);
+	if (recentPlanFiles.some((planFile) => planIsRedTeamedWithResearch(planFile.content))) {
 		process.exit(0);
 		return;
 	}
 
 	deny(
-		'rule 13 — experiments run inside a /pres cycle; the newest plan must be ' +
-		'red-teamed (add the red-teamed: YYYY-MM-DD stamp via the red-team-plan ' +
-		'skill) before launching runs.'
+		'rule 13 — experiments run inside a /pres cycle; no recent plan (the ' +
+		`${RECENT_PLANS_CONSIDERED} newest in plans/, modified within ` +
+		`${RECENT_PLAN_WINDOW_DAYS} days) is red-teamed. Add the red-teamed: ` +
+		'YYYY-MM-DD stamp via the red-team-plan skill before launching runs.'
 	);
 }
 
@@ -255,7 +264,13 @@ export function looksLikeTrainingLaunch(command) {
 // names not on the named list — a python/node run of a file whose name
 // signals training/sweep work.
 function trainingKeywordFallback(command) {
-	const runnerInvocationPattern = /\b(?:python3?|py|node)\b[^\n|;&]*\.(?:py|mjs|cjs|js)\b/i;
+	// The runner token must be a real interpreter invocation, NOT the "py" tail
+	// of a ".py" filename — the dot is a word boundary, so a plain \bpy\b
+	// matched inside "evaluate.py" and classified read-only commands like
+	// `wc -l evaluate.py` as training launches (false positive fixed
+	// 2026-07-04). The (?<![.\w-]) lookbehind rejects a token preceded by a
+	// dot (file extension) or glued onto a longer word.
+	const runnerInvocationPattern = /(?<![.\w-])(?:python3?|py|node)\b[^\n|;&]*\.(?:py|mjs|cjs|js)\b/i;
 	if (!runnerInvocationPattern.test(command)) return false;
 	return /\b(train|sweep|gate\d*)[\w.-]*\.(?:py|mjs|cjs|js)\b/i.test(command);
 }
@@ -271,12 +286,20 @@ export function planIsRedTeamedWithResearch(planContent) {
 	return planHasResearchNotesWithSource(content) && RED_TEAM_STAMP.test(content);
 }
 
-export function findNewestPlanFile(repoRoot) {
+// The launch gate reads the RECENT plans — the 5 newest .md files in plans/
+// that were also modified within the last 14 days — and the caller passes if
+// ANY of them is red-teamed with research notes. Why not just the single
+// newest: parallel agents each own a plan file, so a sibling agent's
+// unstamped plan being milliseconds newer by mtime must not block a fully
+// stamped plan's legitimate launch (false positive fixed 2026-07-04). Why
+// not any plan ever: one ancient stamped plan would unlock all launches
+// forever — the 14-day window plus the 5-file cap keeps the stamp tied to
+// the current cycle.
+export function findRecentPlanFiles(repoRoot) {
 	const plansDirectory = join(repoRoot, 'plans');
-	if (!existsSync(plansDirectory)) return null;
+	if (!existsSync(plansDirectory)) return [];
 
-	let newestPlanPath = null;
-	let newestPlanMtime = -Infinity;
+	const candidatePlans = [];
 	for (const entryName of readdirSync(plansDirectory)) {
 		if (!entryName.toLowerCase().endsWith('.md')) continue;
 		const entryPath = join(plansDirectory, entryName);
@@ -287,18 +310,22 @@ export function findNewestPlanFile(repoRoot) {
 			continue;
 		}
 		if (!entryStats.isFile()) continue;
-		if (entryStats.mtimeMs > newestPlanMtime) {
-			newestPlanMtime = entryStats.mtimeMs;
-			newestPlanPath = entryPath;
-		}
+		candidatePlans.push({ path: entryPath, mtimeMs: entryStats.mtimeMs });
 	}
 
-	if (!newestPlanPath) return null;
-	try {
-		return { path: newestPlanPath, content: readFileSync(newestPlanPath, 'utf8') };
-	} catch {
-		return null;
+	candidatePlans.sort((firstPlan, secondPlan) => secondPlan.mtimeMs - firstPlan.mtimeMs);
+	const freshnessCutoffMs = Date.now() - RECENT_PLAN_WINDOW_MS;
+
+	const recentPlanFiles = [];
+	for (const candidatePlan of candidatePlans.slice(0, RECENT_PLANS_CONSIDERED)) {
+		if (candidatePlan.mtimeMs < freshnessCutoffMs) continue;
+		try {
+			recentPlanFiles.push({ path: candidatePlan.path, content: readFileSync(candidatePlan.path, 'utf8') });
+		} catch {
+			// Unreadable plan: skip it rather than fail the whole gate.
+		}
 	}
+	return recentPlanFiles;
 }
 
 // ---------------------------------------------------------------------------
