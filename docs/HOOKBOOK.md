@@ -1,7 +1,7 @@
 ﻿# HOOKBOOK — Russell's Claude Code Hook Reference
 
 All hooks live in `~/.claude/hooks/`. Registered in `~/.claude/settings.json`.
-111 hooks across 5 event types. Shared libs: `lib/buildFingerprint.mjs` (content-based dist provenance); `lib/transcript.mjs` (the canonical JSONL-transcript helpers — `readTranscript` / `roleOf` / `contentBlocks` / `toolUsesOf` / `currentTurnEntries` / `lastAssistantText`(`Of`) / `lastUserText`(`Of`) — consolidated 2026-06-28 from ~20 hand-rolled copies; `hook-dry-review` blocks re-implementing them).
+112 hooks across 5 event types. Shared libs: `lib/buildFingerprint.mjs` (content-based dist provenance); `lib/transcript.mjs` (the canonical JSONL-transcript helpers — `readTranscript` / `roleOf` / `contentBlocks` / `toolUsesOf` / `currentTurnEntries` / `lastAssistantText`(`Of`) / `lastUserText`(`Of`) — consolidated 2026-06-28 from ~20 hand-rolled copies; `hook-dry-review` blocks re-implementing them).
 
 ---
 
