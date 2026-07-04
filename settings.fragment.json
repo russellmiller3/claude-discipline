@@ -12,6 +12,7 @@
     "filename-quality-guard":   [{ "event": "PreToolUse", "matcher": "Write", "timeout": 5 }],
     "no-write-to-main":         [{ "event": "PreToolUse", "matcher": "Bash", "timeout": 5 }],
     "delete-audit-guard":       [{ "event": "PreToolUse", "matcher": "Bash|PowerShell", "timeout": 5 }],
+    "phantom-delete-commit-guard": [{ "event": "PreToolUse", "matcher": "Bash|PowerShell", "timeout": 10 }],
     "delete-merged-branches":   [{ "event": "PostToolUse", "matcher": "Bash|PowerShell", "timeout": 5 }],
     "no-junk-files":            [{ "event": "Stop", "timeout": 5 }],
     "never-idle":               [{ "event": "Stop", "timeout": 5 }],
