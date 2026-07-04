@@ -15,15 +15,22 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const hookDirectory = dirname(fileURLToPath(import.meta.url));
 const HOOK_PATH = join(hookDirectory, 'phantom-delete-commit-guard.mjs');
 
-// Sandbox lives NEXT TO this test file, not under the OS temp dir — delete-audit-guard's lesson:
-// temp-dir paths read as scratch/special to path heuristics, and this guard's worktree-path skip
-// must be exercised against realistic project-looking paths.
-const sandboxDirectory = join(hookDirectory, `.phantom-delete-commit-guard-test-sandbox-${process.pid}`);
+// Sandbox lives NEXT TO this test file by default, not under the OS temp dir — delete-audit-guard's
+// lesson: realistic project-looking paths keep path heuristics honest. ONE exception: the guard
+// intentionally skips any repo under `.claude/worktrees/`, so when this test file ITSELF lives
+// inside such a linked worktree (e.g. verifying the discipline-kit copy from its landing worktree),
+// a sandbox next to the test would inherit that path and neutralize every block case. Fall back to
+// the OS temp dir then — safe for THIS guard, which has no temp-dir scratch heuristic.
+const testFileInsideLinkedWorktree = /[\\/]\.claude[\\/]worktrees[\\/]/i.test(hookDirectory);
+const sandboxDirectory = testFileInsideLinkedWorktree
+  ? mkdtempSync(join(tmpdir(), 'phantom-delete-commit-guard-test-'))
+  : join(hookDirectory, `.phantom-delete-commit-guard-test-sandbox-${process.pid}`);
 mkdirSync(sandboxDirectory, { recursive: true });
 
 const combinedOutputOf = (childProcess) => (childProcess.stdout || '') + (childProcess.stderr || '');
