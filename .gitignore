@@ -2,3 +2,7 @@ node_modules/
 .claude/state/
 .claude/settings.local.json
 *.log
+# Agent backup snapshots (e.g. foo.mjs.bak, HOOKBOOK.md.bak_20260703) — never version these
+*.bak
+*.bak.*
+*.bak_*
