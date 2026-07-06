@@ -60,12 +60,16 @@ export function hooksNeedingSync(changedBasenames, readLive, readKit) {
   return needing;
 }
 
+// The non-empty lines of a `git status --porcelain` blob. Shared by the porcelain-scoping helpers below so the
+// same split isn't inlined twice.
+const porcelainLines = (porcelainText) => String(porcelainText || '').split('\n').filter(Boolean);
+
 // Pure: of a `git status --porcelain` text, the lines that touch THIS session's hook work — a changed hook basename
 // or settings.json (where registration lives). Scopes the commit-enforcement so it never demands committing OTHER
 // sessions' unrelated WIP hooks. Tested without git.
 export function uncommittedForChanged(porcelainText, changedBasenames) {
   const basenames = changedBasenames || [];
-  return String(porcelainText || '').split('\n').filter(Boolean)
+  return porcelainLines(porcelainText)
     .filter((line) => /settings\.json/.test(line) || basenames.some((basename) => line.includes(basename)));
 }
 
@@ -153,14 +157,43 @@ function gitPorcelain(repoDir) {
 // 2026-06-29 ("update hookbook and claude-discipline folder and readme ... on editing hooks").
 const KIT_DOCS_PATH_RE = /claude-discipline[/\\](readme\.md|docs[/\\])/i;
 export function kitDocsTouchedThisSession(sessionEntries) {
+  return kitDocsFilesTouchedThisSession(sessionEntries).length > 0;
+}
+
+// The BASENAMES of the specific kit doc files (README.md, docs/HOOKBOOK.md, …) THIS session actually edited.
+// Scopes the uncommitted-DOCS nag the SAME way `uncommittedForChanged` scopes the hooks nag: only a kit doc YOU
+// touched this session can block Stop for being uncommitted — an unrelated dirty README/doc left by ANOTHER
+// session (e.g. another task's require-learnings-ack README WIP) must NOT force a yak-shave commit here. Returns
+// basenames (not full paths) so porcelain lines match by the same substring test the hooks scope uses.
+// (2026-07-06 FP: this session committed its own docs/HOOKBOOK.md row, but an unrelated dirty README.md still
+// tripped the old BLANKET docs check, demanding I commit another session's WIP — the exact yak-shave the
+// hooks-scope comment warns against.) Pure + exported so the rule is unit-tested.
+export function kitDocsFilesTouchedThisSession(sessionEntries) {
+  const basenames = new Set();
   for (const entry of sessionEntries) {
     if (roleOf(entry) !== 'assistant') continue;
     for (const toolUse of toolUsesOf(entry)) {
       if (!['Write', 'Edit', 'MultiEdit'].includes(toolUse.name || '')) continue;
-      if (KIT_DOCS_PATH_RE.test(editedPathOf(toolUse))) return true;
+      const path = editedPathOf(toolUse);
+      if (!KIT_DOCS_PATH_RE.test(path)) continue;
+      const basename = path.split(/[/\\]/).filter(Boolean).pop();
+      if (basename) basenames.add(basename.toLowerCase());
     }
   }
-  return false;
+  return [...basenames];
+}
+
+// Pure: of a kit `git status --porcelain`, the dirty lines whose file is a kit doc THIS session actually edited
+// (matched by basename, mirroring `uncommittedForChanged`). Only these block Stop — a dirty kit doc from another
+// session must not. The basename set is already sourced exclusively from kit README/docs edits
+// (`kitDocsFilesTouchedThisSession` filters on `KIT_DOCS_PATH_RE`), so basename membership IS the docs-family
+// gate — no separate path regex needed (a `[/\\]docs[/\\]` pre-filter wrongly dropped repo-relative `docs/x.md`
+// porcelain paths, which have no leading separator). Tested without git.
+export function uncommittedKitDocsForTouched(porcelainText, touchedDocBasenames) {
+  const basenames = touchedDocBasenames || [];
+  if (!basenames.length) return [];
+  return porcelainLines(porcelainText)
+    .filter((line) => basenames.some((basename) => line.toLowerCase().includes(basename)));
 }
 
 // The kit is a PUBLISHED artifact — a local commit isn't "published" until it's on GitHub. Once the publish loop
@@ -223,12 +256,18 @@ async function main() {
   // touched this session (+ settings.json, which hook registration lives in). Now that the scan spans the whole
   // session, a blanket "any uncommitted hook" check would demand committing OTHER sessions' unrelated WIP hooks on
   // every Stop — a yak-shave. `uncommittedForChanged` scopes the porcelain to this session's hook work.
+  const kitPorcelain = gitPorcelain(kitRoot);
   const liveUncommitted = uncommittedForChanged(gitPorcelain(LIVE_REPO_DIR), changed);
-  const kitUncommitted = uncommittedForChanged(gitPorcelain(kitRoot), kitChanged);
+  const kitUncommitted = uncommittedForChanged(kitPorcelain, kitChanged);
 
-  // The published surface (kit README / docs) must move too, and be committed so the push carries it.
-  const docsTouched = kitDocsTouchedThisSession(sessionEntries);
-  const kitDocsDirty = gitPorcelain(kitRoot).split('\n').filter(Boolean).filter((line) => /readme\.md|[/\\]docs[/\\]/i.test(line));
+  // The published surface (kit README / docs) must move too, and be committed so the push carries it. The
+  // uncommitted-DOCS check is SCOPED to the kit doc files THIS session actually edited — same discipline as the
+  // hooks check above. A blanket "any dirty kit README/doc" scan yak-shaves OTHER sessions' unrelated doc WIP
+  // (2026-07-06 FP: an unrelated dirty README.md from another task blocked Stop even though this session had
+  // already committed its own HOOKBOOK row). `uncommittedKitDocsForTouched` restricts it to what you touched.
+  const touchedDocFiles = kitDocsFilesTouchedThisSession(sessionEntries);
+  const docsTouched = touchedDocFiles.length > 0;
+  const kitDocsDirty = uncommittedKitDocsForTouched(kitPorcelain, touchedDocFiles);
 
   if (!needing.length && !liveUncommitted.length && !kitUncommitted.length && docsTouched && !kitDocsDirty.length) {
     // Sync + commits + docs are all done — the only thing left is getting it onto GitHub. Push the kit.

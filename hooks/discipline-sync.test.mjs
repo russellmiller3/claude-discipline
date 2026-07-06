@@ -1,9 +1,20 @@
 // Tests for discipline-sync's pure core. Run: node --test discipline-sync.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hooksNeedingSync, changedHookBasenames, uncommittedForChanged, kitDocsTouchedThisSession } from './discipline-sync.mjs';
+import { hooksNeedingSync, changedHookBasenames, uncommittedForChanged, kitDocsTouchedThisSession,
+  kitDocsFilesTouchedThisSession, uncommittedKitDocsForTouched } from './discipline-sync.mjs';
 
 const assistantEditing = (file_path) => ({ message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: { file_path } }] } });
+
+// The docs half of main()'s decision, replayed from the two pure functions main() uses:
+//   docsTouched = a kit doc was edited this session; kitDocsDirty = only THOSE files if left uncommitted.
+// The publish loop lets Stop through the docs gate iff (docsTouched && kitDocsDirty is empty). This mirrors the
+// exact conjuncts in main()'s `if (… && docsTouched && !kitDocsDirty.length)`, so it asserts the REAL decision.
+const docsGatePasses = (sessionEntries, kitPorcelain) => {
+  const touched = kitDocsFilesTouchedThisSession(sessionEntries);
+  const dirty = uncommittedKitDocsForTouched(kitPorcelain, touched);
+  return touched.length > 0 && dirty.length === 0;
+};
 
 test('kitDocsTouchedThisSession: true when the kit README was edited', () => {
   assert.equal(kitDocsTouchedThisSession([assistantEditing('C:/x/claude-discipline/README.md')]), true);
@@ -16,6 +27,47 @@ test('kitDocsTouchedThisSession: false for a kit HOOK edit (not docs)', () => {
 });
 test('kitDocsTouchedThisSession: false when nothing in the kit was touched', () => {
   assert.equal(kitDocsTouchedThisSession([assistantEditing('C:/x/.claude/hooks/foo.mjs')]), false);
+});
+
+// ── kitDocsFilesTouchedThisSession (which specific kit doc BASENAMES this session edited) ──
+test('kitDocsFilesTouchedThisSession: returns the edited kit doc basename (docs/ file)', () => {
+  const got = kitDocsFilesTouchedThisSession([assistantEditing('/home/u/Desktop/programming/claude-discipline/docs/HOOKBOOK.md')]);
+  assert.deepEqual(got, ['hookbook.md']);
+});
+test('kitDocsFilesTouchedThisSession: returns README basename', () => {
+  assert.deepEqual(kitDocsFilesTouchedThisSession([assistantEditing('C:/x/claude-discipline/README.md')]), ['readme.md']);
+});
+test('kitDocsFilesTouchedThisSession: empty when only a kit HOOK (not a doc) was edited', () => {
+  assert.deepEqual(kitDocsFilesTouchedThisSession([assistantEditing('C:/x/claude-discipline/hooks/ross-perot-guard.mjs')]), []);
+});
+
+// ── uncommittedKitDocsForTouched (scopes the dirty-docs porcelain to what THIS session touched) ──
+test('uncommittedKitDocsForTouched: flags a touched doc left dirty, ignores an UNRELATED dirty README', () => {
+  const porcelain = [
+    ' M docs/HOOKBOOK.md',   // this session edited this → flag it if dirty
+    ' M README.md',          // another session's WIP → must be ignored
+  ].join('\n');
+  assert.deepEqual(uncommittedKitDocsForTouched(porcelain, ['hookbook.md']), [' M docs/HOOKBOOK.md']);
+});
+test('uncommittedKitDocsForTouched: empty when the only dirty doc is one this session did NOT touch', () => {
+  assert.deepEqual(uncommittedKitDocsForTouched(' M README.md', ['hookbook.md']), []);
+});
+
+// ── THE 2026-07-06 FIX (the decision, replayed the way main() computes it) ──
+// FALSE-POSITIVE that started this fix: this session committed its own kit doc row (docs/HOOKBOOK.md — NOT dirty),
+// but the kit ALSO carried an UNRELATED dirty README.md from another task. The old BLANKET docs check blocked Stop,
+// demanding I commit that unrelated WIP. With the scoped check the docs gate must PASS (no block).
+test('does NOT block when this session\'s kit doc is committed but an UNRELATED README is dirty (the FP)', () => {
+  const sessionEntries = [assistantEditing('C:/x/claude-discipline/docs/HOOKBOOK.md')]; // I edited (then committed) HOOKBOOK
+  const kitPorcelain = ' M README.md';                                                   // another session's dirty WIP
+  assert.equal(docsGatePasses(sessionEntries, kitPorcelain), true, 'unrelated dirty README must not block Stop');
+});
+
+// The real requirement is NOT weakened: if THIS session edited a kit doc and left it UNCOMMITTED, still block.
+test('DOES block when THIS session edited a kit doc and left it uncommitted', () => {
+  const sessionEntries = [assistantEditing('C:/x/claude-discipline/docs/HOOKBOOK.md')]; // I edited HOOKBOOK
+  const kitPorcelain = ' M docs/HOOKBOOK.md';                                            // …and left it dirty
+  assert.equal(docsGatePasses(sessionEntries, kitPorcelain), false, 'my own uncommitted kit doc must still block');
 });
 
 // ── hooksNeedingSync ──
