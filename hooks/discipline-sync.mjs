@@ -268,7 +268,18 @@ async function main() {
   // every Stop — a yak-shave. `uncommittedForChanged` scopes the porcelain to this session's hook work.
   const kitPorcelain = gitPorcelain(kitRoot);
   const liveUncommitted = uncommittedForChanged(gitPorcelain(LIVE_REPO_DIR), changed);
-  const kitUncommitted = uncommittedForChanged(kitPorcelain, kitChanged);
+  // A hook already CONVERGED on kit main (my live copy content-matches `git show main:hooks/<x>`) needs no more
+  // committing — even if the kit's working tree shows it dirty, that dirt is ANOTHER session's divergent edit to
+  // the same file, not my unpublished work. Filter those out so a cross-session collision on a shared hook can't
+  // block my Stop (2026-07-06: another session's uncommitted discipline-sync edit kept firing this gate). Same
+  // working-tree-vs-main blind spot the drift check above already fixed.
+  const convergedOnKitMain = (basename) => {
+    const live = readFileOrNull(LIVE_HOOKS_DIR)(basename);
+    const onMain = readKitPublished(basename);
+    return live !== null && onMain !== null && sameContent(live, onMain);
+  };
+  const kitChangedNeedingCommit = kitChanged.filter((basename) => !convergedOnKitMain(basename));
+  const kitUncommitted = uncommittedForChanged(kitPorcelain, kitChangedNeedingCommit);
 
   // The published surface (kit README / docs) must move too, and be committed so the push carries it. The
   // uncommitted-DOCS check is SCOPED to the kit doc files THIS session actually edited — same discipline as the
