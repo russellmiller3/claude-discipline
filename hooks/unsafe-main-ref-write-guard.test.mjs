@@ -85,3 +85,28 @@ test('ignores non-Bash/PowerShell tools', () => {
   const hookRun = runHook('git update-ref refs/heads/main abc123', 'Read');
   assertAllowed(hookRun);
 });
+
+// ── 2026-07-06 quoted-prose + read-only false-positive locks ──────────────────────────────
+// The unsafe-ref patterns must only match a REAL ref-write command, never a mention of one in
+// quoted text, and never a read-only command that merely has "main" in a filename. (Pre-fix
+// kit hook lacked quote-masking, so an `echo "… git update-ref refs/heads/main …"` was DENIED.)
+// Teeth-preserving case last.
+
+test('does NOT fire on echo text mentioning update-ref refs/heads/main (quoted prose)', () => {
+  assertAllowed(runHook('echo "never run: git update-ref refs/heads/main <sha>"'));
+});
+
+test('does NOT fire on a quoted "update-ref refs/heads/main" argument to another program', () => {
+  assertAllowed(runHook('node brief.mjs --note "do NOT git update-ref refs/heads/main by hand"'));
+});
+
+test('does NOT fire on a read-only `git status -- <file-with-main-in-name>`', () => {
+  assertAllowed(runHook('git status -- hooks/x-main-y.mjs'));
+});
+
+test('TEETH: a REAL two-arg `git update-ref refs/heads/main <sha>` is STILL BLOCKED after the FP fix', () => {
+  assertDenied(
+    runHook('git update-ref refs/heads/main abc123def456'),
+    /UNSAFE MAIN-REF WRITE BLOCKED/,
+  );
+});

@@ -253,3 +253,55 @@ test('fails open (ALLOWS) when `git worktree list` errors — never block on a p
   assert.equal(hookRun.status, 0);
   assert.equal(hookRun.stdout, '');
 });
+
+// ── 2026-07-06 quoted-prose + heredoc-body + `#`-comment false-positive locks ─────────────
+// The trigger scan must only ever see EXECUTABLE structure. A `git commit` that appears only
+// inside quoted text (echo/prose or a quoted arg to another program), inside a heredoc BODY
+// (data written to a file, never run), or after a `#` comment marker (discarded by the shell)
+// is NOT a real command token and must NOT fire the guard. (Regression: a
+// `cat >> log << 'EOF' … git commit … EOF` heredoc-append and a `# … git commit …` comment
+// were both DENIED before the fix. The pre-fix kit hook lacked both quote-masking AND
+// heredoc/comment neutralization; either would false-fire here.) Teeth-preserving case last.
+
+test('does NOT fire on echo text containing "git commit" and "main" on main (quoted prose)', () => {
+  const repoOnMain = makeGitRepo('main');
+  const hookRun = runHook('echo "remember to git commit then merge to main"', repoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('does NOT fire on a quoted "git commit …" argument to another program on main', () => {
+  const repoOnMain = makeGitRepo('main');
+  const hookRun = runHook('node brief.mjs --goal "git commit then merge to main"', repoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('does NOT fire on a `git commit` inside a heredoc BODY on main (data, never executed)', () => {
+  const repoOnMain = makeGitRepo('main');
+  const heredocCommand = "cat >> notes.log << 'EOF'\ngit commit -m \"a note that mentions committing on main\"\nEOF";
+  const hookRun = runHook(heredocCommand, repoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('does NOT fire on a `#`-comment `git commit` on main (comment discarded by the shell)', () => {
+  const repoOnMain = makeGitRepo('main');
+  const hookRun = runHook('echo hi   # later: git commit -m "on main"', repoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '');
+});
+
+test('TEETH: a REAL `git commit` on main is STILL BLOCKED after the FP fix', () => {
+  const repoOnMain = makeGitRepo('main');
+  const hookRun = runHook('git commit -m "real direct-to-main commit"', repoOnMain);
+
+  assert.equal(hookRun.status, 0);
+  const hookOutput = JSON.parse(hookRun.stdout);
+  assert.equal(hookOutput.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(hookOutput.hookSpecificOutput.permissionDecisionReason, /Commit to main blocked/);
+});

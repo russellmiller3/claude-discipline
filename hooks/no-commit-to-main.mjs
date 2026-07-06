@@ -14,11 +14,11 @@
  * Blocks: git commit (any flags) when current branch is main or master
  * Override: COMMIT_MAIN_OVERRIDE=1
  *
- * --- Concurrency check (added 2026-07-02, real incident) ---
+ * --- Concurrency check (added 2026-07-02, skaffen-desktop incident) ---
  * A plain `git commit ... COMMIT_MAIN_OVERRIDE=1` is a compare-nothing write: it never
  * checks whether main moved since it was last read (unlike safe-merge-to-main.sh's
- * three-arg CAS). An orchestrator used this override for what looked like a "safe,
- * doc-only" README/HANDOFF commit while a background agent's safe-merge-to-main.sh
+ * three-arg CAS). The orchestrator used this override for what looked like a "safe,
+ * doc-only" HANDOFF.md/README.md commit while a background agent's safe-merge-to-main.sh
  * landing raced in at nearly the same moment. The override commit's parent was stale by
  * exactly one commit; the result silently became a 991-line regression (deleted a
  * just-shipped feature, its tests, and its screenshots).
@@ -44,9 +44,18 @@ import { execSync } from 'node:child_process';
 // checking the session repo's directory false-blocked a commit on another repo's fix
 // branch just because the SESSION repo sat on main (2026-07-01). Shared by the branch
 // check and the concurrency check below so both judge the same target repo.
+// The cd is NOT always the first segment: `X=1 true && cd <kit> && git commit ...` was
+// false-blocked (2026-07-03) because a ^-anchored cd regex missed the mid-chain cd. Honor
+// the LAST `cd <dir>` in any chain segment (start, `&&`, or `;`) BEFORE the first
+// `git commit` — a cd after the commit can't retarget it.
 function effectiveDirectory(normalizedCommand, sessionDirectory) {
-  const cdPrefixMatch = normalizedCommand.match(/^cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*(?:&&|;)/);
-  if (cdPrefixMatch) return cdPrefixMatch[1] || cdPrefixMatch[2] || cdPrefixMatch[3];
+  const commitIndex = normalizedCommand.search(/\bgit\s+commit\b/);
+  const beforeCommit = commitIndex === -1 ? normalizedCommand : normalizedCommand.slice(0, commitIndex);
+  const cdMatches = [...beforeCommit.matchAll(/(?:^|&&|;)\s*cd\s+(?:"([^"]+)"|'([^']+)'|([^\s"';&|]+))/g)];
+  if (cdMatches.length) {
+    const lastCd = cdMatches[cdMatches.length - 1];
+    return lastCd[1] || lastCd[2] || lastCd[3];
+  }
   const dashCMatch = normalizedCommand.match(/\bgit\s+-C\s+(?:"([^"]+)"|'([^']+)'|(\S+))/);
   if (dashCMatch) return dashCMatch[1] || dashCMatch[2] || dashCMatch[3];
   return sessionDirectory;
@@ -74,6 +83,34 @@ function hasLockedConcurrentWorktree(targetDirectory) {
   return worktreeEntries.slice(1).some((entryText) => /^locked\b/m.test(entryText));
 }
 
+// Strip the two NON-EXECUTABLE region kinds from a raw bash command so keyword scanning only
+// ever sees executable structure. Returns a command string of the SAME shape (newlines kept)
+// with heredoc bodies and `#` comments blanked out. Never used for cd/branch resolution or the
+// deny message — only to decide whether a REAL `git commit` token exists.
+//
+// (a) HEREDOC BODIES — `cmd << TAG … TAG` writes everything between the opener line and the
+//     closing TAG to a file (or stdin); it is DATA, never executed. Handles `<<EOF`, `<< 'EOF'`,
+//     `<<"EOF"`, and the indented `<<-EOF` form (closing tag may be tab-indented). The opener
+//     `<<TAG` token is KEPT (it is real structure); only the body + closing tag line are dropped.
+// (b) `#` COMMENTS — from an unquoted `#` to end of line, the shell discards the rest of the line.
+function neutralizeNonExecutableRegions(rawCommand) {
+  let stripped = String(rawCommand);
+
+  // (a) Heredoc bodies. `<<-?` then optional space, an optional quote, the tag word, matching
+  //     quote; body runs until a line that is just the tag (indented only for the `<<-` form).
+  //     Replace the body + closing-tag line with a single newline; keep the opener line.
+  stripped = stripped.replace(
+    /(<<-?\s*)(['"]?)(\w+)\2([^\n]*)\n[\s\S]*?^[ \t]*\3[ \t]*$/gm,
+    (_whole, opener, _quote, tag, restOfOpenerLine) => `${opener}${tag}${restOfOpenerLine}\n`
+  );
+
+  // (b) `#` comments — strip from an unquoted `#` to end of line. Require the `#` to be at line
+  //     start or preceded by whitespace so a `#` inside a token (URLs, `${x#y}`) is left alone.
+  stripped = stripped.replace(/(^|\s)#[^\n]*/g, '$1');
+
+  return stripped;
+}
+
 function main() {
   let event;
   try {
@@ -87,10 +124,24 @@ function main() {
   const command = (event.tool_input && event.tool_input.command) || '';
   if (typeof command !== 'string') process.exit(0);
 
+  // Neutralize the NON-EXECUTABLE regions of the RAW command (heredoc bodies + `#` comments)
+  // BEFORE collapsing whitespace — both are line-structured, so they must be stripped while the
+  // newlines still exist. A shell command has executable structure AND non-executable data: a
+  // heredoc body is text written to a file (never run), and a `#` comment is discarded by the
+  // shell. Scanning either for `git commit` is scanning prose. (Regression 2026-07-06: a
+  // `cat >> log.txt << 'EOF' … git commit … EOF` heredoc-append and a `# … git commit …` comment
+  // were both DENIED.) `c` below stays the FULL raw command — cd/branch/-C resolution and the deny
+  // message must still see the real structure; only the TRIGGER scan runs on the neutralized copy.
+  const commandForTrigger = neutralizeNonExecutableRegions(command);
+
   const c = command.replace(/\s+/g, ' ').trim();
 
-  // Only fire on git commit
-  if (!/\bgit\s+commit\b/.test(c)) process.exit(0);
+  // Only fire on git commit. Mask quoted spans too so a `git commit` that appears only INSIDE quoted
+  // text — echo/prose (`echo "remember to git commit"`) or a quoted argument to another program
+  // (`node brief.mjs --goal "git commit then merge to main"`) — does NOT trigger the guard. The word
+  // must be a real command token, not prose. (Quote-mask pattern reused from phantom-delete-commit-guard.)
+  const commandWithoutQuotedSpans = commandForTrigger.replace(/"[^"]*"|'[^']*'/g, ' ');
+  if (!/\bgit\s+commit\b/.test(commandWithoutQuotedSpans)) process.exit(0);
 
   const targetDirectory = effectiveDirectory(c, event.cwd || process.cwd());
 
@@ -117,11 +168,11 @@ function main() {
       '`git commit` never checks whether main moved since it was last read (unlike',
       'safe-merge-to-main.sh, which lands via a compare-and-swap). Racing a plain override',
       'commit against an in-flight agent landing is exactly how a 991-line regression',
-      'silently landed (a just-shipped feature, its tests, and its screenshots got deleted',
-      "because the override commit's parent was stale by one commit).",
+      'silently landed on 2026-07-02 (a just-shipped feature, its tests, and its',
+      'screenshots got deleted because the override commit\'s parent was stale by one commit).',
       '',
       'Fix — use the sanctioned landing script instead:',
-      '  scripts/safe-merge-to-main.sh <repo-path> <your-branch> "<test-command>"',
+      '  ~/.claude/scripts/safe-merge-to-main.sh <repo-path> <your-branch> "<test-command>"',
       '',
       'Or wait for the other agent(s) to finish (check `git worktree list` for `locked`',
       'entries), then retry.',

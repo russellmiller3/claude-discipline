@@ -55,6 +55,12 @@ function main() {
   // this hook only inspects the literal command an agent typed, never a spawned subprocess.
   if (/safe-merge-to-main\.sh\b/.test(c)) process.exit(0);
 
+  // Mask quoted spans before matching the unsafe-ref patterns, so a `git update-ref refs/heads/main`
+  // (or `branch -f main`, etc.) that appears only INSIDE quoted text — echo/prose or a quoted argument
+  // to another program — does NOT trigger. The ref write must be a real command, not a mention of one.
+  // (Quote-mask pattern reused from phantom-delete-commit-guard.) `c` stays intact for the message.
+  const commandWithoutQuotedSpans = c.replace(/"[^"]*"|'[^']*'/g, ' ');
+
   const BRANCH = '(?:main|master)';
 
   const patterns = [
@@ -75,14 +81,14 @@ function main() {
     },
   ];
 
-  const hit = patterns.find((p) => p.re.test(c));
+  const hit = patterns.find((p) => p.re.test(commandWithoutQuotedSpans));
   if (!hit) process.exit(0);
 
   // The safe three-arg CAS form of update-ref (`update-ref refs/heads/main <new> <old>`)
   // must not be caught by the two-arg pattern above -- double-check by counting trailing
   // tokens after the ref path before allowing the deny to fire.
   if (hit.why.startsWith('a two-arg')) {
-    const afterRef = c.slice(c.search(new RegExp(`refs/heads/${BRANCH}`, 'i')));
+    const afterRef = commandWithoutQuotedSpans.slice(commandWithoutQuotedSpans.search(new RegExp(`refs/heads/${BRANCH}`, 'i')));
     const tokensAfterRef = afterRef.trim().split(/\s+/).slice(1).filter((t) => t && !/^[;&|]/.test(t));
     if (tokensAfterRef.length >= 2) process.exit(0); // three-arg CAS form -- safe, allow
   }
