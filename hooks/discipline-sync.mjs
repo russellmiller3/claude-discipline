@@ -21,7 +21,7 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -250,7 +250,17 @@ async function main() {
     || existsSync(join(kitHooksDir, basename));
   const kitChanged = changed.filter(kitRelevant);
 
-  const needing = hooksNeedingSync(kitChanged, readFileOrNull(LIVE_HOOKS_DIR), readFileOrNull(kitHooksDir));
+  // Read the kit's PUBLISHED copy from its `main` branch (what safe-merge lands + what gets pushed) — NOT the
+  // working-tree file. The kit's primary checkout can be parked on ANOTHER session's branch, so a working-tree
+  // read wrongly flags a hook that IS published on main as "missing" (2026-07-06: agent-watchdog was byte-identical
+  // on kit main but the checkout sat on fix/learnings-ack-session-scope). Fall back to the tree if git/main fails.
+  const readKitPublished = (basename) => {
+    try {
+      return execFileSync('git', ['-C', kitRoot, 'show', `main:hooks/${basename}`],
+                          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    } catch { return readFileOrNull(kitHooksDir)(basename); }
+  };
+  const needing = hooksNeedingSync(kitChanged, readFileOrNull(LIVE_HOOKS_DIR), readKitPublished);
 
   // Commit enforcement: hook work must be committed in BOTH repos before the turn can end — but ONLY the hooks YOU
   // touched this session (+ settings.json, which hook registration lives in). Now that the scan spans the whole
