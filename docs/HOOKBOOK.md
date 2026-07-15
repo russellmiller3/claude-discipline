@@ -48,6 +48,7 @@ All hooks live in `~/.claude/hooks/`. Registered in `~/.claude/settings.json`.
 
 | Hook | What it does |
 |------|-------------|
+| `smoke-script-bounds-guard.mjs` | Denies writing a `*smoke*.py/.mjs/.sh/.ps1` file unless it contains a literal small bound on the real data/batch collection (a slice like `rows[:2]`, a monkeypatch capping iteration, or a wall-clock self-guard). Does not trust a named counter/flag (`--steps`, `max_epochs=N`) — that abstraction caused the motivating incident (a smoke script's `MAX_EPOCHS = 2` silently meant a full 50,000-row pass, running 20+ minutes before being killed). 13/13 tests incl. 5 end-to-end allow/deny cases. Override: `SMOKE_BOUNDS_GUARD_OVERRIDE=1`. |
 | `worktree-default-for-edits.mjs` | Blocks edits in primary checkout — forces work into a linked git worktree |
 | `no-emoji-landing.mjs` | Blocks emoji in `.html`/`.htm` files — requires Lucide icons instead |
 | `forbidden-patterns.mjs` | Blocks positional record access, string type-discriminators, stringly-typed data |
