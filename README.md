@@ -257,6 +257,12 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-15** — `require-langdocs-read.mjs`'s external-API override is now sticky per file:
+  previously the check only scanned the CURRENT edit's diff for the `api-docs-read:` token, so a
+  file that already had it from an earlier accepted edit still re-blocked on every later edit
+  whose own diff didn't repeat it. Now checks the file's own on-disk content too — the token
+  landing anywhere in the file once is enough for every later edit to that same file. 10 tests
+  (up from 8).
 - **2026-07-03** — `discipline-sync` no longer treats a hook merely *read* by a shell command
   (`grep`/`cat`/`node --test`/a smoke-test piping input into it) as a change — only a real write
   (redirect, `tee`, in-place edit, or a `cp`/`mv` destination) counts, so referencing a hook while
