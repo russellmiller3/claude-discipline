@@ -82,6 +82,32 @@ check('API .test. file → allowed (skipped)',
 check('API code + api-docs-read override → allowed',
   blocked({ targetFile: apiFile, transcriptPath: transcriptFile(work, { fetchedDocs: false }), newString: '// api-docs-read: trivial rename' }) === false);
 
+// Sticky per-file override (fix 2026-07-15): once the token has landed IN the file from an
+// earlier accepted edit, a LATER edit to that SAME file whose own diff does not repeat the
+// token must still be allowed — the hook checks fileText, not just this edit's new_string.
+const alreadyJustifiedFile = join(work, 'alreadyJustified.js');
+writeFileSync(
+  alreadyJustifiedFile,
+  "// api-docs-read: verified against the live API earlier this session\n" +
+  "const url = 'https://api.openai.com/v1/realtime/calls'; new RTCPeerConnection();",
+);
+check('second edit to an already-justified file, token NOT repeated in this diff → allowed',
+  blocked({
+    targetFile: alreadyJustifiedFile,
+    transcriptPath: transcriptFile(work, { fetchedDocs: false }),
+    newString: 'const timeoutMs = 30000; // unrelated follow-up edit',
+  }) === false);
+
+// BLOCK still works: a DIFFERENT new file with API signals, no token anywhere, is unaffected
+// by the sticky check above (scope containment — the fix must not leak across files).
+const stillUnjustifiedFile = join(work, 'stillUnjustified.js');
+writeFileSync(stillUnjustifiedFile, "const url = 'https://api.stripe.com/v1/charges';");
+check('a different new API file with no token anywhere → still blocked',
+  blocked({
+    targetFile: stillUnjustifiedFile,
+    transcriptPath: transcriptFile(work, { fetchedDocs: false }),
+  }) === true);
+
 // ALLOW: a static HTML page whose only "API-ish" string is a Google Fonts stylesheet link.
 // (Regression: bare /api/ matched the "api" inside "googleapis" and blocked marcus.html, 2026-07-01.)
 const staticHtmlFile = join(work, 'explainer.html');

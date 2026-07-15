@@ -57,12 +57,20 @@ if (!filePath) process.exit(0);
     payload.tool_input?.old_string,
     JSON.stringify(payload.tool_input?.edits || ''),
   ].filter(Boolean).join('\n');
-  if (/api-docs-read\s*:/i.test(editText)) return;          // per-edit override
   if (process.env.API_DOCS_OVERRIDE === '1') return;         // env override
 
   let fileText = '';
   try { fileText = fs.readFileSync(filePath, 'utf8'); } catch { /* new file — use edit text only */ }
   const haystack = `${fileText}\n${editText}`;
+  // Sticky per-file override: once a file has justified itself (the token
+  // landed in it from ANY accepted edit), later edits to that SAME file
+  // don't need to repeat the token in every diff — it's already sitting in
+  // the file on disk. A brand-new file/new API domain still needs a fresh
+  // token in its own edit text, since fileText is empty until the first
+  // Write lands. (Fix 2026-07-15: previously only checked editText, so a
+  // file that already had the token was still re-blocked on every
+  // subsequent edit whose diff didn't itself repeat it.)
+  if (/api-docs-read\s*:/i.test(haystack)) return;
 
   const API_SIGNAL_RE = new RegExp([
     'new\\s+RTCPeerConnection', 'RTCPeerConnection\\s*\\(',
