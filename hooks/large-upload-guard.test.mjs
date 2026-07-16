@@ -60,6 +60,57 @@ test('a dir whose recursive size exceeds the cap is flagged', () => {
   }
 });
 
+test('a DOWNLOAD (remote source -> local dest) passes even when the local dest is huge', () => {
+  const dir = scratch();
+  try {
+    // The local operand is the DESTINATION of a download — nothing is sent up.
+    bigFile(join(dir, 'model.safetensors'), CAP_BYTES + 4 * 1024 * 1024);
+    assert.equal(
+      oversizeUpload(`scp -r -P 22151 -i key -o BatchMode=yes root@69.30.85.128:/workspace/exp153 ${dir}`),
+      null,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a non-transfer command in a big cwd is NOT flagged (du/tail/git)', () => {
+  const dir = scratch();
+  try {
+    bigFile(join(dir, 'weights.bin'), CAP_BYTES + 2 * 1024 * 1024);
+    assert.equal(oversizeUpload(`du -sh ${dir}`), null);
+    assert.equal(oversizeUpload(`tail -3 ${join(dir, 'weights.bin')}`), null);
+    assert.equal(oversizeUpload(`cd ${dir} && git status`), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('merely MENTIONING scp/rsync in a quoted string is not an invocation', () => {
+  const dir = scratch();
+  try {
+    bigFile(join(dir, 'big.bin'), CAP_BYTES + 1024 * 1024);
+    // The tool name appears inside an echo argument, not as a command word.
+    assert.equal(oversizeUpload(`du -sh ${dir}; echo "=== scp verbose tail ==="`), null);
+    assert.equal(oversizeUpload(`echo "run rsync later"`), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a real UPLOAD after a && chain still blocks', () => {
+  const dir = scratch();
+  try {
+    const big = join(dir, 'bundle.staging');
+    bigFile(big, CAP_BYTES + 1024 * 1024);
+    const hit = oversizeUpload(`cd /tmp && scp -P 22 ${big} root@host:/workspace/x`);
+    assert.ok(hit, 'a genuine over-cap upload must still be caught');
+    assert.equal(hit.path, big);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('pathSizeBytes early-outs once over the cap (does not walk forever)', () => {
   const dir = scratch();
   try {

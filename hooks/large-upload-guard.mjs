@@ -63,20 +63,55 @@ function unquote(token) {
   return token;
 }
 
+/** Split a command line into shell segments (so `echo "scp"` never looks like an scp call). */
+function commandSegments(command) {
+  return command.split(/\|\||&&|[;&|\n]/);
+}
+
+/** Tokenize one segment into argv, dropping leading `VAR=value` env assignments. */
+function segmentArgv(segment) {
+  const argv = [];
+  let sawCommandWord = false;
+  for (const rawToken of segment.trim().split(/\s+/)) {
+    if (!rawToken) continue;
+    const token = unquote(rawToken);
+    if (!sawCommandWord && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue; // env prefix
+    sawCommandWord = true;
+    argv.push(token);
+  }
+  return argv;
+}
+
+/** A scp/rsync remote endpoint `[user@]host:path` — NOT a Windows drive path (`C:/…`). */
+export function isRemoteTarget(token) {
+  if (/^[A-Za-z]:[\\/]/.test(token)) return false;            // C:\ or C:/ — local drive
+  return /^(?:[^@\s]+@)?[^:\s/]+:/.test(token);               // host:… or user@host:…
+}
+
 /**
- * The first local path in the command whose size exceeds CAP_BYTES, or null.
- * Only tokens that exist on the LOCAL disk are checked — remote host:path
- * targets and option flags don't stat locally and are skipped naturally.
+ * The first LOCAL SOURCE path of a real scp/rsync UPLOAD whose size exceeds
+ * CAP_BYTES, or null. Direction matters: only an upload (local source -> REMOTE
+ * dest) is capped. A download (remote source -> local dest) sends nothing up and
+ * passes; a non-transfer command (du/tail/git) or a bare mention of "scp" in a
+ * string is not an invocation and passes.
  */
 export function oversizeUpload(command) {
-  for (const rawToken of command.split(/\s+/)) {
-    const token = unquote(rawToken);
-    if (!token || token.startsWith('-')) continue;
-    let exists = true;
-    try { statSync(token); } catch { exists = false; }
-    if (!exists) continue;
-    const bytes = pathSizeBytes(token);
-    if (bytes > CAP_BYTES) return { path: token, bytes };
+  for (const segment of commandSegments(command)) {
+    const argv = segmentArgv(segment);
+    if (!argv.length) continue;
+    if (argv[0] !== 'scp' && argv[0] !== 'rsync') continue;   // must be the command word
+    const operands = argv.slice(1).filter((token) => !token.startsWith('-'));
+    if (operands.length < 2) continue;                        // need at least source + dest
+    const destination = operands[operands.length - 1];
+    if (!isRemoteTarget(destination)) continue;               // local dest => download/local copy, not an upload
+    for (const source of operands.slice(0, -1)) {
+      if (isRemoteTarget(source)) continue;                   // remote source is not local bytes
+      let exists = true;
+      try { statSync(source); } catch { exists = false; }
+      if (!exists) continue;                                  // flag values / missing paths
+      const bytes = pathSizeBytes(source);
+      if (bytes > CAP_BYTES) return { path: source, bytes };
+    }
   }
   return null;
 }
