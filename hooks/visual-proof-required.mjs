@@ -27,11 +27,14 @@
  * headlessly. Fail open on any error.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join as joinPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const UI_EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
-const SKIP_RE = /(?:visual-proof-skip|verify-change-skip)\s*:/i;
+// Waiver tokens: the original two + `screenshot-skip-user-ok:` absorbed from the retired ux-verify-artifact.mjs
+// (2026-07-15 consolidation) — an explicit USER waiver ("Russell said no need for screenshots"), same shape.
+const SKIP_RE = /(?:visual-proof-skip|verify-change-skip|screenshot-skip-user-ok)\s*:/i;
 
 // A visual surface whose look a screenshot (not a unit test) must confirm — the UNION of the old triggers.
 const UI_FILE_RE = /(\.svelte|\.css|\.scss|\.html|\.vue|\.tsx|\.jsx)$|playwright\.config\.js$|(?:tests[\\/]+e2e[\\/])|(?:components[\\/])|(?:routes[\\/])/i;
@@ -106,18 +109,101 @@ import {
   readTranscript, roleOf, contentBlocks, toolResultText, isHumanPrompt, currentTurnEntries, lastAssistantText,
 } from './lib/transcript.mjs';
 
+// ── disk-screenshot proof (absorbed from ux-verify-artifact.mjs, 2026-07-15 consolidation) ──────────────────
+// A .png/.jpg saved to a screenshots/ dir AFTER the turn's earliest UI edit is real visual proof even when the
+// agent never Read it back (a Playwright / live-harness page.screenshot writes the file directly). Complements
+// the transcript-image checks in realScreenshotThisTurn.
+const SCREENSHOT_FILE_RE = /\.(png|jpe?g|webp)$/i;
+const SCREENSHOT_DIR_NAMES = new Set(['screenshots', 'screenshot', 'visual-snapshots', 'snapshots']);
+const ROOT_MARKERS = ['.git', 'CLAUDE.md', 'AGENTS.md', 'package.json'];
+
+function findProjectRoot(startDirectory) {
+  let probeDirectory = startDirectory;
+  for (let depthSteps = 0; depthSteps < 12; depthSteps++) {
+    for (const markerName of ROOT_MARKERS) {
+      if (existsSync(joinPath(probeDirectory, markerName))) return probeDirectory;
+    }
+    const parentDirectory = dirname(probeDirectory);
+    if (parentDirectory === probeDirectory) return null;
+    probeDirectory = parentDirectory;
+  }
+  return null;
+}
+
+function collectScreenshotCandidatePaths(seedDirectories) {
+  const candidates = new Set();
+  const visitedDirs = new Set();
+  const isScreenshotDirName = (directoryName) => {
+    const lowered = directoryName.toLowerCase();
+    return SCREENSHOT_DIR_NAMES.has(lowered) || lowered.includes('screenshot');
+  };
+  function exploreDirectory(directoryPath, remainingDepth) {
+    if (visitedDirs.has(directoryPath)) return;
+    visitedDirs.add(directoryPath);
+    let directoryEntries;
+    try { directoryEntries = readdirSync(directoryPath, { withFileTypes: true }); } catch { return; }
+    for (const entry of directoryEntries) {
+      const childPath = joinPath(directoryPath, entry.name);
+      if (!entry.isDirectory()) continue;
+      if (isScreenshotDirName(entry.name)) candidates.add(childPath);
+      else if (remainingDepth > 0 && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+        exploreDirectory(childPath, remainingDepth - 1);
+      }
+    }
+  }
+  for (const seedDir of seedDirectories) {
+    if (!seedDir || !existsSync(seedDir)) continue;
+    exploreDirectory(seedDir, 2);
+  }
+  return [...candidates];
+}
+
+function newestScreenshotMtimeMs(screenshotDirectoryPaths) {
+  let newestMtimeMs = 0;
+  for (const directoryPath of screenshotDirectoryPaths) {
+    let directoryEntries;
+    try { directoryEntries = readdirSync(directoryPath, { withFileTypes: true }); } catch { continue; }
+    for (const entry of directoryEntries) {
+      if (!entry.isFile() || !SCREENSHOT_FILE_RE.test(entry.name)) continue;
+      try {
+        const fileStat = statSync(joinPath(directoryPath, entry.name));
+        if (fileStat.mtimeMs > newestMtimeMs) newestMtimeMs = fileStat.mtimeMs;
+      } catch { /* skip */ }
+    }
+  }
+  return newestMtimeMs;
+}
+
+// A screenshot file exists with mtime after `thresholdMs`. Non-finite threshold (no UI edit / unknown time) =>
+// false, so this proof path never fires for claim-only triggers. `seedDirectories` injectable for tests.
+export function diskScreenshotSavedAfter(thresholdMs, seedDirectories) {
+  if (!Number.isFinite(thresholdMs)) return false;
+  let roots = seedDirectories;
+  if (!roots) {
+    const cwdPath = process.cwd();
+    const projectRoot = findProjectRoot(cwdPath);
+    roots = [cwdPath, projectRoot, projectRoot ? dirname(projectRoot) : null].filter(Boolean);
+  }
+  return newestScreenshotMtimeMs(collectScreenshotCandidatePaths(roots)) > thresholdMs;
+}
+
 function onStop(hookEvent) {
   const turnEntries = currentTurnEntries(readTranscript(hookEvent.transcript_path));
   if (turnEntries.length === 0) return;
 
   let overridden = false;
   const editedUiFiles = new Set();
+  let earliestEditMs = Infinity;
   for (const entry of turnEntries) {
     for (const block of contentBlocks(entry)) {
       if (block.type === 'text' && SKIP_RE.test(block.text || '')) overridden = true;
       if (block.type !== 'tool_use' || !UI_EDIT_TOOLS.has(block.name || '')) continue;
       const filePath = (block.input || {}).file_path || (block.input || {}).path || '';
-      if (isUiFile(filePath)) editedUiFiles.add(filePath);
+      if (!isUiFile(filePath)) continue;
+      editedUiFiles.add(filePath);
+      const editTimestamp = entry?.timestamp || entry?.message?.timestamp;
+      const editMs = editTimestamp ? Date.parse(editTimestamp) : NaN;
+      if (Number.isFinite(editMs) && editMs < earliestEditMs) earliestEditMs = editMs;
     }
   }
 
@@ -127,10 +213,16 @@ function onStop(hookEvent) {
     && DOM_EVIDENCE_PATTERNS.some((re) => re.test(assistantText))
     && !DISCLAIMER_PATTERNS.some((re) => re.test(assistantText));
 
+  // Real proof = a captured image in the transcript, OR a screenshot FILE saved to disk after the earliest UI
+  // edit this turn (absorbed from ux-verify-artifact). If a UI edit exists but carried no readable timestamp,
+  // fall back to "now" so a stale pre-edit screenshot can't count as proof.
+  const diskThresholdMs = editedUiFiles.size ? (Number.isFinite(earliestEditMs) ? earliestEditMs : Date.now()) : Infinity;
+  const realScreenshot = realScreenshotThisTurn(turnEntries) || diskScreenshotSavedAfter(diskThresholdMs);
+
   if (!shouldBlock({
     editedUi: editedUiFiles.size > 0,
     domAsProof, heresy,
-    realScreenshot: realScreenshotThisTurn(turnEntries),
+    realScreenshot,
     overridden,
   })) return;
 

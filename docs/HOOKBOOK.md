@@ -1,7 +1,15 @@
 ﻿# HOOKBOOK — Russell's Claude Code Hook Reference
 
 All hooks live in `~/.claude/hooks/`. Registered in `~/.claude/settings.json`.
-112 hooks across 5 event types. Shared libs: `lib/buildFingerprint.mjs` (content-based dist provenance); `lib/transcript.mjs` (the canonical JSONL-transcript helpers — `readTranscript` / `roleOf` / `contentBlocks` / `toolUsesOf` / `currentTurnEntries` / `lastAssistantText`(`Of`) / `lastUserText`(`Of`) — consolidated 2026-06-28 from ~20 hand-rolled copies; `hook-dry-review` blocks re-implementing them).
+Shared libs: `lib/buildFingerprint.mjs` (content-based dist provenance); `lib/transcript.mjs` (the canonical JSONL-transcript helpers — `readTranscript` / `roleOf` / `contentBlocks` / `toolUsesOf` / `currentTurnEntries` / `lastAssistantText`(`Of`) / `lastUserText`(`Of`) — consolidated 2026-06-28 from ~20 hand-rolled copies; `hook-dry-review` blocks re-implementing them); `lib/gitHygiene{Shared,Worktrees,Branches}.mjs`, `lib/agentSpawnGates.mjs`, `lib/ledgerRecords.mjs` (the consolidated-hook cores, 2026-07-15).
+
+> **2026-07-15 — hook consolidation (one hook per idea).** Twenty overlapping hooks were merged into five, each event-routing over a shared lib:
+> - **`git-hygiene.mjs`** ← `clean-worktrees` + `clean-merged-worktrees` + `delete-merged-branches` (reap merged + STALE-unmerged worktrees/branches, archive-before-delete, delete merged local+remote, >3-durable-branch warn).
+> - **`agent-spawn-guard.mjs`** ← `agent-sidebar-only` + `background-on-agent-spawn` + `worktree-on-agent-spawn` + `cross-repo-worktree-on-agent-spawn` + `agent-commit-cadence` + `agent-handoff-required` + `widget-ux-not-cli` (PreToolUse[Agent] validation gates, first-deny-wins).
+> - **`dist-freshness.mjs`** ← `dist-staleness-check` + `stamp-build-fingerprint` + `rebuild-after-commit` (dist stays in sync with source, by content hash).
+> - **`visual-proof-required.mjs`** absorbed `ux-verify-artifact` (screenshot proof, incl. a disk-file path).
+> - **`ledger-records-guard.mjs`** ← `ledger-results-toc-on-touch` + `ledger-experiment-doc-sync` + `experiment-record-drift-guard` (ledger experiment-record integrity).
+> The retired granular hooks + their `docs/HOOKBOOK.md` rows below are being cleaned up; their behavior lives in the five hooks above.
 
 ---
 

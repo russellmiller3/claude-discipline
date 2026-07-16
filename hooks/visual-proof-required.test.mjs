@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isUiFile, shouldBlock, realScreenshotThisTurn } from './visual-proof-required.mjs';
+import { isUiFile, shouldBlock, realScreenshotThisTurn, diskScreenshotSavedAfter } from './visual-proof-required.mjs';
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as joinTestPath } from 'node:path';
 
 // ── isUiFile: the union pattern must cover .html (GAP 1) plus the old surfaces ──
 test('isUiFile covers .html (the gap that missed widget.html)', () => {
@@ -59,4 +62,31 @@ test('a harness result printing a screenshot .png path counts', () => {
 });
 test('an empty turn has no screenshot', () => {
   assert.equal(realScreenshotThisTurn([]), false);
+});
+
+// ── diskScreenshotSavedAfter: the file-mtime proof path (absorbed from ux-verify-artifact, 2026-07-15) ──
+test('a screenshot FILE saved after the edit counts as real proof (disk path)', () => {
+  const sandbox = mkdtempSync(joinTestPath(tmpdir(), 'vpr-disk-'));
+  const shotsDir = joinTestPath(sandbox, 'screenshots');
+  mkdirSync(shotsDir, { recursive: true });
+  const shotPath = joinTestPath(shotsDir, 'widget.png');
+  writeFileSync(shotPath, 'x', 'utf8');
+  const editMs = Date.now() - 60_000;                 // edit a minute ago
+  utimesSync(shotPath, new Date(), new Date());        // screenshot saved now (after the edit)
+  assert.equal(diskScreenshotSavedAfter(editMs, [sandbox]), true);
+  rmSync(sandbox, { recursive: true, force: true });
+});
+test('a screenshot saved BEFORE the edit does NOT count (stale)', () => {
+  const sandbox = mkdtempSync(joinTestPath(tmpdir(), 'vpr-disk-'));
+  const shotsDir = joinTestPath(sandbox, 'screenshots');
+  mkdirSync(shotsDir, { recursive: true });
+  const shotPath = joinTestPath(shotsDir, 'old.png');
+  writeFileSync(shotPath, 'x', 'utf8');
+  const staleTime = new Date(Date.now() - 120_000);    // screenshot is 2 min old
+  utimesSync(shotPath, staleTime, staleTime);
+  assert.equal(diskScreenshotSavedAfter(Date.now() - 60_000, [sandbox]), false); // edit 1 min ago, shot older
+  rmSync(sandbox, { recursive: true, force: true });
+});
+test('a non-finite threshold (no UI edit) never fires the disk path', () => {
+  assert.equal(diskScreenshotSavedAfter(Infinity, []), false);
 });
