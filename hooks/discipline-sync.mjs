@@ -60,6 +60,20 @@ export function hooksNeedingSync(changedBasenames, readLive, readKit) {
   return needing;
 }
 
+// A basename flagged by hooksNeedingSync() against ONE ref (e.g. the kit's `main` branch) may already be synced
+// on a DIFFERENT ref (e.g. the kit's current HEAD, when a same-session commit landed on a feature branch and
+// hasn't been merged to main yet) — that's not real drift, just a comparison against the wrong snapshot.
+// (2026-07-12: a hook fixed + committed to a feature branch this session kept showing as "drift" forever because
+// the only read was `main`, which never got the update.) Drop anything whose live content matches the second
+// ref's content. Pure + exported so it's unit-tested with stub readers, same pattern as hooksNeedingSync itself.
+export function filterStillNeedingSync(needing, readLive, readAltRef) {
+  return needing.filter(({ basename }) => {
+    const liveText = readLive(basename);
+    const altText = readAltRef(basename);
+    return !(liveText !== null && altText !== null && sameContent(liveText, altText));
+  });
+}
+
 // The non-empty lines of a `git status --porcelain` blob. Shared by the porcelain-scoping helpers below so the
 // same split isn't inlined twice.
 const porcelainLines = (porcelainText) => String(porcelainText || '').split('\n').filter(Boolean);
@@ -73,10 +87,34 @@ export function uncommittedForChanged(porcelainText, changedBasenames) {
     .filter((line) => /settings\.json/.test(line) || basenames.some((basename) => line.includes(basename)));
 }
 
-import { readTranscript, roleOf, toolUsesOf } from './lib/transcript.mjs';
+import { readTranscript, roleOf, toolUsesOf, contentBlocks, toolResultText } from './lib/transcript.mjs';
 
 // The file path a Write/Edit/MultiEdit tool use targeted.
 const editedPathOf = (toolUse) => toolUse.input?.file_path || toolUse.input?.path || '';
+
+// A tool call whose result came back DENIED/BLOCKED never touched the filesystem — a PreToolUse guard rejected it, so
+// the hook it "targeted" was NOT created/changed this session. Counting it made discipline-sync demand a kit sync for
+// a hook that never existed on disk (2026-07-16 live incident: two Writes to `experiment-monitor-required.mjs` were
+// both denied by hook guards — the file never landed — yet the phantom basename turned the whole publish loop on,
+// nagging to sync a hook that was never written). The clean, unambiguous signal is the matching tool_result: Claude
+// Code marks EVERY PreToolUse-blocked call (and every failed Write/Edit) with `is_error: true`, while a real edit's
+// result is a success. Key on `is_error` and NOT on the result TEXT: a successful Edit echoes a snippet of the edited
+// hook, and many guard hooks literally contain the word "BLOCKED" in their own strings — a text scan would then
+// false-skip a legitimate edit. Index results by tool_use_id so each tool_use is matched to its own outcome.
+function resultsByToolUseId(entries) {
+  const byId = new Map();
+  for (const entry of entries) {
+    for (const block of contentBlocks(entry)) {
+      if (block?.type === 'tool_result' && block.tool_use_id) {
+        byId.set(block.tool_use_id, { isError: block.is_error === true, text: toolResultText(block) });
+      }
+    }
+  }
+  return byId;
+}
+// A recorded result that is an error/denial. No recorded result (undefined) → NOT blocked: the Stop hook runs after
+// results exist, but a bare turn with no result is counted optimistically rather than silently dropped.
+const isBlockedResult = (result) => !!result && result.isError === true;
 
 // Basenames of live hook files (incl. *.test.mjs) written/edited this turn.
 const LIVE_HOOK_PATH_RE = /[/\\]\.claude[/\\]hooks[/\\]([a-z0-9._-]+\.mjs)/i;
@@ -115,9 +153,11 @@ function isWriteOccurrence(command, matchStart, matchedText) {
 
 export function changedHookBasenames(turnEntries) {
   const changed = new Set();
+  const resultById = resultsByToolUseId(turnEntries);
   for (const entry of turnEntries) {
     if (roleOf(entry) !== 'assistant') continue;
     for (const toolUse of toolUsesOf(entry)) {
+      if (isBlockedResult(resultById.get(toolUse.id))) continue; // denied/blocked → the file was never written
       const name = toolUse.name || '';
       if (['Write', 'Edit', 'MultiEdit'].includes(name)) {
         const match = LIVE_HOOK_PATH_RE.exec(editedPathOf(toolUse));
@@ -250,17 +290,28 @@ async function main() {
     || existsSync(join(kitHooksDir, basename));
   const kitChanged = changed.filter(kitRelevant);
 
-  // Read the kit's PUBLISHED copy from its `main` branch (what safe-merge lands + what gets pushed) — NOT the
-  // working-tree file. The kit's primary checkout can be parked on ANOTHER session's branch, so a working-tree
-  // read wrongly flags a hook that IS published on main as "missing" (2026-07-06: agent-watchdog was byte-identical
-  // on kit main but the checkout sat on fix/learnings-ack-session-scope). Fall back to the tree if git/main fails.
-  const readKitPublished = (basename) => {
+  // Read the kit's copy of a hook at a given git ref, falling back to the raw working-tree file only if the ref
+  // read itself fails (non-repo, untracked, etc). Parameterized so the same logic serves BOTH refs we care about.
+  const readKitAt = (ref) => (basename) => {
     try {
-      return execFileSync('git', ['-C', kitRoot, 'show', `main:hooks/${basename}`],
+      return execFileSync('git', ['-C', kitRoot, 'show', `${ref}:hooks/${basename}`],
                           { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-    } catch { return readFileOrNull(kitHooksDir)(basename); }
+    } catch { return null; }
   };
-  const needing = hooksNeedingSync(kitChanged, readFileOrNull(LIVE_HOOKS_DIR), readKitPublished);
+  // `main`: what safe-merge lands + what gets pushed — NOT the working-tree file. The kit's primary checkout can
+  // be parked on ANOTHER session's branch, so a working-tree read wrongly flags a hook that IS published on main
+  // as "missing" (2026-07-06: agent-watchdog was byte-identical on kit main but the checkout sat on
+  // fix/learnings-ack-session-scope). Fall back to the tree if git/main fails.
+  const readKitPublished = (basename) => readKitAt('main')(basename) ?? readFileOrNull(kitHooksDir)(basename);
+  // `HEAD`: the INVERSE case (2026-07-12) — a hook fixed and committed THIS session can land on a feature branch,
+  // not main. Checking `main` alone then sees stale content forever and reports drift on a hook that's actually
+  // already correct and committed. HEAD reflects whatever's really checked out right now.
+  const readKitHead = (basename) => readKitAt('HEAD')(basename) ?? readFileOrNull(kitHooksDir)(basename);
+
+  const needingFromMain = hooksNeedingSync(kitChanged, readFileOrNull(LIVE_HOOKS_DIR), readKitPublished);
+  // Drop anything that only looks like drift against `main` but is actually already synced on the kit's current
+  // HEAD (this session's own not-yet-merged commit).
+  const needing = filterStillNeedingSync(needingFromMain, readFileOrNull(LIVE_HOOKS_DIR), readKitHead);
 
   // Commit enforcement: hook work must be committed in BOTH repos before the turn can end — but ONLY the hooks YOU
   // touched this session (+ settings.json, which hook registration lives in). Now that the scan spans the whole
@@ -268,15 +319,18 @@ async function main() {
   // every Stop — a yak-shave. `uncommittedForChanged` scopes the porcelain to this session's hook work.
   const kitPorcelain = gitPorcelain(kitRoot);
   const liveUncommitted = uncommittedForChanged(gitPorcelain(LIVE_REPO_DIR), changed);
-  // A hook already CONVERGED on kit main (my live copy content-matches `git show main:hooks/<x>`) needs no more
+  // A hook already CONVERGED on kit main OR kit HEAD (my live copy content-matches either) needs no more
   // committing — even if the kit's working tree shows it dirty, that dirt is ANOTHER session's divergent edit to
   // the same file, not my unpublished work. Filter those out so a cross-session collision on a shared hook can't
-  // block my Stop (2026-07-06: another session's uncommitted discipline-sync edit kept firing this gate). Same
-  // working-tree-vs-main blind spot the drift check above already fixed.
+  // block my Stop (2026-07-06: another session's uncommitted discipline-sync edit kept firing this gate). Checking
+  // both refs also covers a same-session commit that landed on a feature branch, not main yet (2026-07-12).
   const convergedOnKitMain = (basename) => {
     const live = readFileOrNull(LIVE_HOOKS_DIR)(basename);
     const onMain = readKitPublished(basename);
-    return live !== null && onMain !== null && sameContent(live, onMain);
+    const onHead = readKitHead(basename);
+    return live !== null && (
+      (onMain !== null && sameContent(live, onMain)) || (onHead !== null && sameContent(live, onHead))
+    );
   };
   const kitChangedNeedingCommit = kitChanged.filter((basename) => !convergedOnKitMain(basename));
   const kitUncommitted = uncommittedForChanged(kitPorcelain, kitChangedNeedingCommit);

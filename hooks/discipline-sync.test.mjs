@@ -1,8 +1,8 @@
 // Tests for discipline-sync's pure core. Run: node --test discipline-sync.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hooksNeedingSync, changedHookBasenames, uncommittedForChanged, kitDocsTouchedThisSession,
-  kitDocsFilesTouchedThisSession, uncommittedKitDocsForTouched } from './discipline-sync.mjs';
+import { hooksNeedingSync, filterStillNeedingSync, changedHookBasenames, uncommittedForChanged,
+  kitDocsTouchedThisSession, kitDocsFilesTouchedThisSession, uncommittedKitDocsForTouched } from './discipline-sync.mjs';
 
 const assistantEditing = (file_path) => ({ message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: { file_path } }] } });
 
@@ -100,6 +100,42 @@ test('does NOT flag when the live file is gone (deleted, not this guard\'s job)'
   assert.deepEqual(hooksNeedingSync(['a.mjs'], () => null, () => 'KIT'), []);
 });
 
+// ── filterStillNeedingSync (THE 2026-07-12 FIX) ──
+// Real incident: `ross-perot-guard.mjs` + its test were fixed and committed to a FEATURE branch this session, but
+// discipline-sync.mjs only ever checked the kit's `main` branch — which never got the update — so it reported
+// "drift" forever even though the live file matched the kit's actual current HEAD exactly. main() now runs
+// hooksNeedingSync() against `main`, then drops anything from that list whose live content matches the kit's HEAD.
+test('drops a hook from "needing" when it only looks like drift against main but matches the kit\'s current HEAD (fixed on a feature branch, not merged to main yet)', () => {
+  const needingFromMain = [{ basename: 'ross-perot-guard.mjs', reason: 'drift' }, { basename: 'ross-perot-guard.test.mjs', reason: 'drift' }];
+  const live = { 'ross-perot-guard.mjs': 'FIXED-V2', 'ross-perot-guard.test.mjs': 'FIXED-V2-TEST' };
+  const head = { 'ross-perot-guard.mjs': 'FIXED-V2', 'ross-perot-guard.test.mjs': 'FIXED-V2-TEST' }; // committed here, not on main
+  const got = filterStillNeedingSync(needingFromMain, (n) => live[n] ?? null, (n) => head[n] ?? null);
+  assert.deepEqual(got, [], 'both hooks are actually synced (on HEAD) — must NOT still block Stop');
+});
+
+// The requirement is NOT weakened: real, uncommitted-anywhere drift must still block.
+test('keeps a hook in "needing" when it does not match main OR head (genuine unpublished drift)', () => {
+  const needingFromMain = [{ basename: 'a.mjs', reason: 'drift' }];
+  const live = { 'a.mjs': 'LIVE-NEW' };
+  const head = { 'a.mjs': 'STILL-OLD' };            // not committed here either
+  const got = filterStillNeedingSync(needingFromMain, (n) => live[n] ?? null, (n) => head[n] ?? null);
+  assert.deepEqual(got, [{ basename: 'a.mjs', reason: 'drift' }], 'genuine drift must still block Stop');
+});
+
+// THE 2026-07-06 CASE MUST STILL WORK: a hook published on main, where the alt-ref (HEAD) read is unavailable
+// (e.g. the checkout is parked on an unrelated branch that doesn't have this file, or the ref lookup fails) —
+// hooksNeedingSync() already resolved it as in-sync via the `main` reader, so it's not in `needingFromMain` at
+// all; filterStillNeedingSync must be a no-op pass-through here, proving the main-branch path still works
+// independently of HEAD.
+test('a hook already resolved as in-sync via main (2026-07-06 case) is never touched by the HEAD filter', () => {
+  const needingFromMain = hooksNeedingSync(['agent-watchdog.mjs'],
+    (n) => ({ 'agent-watchdog.mjs': 'PUBLISHED' }[n] ?? null),
+    (n) => ({ 'agent-watchdog.mjs': 'PUBLISHED' }[n] ?? null)); // main already matches → hooksNeedingSync returns []
+  assert.deepEqual(needingFromMain, []);
+  const got = filterStillNeedingSync(needingFromMain, () => 'PUBLISHED', () => null); // HEAD read fails/unrelated
+  assert.deepEqual(got, [], 'nothing to filter — main alone already satisfied sync');
+});
+
 // ── uncommittedForChanged (whole-session scoping must NOT yak-shave unrelated WIP hooks) ──
 test('uncommittedForChanged: flags only this session\'s touched hooks + settings.json, ignores other WIP hooks', () => {
   const porcelain = [
@@ -187,6 +223,54 @@ test('ignores writes that are not in the hooks dir (no false positives)', () => 
     { name: 'Edit', input: { file_path: 'C:/Users/rmill/.claude/hooks/HOOKBOOK.md' } },
   ]));
   assert.deepEqual(got, []);
+});
+
+// THE 2026-07-16 FIX: a Write to a hook file that was DENIED/BLOCKED by a PreToolUse guard NEVER created the file,
+// so it must NOT count as a hook edit. Real incident: two blocked Writes to experiment-monitor-required.mjs (both
+// denied by hook guards, the file never landed on disk) made discipline-sync demand a kit sync for a hook that was
+// never written — the whole publish loop turned on for a phantom. The matching tool_result carries is_error:true
+// (Claude Code marks every PreToolUse-blocked call that way); that tool_use is skipped. A successful write's result
+// is NOT an error, so it still counts.
+const assistantWrite = (id, file_path) => ({ role: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Write', input: { file_path } }] } });
+const resultBlock = (tool_use_id, content, is_error) => ({ role: 'user', message: { content: [{ type: 'tool_result', tool_use_id, content, is_error }] } });
+
+test('does NOT count a BLOCKED/denied Write to a hook file (file never created) — the 2026-07-16 FP', () => {
+  const entries = [
+    assistantWrite('tu_1', 'C:/Users/rmill/.claude/hooks/experiment-monitor-required.mjs'),
+    resultBlock('tu_1', 'NEW HOOK — SWEEP THE EXISTING HOOKS FIRST: "experiment-monitor-required.mjs".', true),
+  ];
+  assert.deepEqual(changedHookBasenames(entries), [], 'a denied write never wrote the file → zero changed basenames');
+});
+
+test('does NOT count a Write whose PreToolUse:Write hook error result is marked is_error', () => {
+  const entries = [
+    assistantWrite('tu_2', 'C:/Users/rmill/.claude/hooks/experiment-monitor-required.mjs'),
+    resultBlock('tu_2', 'HOOK DRY REVIEW — "experiment-monitor-required.mjs" re-implements helper(s)...', true),
+  ];
+  assert.deepEqual(changedHookBasenames(entries), []);
+});
+
+test('STILL counts a SUCCESSFUL Write to a hook file (result is not an error)', () => {
+  const entries = [
+    assistantWrite('tu_3', 'C:/Users/rmill/.claude/hooks/foo-guard.mjs'),
+    resultBlock('tu_3', 'File created successfully at: C:/Users/rmill/.claude/hooks/foo-guard.mjs', false),
+  ];
+  assert.deepEqual(changedHookBasenames(entries), ['foo-guard.mjs']);
+});
+
+test('STILL counts a Write with no tool_result recorded yet (optimistic default — a bare assistant turn still counts)', () => {
+  const entries = [assistantWrite('tu_4', 'C:/Users/rmill/.claude/hooks/foo-guard.mjs')];
+  assert.deepEqual(changedHookBasenames(entries), ['foo-guard.mjs']);
+});
+
+// A successful Edit result may echo a diff snippet of the edited hook — and many guard hooks literally contain the
+// word "BLOCKED" in their own strings. Keying on is_error (NOT on text) means such a legit edit is NOT false-skipped.
+test('STILL counts a successful Edit of a hook whose own content contains the word BLOCKED', () => {
+  const entries = [
+    { role: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu_5', name: 'Edit', input: { file_path: 'C:/Users/rmill/.claude/hooks/some-guard.mjs' } }] } },
+    resultBlock('tu_5', 'The file has been updated. Snippet:\n  reason: "... BLOCKED — do the thing ..."', false),
+  ];
+  assert.deepEqual(changedHookBasenames(entries), ['some-guard.mjs']);
 });
 
 // THE 2026-06-28 FIX: a hook edited in an EARLIER turn (with a later user turn in between) must still be detected —
