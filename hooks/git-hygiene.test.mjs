@@ -9,7 +9,7 @@
  */
 
 import { execSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, existsSync, writeFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +24,11 @@ const hookPath = join(here, 'git-hygiene.mjs');
 // — otherwise the freshly-created trees would all be "recently-active" and survive. Staleness tests re-enable a
 // real grace explicitly to prove the two windows are independent.
 process.env.GIT_HYGIENE_GRACE_MIN = '0';
+// The single-repo tests put their repos directly under tmpdir(); with the sibling
+// sweep on, each would scan every other test's temp repo. Default it OFF here and
+// enable it explicitly (with an isolated workspace) in the sibling-sweep tests.
+process.env.GIT_HYGIENE_SIBLING_SWEEP = '0';
+const SIBLING_ENV = { ...process.env, GIT_HYGIENE_SIBLING_SWEEP: '1', GIT_HYGIENE_GRACE_MIN: '0' };
 const STALE_ENV = { ...process.env, GIT_HYGIENE_GRACE_MIN: '20', GIT_HYGIENE_STALE_HOURS: '1' };
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
@@ -57,9 +62,8 @@ function backdate(paths, ageMs) {
   for (const targetPath of paths) { try { utimesSync(targetPath, when, when); } catch { /* may not exist */ } }
 }
 
-function makeRepo() {
-  const repoRoot = mkdtempSync(join(tmpdir(), 'gh-'));
-  tempDirs.push(repoRoot);
+function makeRepoAt(repoRoot) {
+  mkdirSync(repoRoot, { recursive: true });
   run('git init -b main', repoRoot);
   run('git config user.email test@example.com', repoRoot);
   run('git config user.name Test', repoRoot);
@@ -67,6 +71,12 @@ function makeRepo() {
   run('git commit --allow-empty -m initial', repoRoot);
   run('git switch -c integration', repoRoot);
   return repoRoot;
+}
+
+function makeRepo() {
+  const repoRoot = mkdtempSync(join(tmpdir(), 'gh-'));
+  tempDirs.push(repoRoot);
+  return makeRepoAt(repoRoot);
 }
 
 function addAgentWorktree(repoRoot, agentId, { merge = true } = {}) {
@@ -180,6 +190,53 @@ test('Stop: STALE loose worktree-agent-* branch is reaped + archived; a stale fe
   assert.ok(!branchExists(repoRoot, 'worktree-agent-loose'), 'stale loose agent branch reaped');
   assert.ok(reapedShas(repoRoot).includes(agentTip), 'agent branch tip archived');
   assert.ok(branchExists(repoRoot, 'feature/paused'), 'stale feature/* branch SURVIVES (never age-reaped)');
+});
+
+// ---- SIBLING-REPO SWEEP (the cross-repo gap: a merged branch in a SIBLING repo must also reap) ----
+function makeWorkspaceWithSibling() {
+  const workspace = mkdtempSync(join(tmpdir(), 'gh-ws-'));
+  tempDirs.push(workspace);
+  const primary = join(workspace, 'primary');
+  const sibling = join(workspace, 'sibling');
+  makeRepoAt(primary);
+  makeRepoAt(sibling);
+  return { primary, sibling };
+}
+
+test('Stop: reaps a merged branch in a SIBLING repo under the same workspace', () => {
+  const { primary, sibling } = makeWorkspaceWithSibling();
+  run('git switch main', sibling);
+  run('git switch -c merged-elsewhere', sibling);
+  run('git commit --allow-empty -m done', sibling);
+  run('git switch main', sibling);
+  run('git merge --no-ff -m "merge merged-elsewhere" merged-elsewhere', sibling);
+  run('git switch integration', sibling);
+  assert.ok(branchExists(sibling, 'merged-elsewhere'), 'precondition: sibling branch exists');
+
+  const outcome = runGitHygiene({ commandCwd: primary, eventName: 'Stop', env: SIBLING_ENV });
+  assert.ok(!branchExists(sibling, 'merged-elsewhere'), 'merged branch in the SIBLING repo was reaped');
+  assert.ok((outcome.siblingBranchesDeleted || []).some((entry) => entry.branch === 'merged-elsewhere'), 'reported sibling deletion');
+});
+
+test('Stop: sibling sweep keeps an UNMERGED branch in the sibling repo', () => {
+  const { primary, sibling } = makeWorkspaceWithSibling();
+  run('git switch -c feature/wip-elsewhere', sibling);
+  run('git commit --allow-empty -m wip', sibling);
+  run('git switch integration', sibling);
+  runGitHygiene({ commandCwd: primary, eventName: 'Stop', env: SIBLING_ENV });
+  assert.ok(branchExists(sibling, 'feature/wip-elsewhere'), 'unmerged sibling branch survives');
+});
+
+test('Stop: GIT_HYGIENE_SIBLING_SWEEP=0 disables the sibling sweep', () => {
+  const { primary, sibling } = makeWorkspaceWithSibling();
+  run('git switch main', sibling);
+  run('git switch -c merged-elsewhere', sibling);
+  run('git commit --allow-empty -m done', sibling);
+  run('git switch main', sibling);
+  run('git merge --no-ff -m "merge merged-elsewhere" merged-elsewhere', sibling);
+  run('git switch integration', sibling);
+  runGitHygiene({ commandCwd: primary, eventName: 'Stop', env: { ...process.env, GIT_HYGIENE_SIBLING_SWEEP: '0', GIT_HYGIENE_GRACE_MIN: '0' } });
+  assert.ok(branchExists(sibling, 'merged-elsewhere'), 'sweep disabled => sibling branch survives');
 });
 
 // ---- BRANCH CAP (new) ----

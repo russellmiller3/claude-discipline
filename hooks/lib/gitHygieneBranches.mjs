@@ -14,10 +14,14 @@
  * name, or anything with commits not proven contained in an integration ref.
  */
 
+import { readdirSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+
 import {
   PROTECTED_BRANCHES, AGENT_BRANCH, EPHEMERAL_BRANCH,
   git, gitOk, isMergedIntoAny, archiveBranchTip, resolveGraceMs,
   safeMtimeMs, looseRefActivityMs, looseRefRecentlyActive, comparablePath,
+  samePath, resolveIntegrationRefs, resolveCommonGitDir,
 } from './gitHygieneShared.mjs';
 
 // --- glob helpers for the remote allow/deny lists (only `*`, anchored) ---
@@ -163,6 +167,56 @@ export function pruneMergedRemoteBranches({ repoRoot, env = process.env, dryRun 
  * AGENTS, cap only session-surviving branches at 3). Excludes main/master/protected, worktree-agent-* branches,
  * and any branch checked out in a .claude/worktrees/ agent worktree. Returns the list so the caller can warn.
  */
+const DEFAULT_MAX_SIBLING_REPOS = 200; // guards a pathological parent (e.g. a temp root); a real workspace is far smaller
+
+/**
+ * Sweep merged LOCAL branches across SIBLING repos under the same workspace parent.
+ *
+ * git-hygiene otherwise cleans only the session's own repo (the cwd), so a branch merged
+ * in a SIBLING repo during a cross-repo session is never reaped (found a 5-branch backlog
+ * in a sibling repo, 2026-07-16). Discovery is general: every git repo that is a direct
+ * child of dirname(repoRoot), minus repoRoot itself. Each repo runs pruneMergedLocalBranches
+ * (its own rails apply — never the current/worktree/protected/unmerged branch), fail-open per
+ * repo so one bad sibling never breaks the sweep.
+ */
+export function sweepSiblingReposLocalBranches({ repoRoot, env = process.env, dryRun = false, graceMs, staleMs, nowMs = Date.now() }) {
+  const deleted = [];
+  const workspaceRoot = dirname(repoRoot);
+
+  let workspaceEntries;
+  try { workspaceEntries = readdirSync(workspaceRoot, { withFileTypes: true }); }
+  catch { return { deleted, reason: 'workspace-unreadable' }; }
+
+  const childDirectories = workspaceEntries.filter((childEntry) => childEntry.isDirectory());
+  const maxSiblings = Number(env.GIT_HYGIENE_MAX_SIBLINGS ?? DEFAULT_MAX_SIBLING_REPOS);
+  if (childDirectories.length > maxSiblings) return { deleted, reason: 'too-many-siblings' };
+
+  for (const childEntry of childDirectories) {
+    const siblingRoot = join(workspaceRoot, childEntry.name);
+    if (samePath(siblingRoot, repoRoot)) continue;
+
+    // Must be a repo ROOT (not a nested subdir), and settled (not mid-merge).
+    let topLevel;
+    try { topLevel = git(['rev-parse', '--show-toplevel'], siblingRoot).trim(); }
+    catch { continue; }
+    if (!topLevel || !samePath(topLevel, siblingRoot)) continue;
+    if (gitOk(['rev-parse', '--verify', '-q', 'MERGE_HEAD'], siblingRoot)) continue;
+
+    const integrationRefs = resolveIntegrationRefs(siblingRoot, env);
+    if (!integrationRefs.length) continue;
+    const commonGitDir = resolveCommonGitDir(siblingRoot);
+
+    let siblingPass;
+    try {
+      siblingPass = pruneMergedLocalBranches({ repoRoot: siblingRoot, integrationRefs, commonGitDir, dryRun, graceMs, staleMs, nowMs });
+    } catch { continue; }
+    for (const removed of siblingPass.deleted) {
+      deleted.push({ repo: basename(siblingRoot), branch: removed.branch, why: removed.why, dryRun: removed.dryRun });
+    }
+  }
+  return { deleted };
+}
+
 export function countDurableBranches({ repoRoot }) {
   let branchLines;
   try { branchLines = git(['for-each-ref', '--format=%(refname:short)\t%(worktreepath)', 'refs/heads/'], repoRoot).split(/\r?\n/); }

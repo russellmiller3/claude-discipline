@@ -32,7 +32,7 @@ import {
   git, gitOk, resolveGraceMs, resolveStaleMs, resolveIntegrationRefs, resolveCommonGitDir,
 } from './lib/gitHygieneShared.mjs';
 import { reapWorktrees } from './lib/gitHygieneWorktrees.mjs';
-import { pruneMergedLocalBranches, pruneMergedRemoteBranches, countDurableBranches } from './lib/gitHygieneBranches.mjs';
+import { pruneMergedLocalBranches, pruneMergedRemoteBranches, countDurableBranches, sweepSiblingReposLocalBranches } from './lib/gitHygieneBranches.mjs';
 
 const DEFAULT_BRANCH_CAP = 3;
 
@@ -79,11 +79,14 @@ export function runGitHygiene({ commandCwd, eventName, toolName, command, env = 
 
   const outcome = {
     reason: 'ok', eventName, integrationRefs, dryRun,
-    worktreesRemoved: [], branchesDeleted: [], remoteDeleted: [], orphanDirs: [], durable: [], branchCap: DEFAULT_BRANCH_CAP,
+    worktreesRemoved: [], branchesDeleted: [], siblingBranchesDeleted: [], remoteDeleted: [], orphanDirs: [], durable: [], branchCap: DEFAULT_BRANCH_CAP,
   };
 
   const wantWorktreeReap = ['Stop', 'SessionStart', 'SessionEnd'].includes(eventName);
   const wantBranchPrune = ['Stop', 'SessionStart', 'SessionEnd', 'PostToolUse'].includes(eventName);
+  // A session touches sibling repos too (runner, Logger, ...); the merged-branch reaper
+  // must sweep them, not just cwd. On at session boundaries; GIT_HYGIENE_SIBLING_SWEEP=0 disables.
+  const wantSiblingSweep = env.GIT_HYGIENE_SIBLING_SWEEP !== '0' && ['Stop', 'SessionStart', 'SessionEnd'].includes(eventName);
   const wantRemotePrune = eventName === 'PostToolUse';
   const wantSqliteBackup = eventName === 'SessionEnd';
   const wantCapWarn = ['Stop', 'SessionStart'].includes(eventName);
@@ -96,6 +99,12 @@ export function runGitHygiene({ commandCwd, eventName, toolName, command, env = 
   if (wantBranchPrune) {
     const localPass = pruneMergedLocalBranches({ repoRoot, integrationRefs, commonGitDir, dryRun, graceMs, staleMs, nowMs });
     outcome.branchesDeleted = localPass.deleted;
+  }
+  if (wantSiblingSweep) {
+    try {
+      const siblingPass = sweepSiblingReposLocalBranches({ repoRoot, env, dryRun, graceMs, staleMs, nowMs });
+      outcome.siblingBranchesDeleted = siblingPass.deleted;
+    } catch { /* a sibling failure must never mask the primary result */ }
   }
   if (wantRemotePrune) {
     try {
@@ -139,6 +148,11 @@ export function formatNote(outcome) {
     }
   }
   if (outcome.orphanDirs?.length) lines.push(`Removed ${outcome.orphanDirs.length} empty orphan worktree folder(s).`);
+
+  if (outcome.siblingBranchesDeleted?.length) {
+    const siblingLines = outcome.siblingBranchesDeleted.map((entry) => `- ${entry.repo}: ${entry.branch}  (merged branch in sibling repo)`);
+    lines.push(`git-hygiene: ${verb} ${siblingLines.length} merged branch(es) in sibling repo(s):\n${siblingLines.join('\n')}`);
+  }
 
   // Branch-cap WARNING (Russell's choice: warn on Stop, never hard-block).
   if (outcome.durable.length > outcome.branchCap) {
