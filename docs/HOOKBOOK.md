@@ -235,3 +235,5 @@ All hooks live in `~/.claude/hooks/`. Registered in `~/.claude/settings.json`.
 | `~/.claude/hooks/HOOKBOOK.md` | This file |
 | `~/.claude/settings.json` | Hook registration — which hook fires on which event/matcher |
 | `~/.claude/CLAUDE.md` | The rules these hooks enforce — authoritative source |
+
+| `large-upload-guard.mjs` | (2026-07-15, PreToolUse Bash) Blocks an scp/rsync upload of a local file/dir over 25MB without `LARGE_UPLOAD_OK` — stats local-existing command tokens (flags + remote host:path skipped). Built after a code deploy silently ballooned to ~590MB (committed telemetry artifacts + full git history) and crawled a paid link. Locked by `large-upload-guard.test.mjs` (5 tests). |
