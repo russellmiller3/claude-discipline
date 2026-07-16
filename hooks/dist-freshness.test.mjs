@@ -91,6 +91,12 @@ test('malformed stdin -> fail open (exit 0, no block)', () => {
   assert.doesNotMatch((hookRun.stdout || '') + (hookRun.stderr || ''), /block/);
 });
 
+// ── must-ALLOW: the Stop guard must NOT over-fire when no buildable source was edited ──
+test('allows / does NOT fire on a turn that edited no buildable source', () => {
+  assert.deepEqual(staleRootsThisTurn([]).staleRoots, [],
+    'no source edits this turn -> nothing can be stale -> the guard must not block');
+});
+
 test('importing the hook does NOT execute main (basename entry guard)', () => {
   const importProbe = spawnSync('node', ['--input-type=module', '-e',
     `import(${JSON.stringify('file:///' + HOOK.replace(/\\/g, '/'))}).then(() => console.log('imported-ok'));`,

@@ -125,6 +125,13 @@ test('malformed stdin -> fail open (exit 0)', () => {
   const run = spawnSync('node', [HOOK], { input: '{bad', encoding: 'utf8' });
   assert.equal(run.status, 0);
 });
+
+// ── must-ALLOW: the guard must NOT over-fire outside a ledger repo ──
+test('allows / does NOT fire: stopCheck on a plain dir without the ledger docs', () => {
+  const plainDir = mkdtempSync(join(tmpdir(), 'not-ledger-'));
+  assert.equal(stopCheck({ cwd: plainDir }), null, 'a dir lacking RESULTS/Truth-ledger/METHODS is not analyzed -> no block');
+  rmSync(plainDir, { recursive: true, force: true });
+});
 test('importing the hook does NOT execute main (basename entry guard)', () => {
   const probe = spawnSync('node', ['--input-type=module', '-e',
     `import(${JSON.stringify('file:///' + HOOK.replace(/\\/g, '/'))}).then(() => console.log('imported-ok'));`,

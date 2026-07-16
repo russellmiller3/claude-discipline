@@ -64,6 +64,12 @@ test('an empty turn has no screenshot', () => {
   assert.equal(realScreenshotThisTurn([]), false);
 });
 
+// ── must-ALLOW: the guard must NOT over-fire on a legitimate non-visual turn ──
+test('allows / does NOT fire on a legitimate non-visual turn (no UI edit, no claim, no screenshot)', () => {
+  assert.equal(shouldBlock({ editedUi: false, domAsProof: false, heresy: false, realScreenshot: false, overridden: false }), false,
+    'a turn that touched no visual surface and made no visual claim must be allowed');
+});
+
 // ── diskScreenshotSavedAfter: the file-mtime proof path (absorbed from ux-verify-artifact, 2026-07-15) ──
 test('a screenshot FILE saved after the edit counts as real proof (disk path)', () => {
   const sandbox = mkdtempSync(joinTestPath(tmpdir(), 'vpr-disk-'));
