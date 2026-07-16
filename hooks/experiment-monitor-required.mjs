@@ -27,6 +27,12 @@
 //   invariant "every launch is covered by a live Monitor" is asserted on the
 //   resulting STATE, not just at the moment of the launch action.
 //
+//   LINK REQUIREMENT (Russell, 2026-07-16, verbatim: "when you create monitor you
+//   must give me link"): a chat-only Monitor isn't enough. When a launch + Monitor
+//   exist, Stop ALSO BLOCKS unless a watch LINK (an http(s) URL, localhost:PORT, or a
+//   *-live.html watch page) was given to Russell this session — so he always has a
+//   browser page to WATCH the paid run, not just terminal notifications.
+//
 // TEETH: PreToolUse permissionDecision 'deny'; Stop decision 'block'.
 // Launch detection is precise (see isLaunchCommand) so prose/finalize/help/reads
 // never false-positive. Escape: EXPERIMENT_MONITOR_REQUIRED_OK=1 in env, or the
@@ -42,6 +48,9 @@ import { readTranscript, toolUsesOf, lastAssistantText } from './lib/transcript.
 const ENV_OVERRIDE = 'EXPERIMENT_MONITOR_REQUIRED_OK';
 const ESCAPE_TOKEN = /\bEXPERIMENT_MONITOR_REQUIRED_OK\b/;
 const MONITOR_TOOL = 'Monitor';
+// A watch LINK Russell can open: an http(s) URL, a localhost:PORT, or a *-live.html
+// watch page. Russell's rule (2026-07-16): a Monitor must come with a link.
+const LINK_RE = /(https?:\/\/\S+)|(?:localhost|127\.0\.0\.1):\d+|[\w.-]+-live\.html/i;
 
 // A launch is one of: a runpod launcher run with the `launch` verb; a `modal run`;
 // or a python invocation of a modal_*.py job script.
@@ -79,6 +88,24 @@ function toolUsesInOrder(entries) {
   return toolUses;
 }
 
+// Concatenate every assistant TEXT block (not tool-uses) so we can check whether a
+// watch link was given anywhere this session. Handles both the raw transcript shape
+// and the test's plain {role, content:[{type:'text',text}]} entries.
+function allAssistantText(entries) {
+  let assistantText = '';
+  for (const entry of entries || []) {
+    const role = entry?.role || entry?.message?.role;
+    if (role !== 'assistant') continue;
+    const content = entry?.content ?? entry?.message?.content ?? [];
+    if (typeof content === 'string') { assistantText += ' ' + content; continue; }
+    for (const block of content || []) {
+      if (typeof block === 'string') assistantText += ' ' + block;
+      else if (block?.type === 'text' && block?.text) assistantText += ' ' + block.text;
+    }
+  }
+  return assistantText;
+}
+
 const DENY_REASON = `EXPERIMENT LAUNCH BLOCKED — no live Monitor is attached yet.
 
 Russell's rule (2026-07-16): "I want the monitor created BEFORE the experiment launches."
@@ -99,6 +126,15 @@ whole lifecycle, so a death or stall is seen in real time instead of a session l
 Monitor to the launch now (or finalize/teardown it if it is already done).
 
 If the run is already finalized and torn down, put ${ENV_OVERRIDE} in your reply to clear this.`;
+
+const NO_LINK_REASON = `MONITOR WITHOUT A LINK — an experiment launched with a Monitor, but no watch LINK
+was given to Russell this session.
+
+Russell's rule (2026-07-16): "when you create a monitor you must give me a link." A chat-only
+Monitor isn't enough — Russell wants a URL he can open to WATCH the run: a served watch page
+(e.g. http://localhost:PORT/....html) or a *-live.html watch page.
+
+Give Russell the watch link, then stop. Escape: ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
 
 /**
  * PURE core. `entries` is the parsed transcript (array). Returns
@@ -125,8 +161,13 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
       if (toolUse.name === MONITOR_TOOL) lastMonitorIndex = index;
       if (toolUse.name === 'Bash' && isLaunchCommand(toolUse.command)) lastLaunchIndex = index;
     });
-    if (lastLaunchIndex >= 0 && lastMonitorIndex < lastLaunchIndex) {
+    if (lastLaunchIndex < 0) return { block: false };
+    if (lastMonitorIndex < lastLaunchIndex) {
       return { block: true, mode: 'stop', reason: STOP_REASON };
+    }
+    // The Monitor covers the launch — but was a watch LINK given to Russell?
+    if (!LINK_RE.test(allAssistantText(entries))) {
+      return { block: true, mode: 'stop', reason: NO_LINK_REASON };
     }
     return { block: false };
   }

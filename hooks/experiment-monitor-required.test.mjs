@@ -10,7 +10,9 @@ import { isLaunchCommand, evaluate } from './experiment-monitor-required.mjs';
 // ── transcript builders ──────────────────────────────────────────────────────
 const bash = (command) => ({ role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: { command } }] });
 const monitor = () => ({ role: 'assistant', content: [{ type: 'tool_use', name: 'Monitor', input: {} }] });
+const say = (text) => ({ role: 'assistant', content: [{ type: 'text', text }] });
 const LAUNCH = 'python runpod_exp153.py launch --rows --gate';
+const LINK = 'watch it live: http://localhost:8153/docs/exp153-3seed-live.html';
 
 // ── isLaunchCommand: precise detection, no false positives ───────────────────
 test('isLaunchCommand: runpod launch is a launch', () => {
@@ -75,8 +77,28 @@ test('Stop: BLOCK when a launch happened and no Monitor followed it', () => {
   assert.equal(verdict.block, true);
   assert.equal(verdict.mode, 'stop');
 });
-test('Stop: ALLOW when a Monitor follows the last launch', () => {
+test('Stop: ALLOW when a Monitor follows the last launch AND a watch link was given', () => {
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), say(LINK)] });
+  assert.equal(verdict.block, false);
+});
+
+// ── Stop backstop: a Monitor must come with a LINK Russell can open ───────────
+test('Stop: BLOCK when launch + Monitor but NO watch link was given', () => {
   const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor()] });
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.mode, 'stop');
+  assert.match(verdict.reason, /link/i);
+});
+test('Stop: ALLOW with a localhost link', () => {
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), say('open http://127.0.0.1:8153/docs/x.html')] });
+  assert.equal(verdict.block, false);
+});
+test('Stop: ALLOW with a *-live.html watch page reference', () => {
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), say('see docs/exp153-race-live.html')] });
+  assert.equal(verdict.block, false);
+});
+test('Stop: no-link block does NOT fire when there was no launch', () => {
+  const verdict = evaluate({ event: 'Stop', entries: [bash('ls'), monitor()] });
   assert.equal(verdict.block, false);
 });
 test('Stop: BLOCK when the last Monitor precedes the last launch (stale monitor)', () => {
