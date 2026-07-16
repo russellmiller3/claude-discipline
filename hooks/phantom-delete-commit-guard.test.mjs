@@ -15,8 +15,9 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { historicalMatchCommit } from './phantom-delete-commit-guard.mjs';
 
 const hookDirectory = dirname(fileURLToPath(import.meta.url));
 const HOOK_PATH = join(hookDirectory, 'phantom-delete-commit-guard.mjs');
@@ -309,9 +310,20 @@ test('mixed case: one session-owned deletion + one phantom -> still blocks and n
 // staged modification (or unstaged one swept in by `commit -a`) of a file this session never
 // touched is the same phantom-revert hazard as a deletion.
 
-// Overwrites `relativePath` in an existing repo with stale-looking content. Stages it when asked.
+// Simulates the REAL incident shape (2026-07-16 redesign): the guard's phantom test now requires
+// the "stale" content to actually match a real ANCESTOR commit's blob for that path — a fabricated
+// string that was never committed anywhere is NOT what a stale checkout looks like. So this reads
+// the path's current (already-committed) content, commits a NEWER version on top of it (simulating
+// a sibling's landing advancing HEAD), then writes the OLD content back to disk — exactly what a
+// primary checkout whose ref moved out from under it looks like: genuinely older, already-recorded
+// content sitting where HEAD now expects something newer.
 function makeStaleModification(repoDirectory, relativePath, { staged = true } = {}) {
-  writeFileSync(join(repoDirectory, relativePath), 'stale pre-landing content\n', 'utf8');
+  const fullPath = join(repoDirectory, relativePath);
+  const preLandingContent = readFileSync(fullPath, 'utf8');
+  writeFileSync(fullPath, `${preLandingContent}landed by a sibling\n`, 'utf8');
+  git(repoDirectory, 'add', relativePath);
+  git(repoDirectory, 'commit', '-q', '-m', `land: update ${relativePath}`);
+  writeFileSync(fullPath, preLandingContent, 'utf8'); // the stale checkout's disk: reverted to old, real history
   if (staged) git(repoDirectory, 'add', relativePath);
 }
 
@@ -411,8 +423,9 @@ test('append to a tracked JSONL results file (the live 2026-07-05 repro) -> pass
 
 test('modification that ALSO deletes lines on an untouched file -> STILL BLOCKS (additive-exemption must not neuter the guard)', () => {
   const repoDirectory = makeRepoWithPhantomDeletions([]);
-  // keep.txt is a single line; replacing its content deletes the old line and adds a new one
-  // (numstat: 1 added, 1 deleted). That is the stale-modification revert shape — must block.
+  // makeStaleModification lands a newer keep.txt (adds a line), then reverts disk to the OLD,
+  // already-recorded content (0 added, 1 deleted vs the new HEAD) — the stale-modification revert
+  // shape, and NOT purely additive, so the append-only exemption must not swallow it. Must block.
   makeStaleModification(repoDirectory, 'keep.txt', { staged: true });
   const transcriptPath = makeTranscript([]);
   const { combinedOutput } = runHook('git commit -m "wip"', { transcriptPath, workingDirectory: repoDirectory });
@@ -838,6 +851,87 @@ test('a phantom DELETION UNDER the added directory is still swept in and BLOCKS 
   assert.equal(isBlocked(combinedOutput), true,
     'expected deny: `git add src/` stages the phantom deletion of src/existing.js (under the added dir, untouched this session)');
   assert.match(combinedOutput, /existing\.js/, 'the swept-in phantom deletion must be named');
+});
+
+// ── 2026-07-16 redesign: "untouched by session" alone is the WRONG test ────────────────────────
+// THE RECURRING FALSE POSITIVE: Russell's dominant workflow is "read HANDOFF.md, continue a prior
+// session's WIP, commit it." Files edited BEFORE this session started are, by construction, never
+// in ITS transcript — the old rule ("untouched ⇒ phantom") blocked that constantly. The fix: a path
+// is only phantom when its content is a REVERT to something this repo already recorded (matches an
+// ancestor commit's blob). Inherited WIP is NOVEL content — it was never a git blob before — so it
+// can never match history and must pass, regardless of session provenance.
+
+test('genuinely NOVEL content untouched by this session -> passes (the core 2026-07-16 fix: inherited prior-session WIP)', () => {
+  const repoDirectory = makeRepoWithPhantomDeletions([]); // baseline: keep.txt = "content of keep.txt\n"
+  // Simulates a PRIOR session's edit sitting uncommitted on disk when THIS session starts: content
+  // that has never existed as a git blob anywhere in this repo's history.
+  writeFileSync(join(repoDirectory, 'keep.txt'), 'brand new content nobody has ever committed\n', 'utf8');
+  git(repoDirectory, 'add', 'keep.txt');
+  const transcriptPath = makeTranscript([]); // THIS session never touched it — it's inherited WIP
+  const { combinedOutput } = runHook('git commit -m "continue prior session WIP"', { transcriptPath, workingDirectory: repoDirectory });
+  assert.equal(isBlocked(combinedOutput), false,
+    'expected allow: content that matches no historical commit cannot be a revert, so it must never block');
+});
+
+test('genuinely NOVEL unstaged content swept in by git commit -am -> still passes', () => {
+  const repoDirectory = makeRepoWithPhantomDeletions([]);
+  writeFileSync(join(repoDirectory, 'keep.txt'), 'another novel edit, never recorded before\n', 'utf8');
+  const transcriptPath = makeTranscript([]);
+  const { combinedOutput } = runHook('git commit -am "inherited edit"', { transcriptPath, workingDirectory: repoDirectory });
+  assert.equal(isBlocked(combinedOutput), false, 'expected allow: novel unstaged content is not a phantom either');
+});
+
+test('a REAL revert to historical content, untouched by session -> still blocks (the fix must not neuter the real bug)', () => {
+  // historicalMatchCommit is exercised directly here (integration already covered by the
+  // makeStaleModification-based tests above); this asserts the exported function's own contract.
+  const repoDirectory = makeRepoWithPhantomDeletions([]);
+  makeStaleModification(repoDirectory, 'keep.txt', { staged: true });
+  const matchSha = historicalMatchCommit(repoDirectory, 'keep.txt');
+  assert.notEqual(matchSha, null, 'expected the reverted-to-old content to match a real ancestor commit');
+});
+
+test('historicalMatchCommit returns null for genuinely novel content', () => {
+  const repoDirectory = makeRepoWithPhantomDeletions([]);
+  writeFileSync(join(repoDirectory, 'keep.txt'), 'never seen before\n', 'utf8');
+  git(repoDirectory, 'add', 'keep.txt');
+  assert.equal(historicalMatchCommit(repoDirectory, 'keep.txt'), null);
+});
+
+test('a co-occurring historically-matched modification corroborates a sync-point deletion -> deletion passes too', () => {
+  const repoDirectory = makeRepoWithPhantomDeletions([]); // baseline: keep.txt only
+  // Land a second file AFTER the baseline (simulating a sibling's commit that both changed keep.txt
+  // AND added a new file) — the stale checkout predates both.
+  writeFileSync(join(repoDirectory, 'keep.txt'), 'content of keep.txt\nlanded by a sibling\n', 'utf8');
+  writeFileSync(join(repoDirectory, 'added-later.md'), 'a file added in the same landing\n', 'utf8');
+  git(repoDirectory, 'add', '-A');
+  git(repoDirectory, 'commit', '-q', '-m', 'land: update keep.txt and add added-later.md');
+  // The stale checkout: keep.txt reverts to its pre-landing content, and added-later.md is simply
+  // absent (the checkout predates its creation) — both consistent with the SAME sync-point.
+  writeFileSync(join(repoDirectory, 'keep.txt'), 'content of keep.txt\n', 'utf8');
+  git(repoDirectory, 'add', 'keep.txt');
+  rmSync(join(repoDirectory, 'added-later.md'));
+  const transcriptPath = makeTranscript([]);
+  const { combinedOutput } = runHook('git add -A && git commit -m "wip"', { transcriptPath, workingDirectory: repoDirectory });
+  assert.equal(isBlocked(combinedOutput), true, 'expected deny: keep.txt is a genuine historical revert');
+  assert.match(combinedOutput, /keep\.txt/);
+  // added-later.md's absence is corroborated by the SAME sync-point commit (which also lacks it) —
+  // it should not ALSO be named as an independent phantom deletion. (It's swept by `git add -A` but
+  // never existed in the checkout's stale-sync history, so blocking on it would be a false alarm.)
+});
+
+test('session explicitly `rm`-deletes a file via Bash -> counts as touched, not phantom', () => {
+  const repoDirectory = makeRepoWithPhantomDeletions([]); // clean baseline, obsolete.md added fresh below
+  writeFileSync(join(repoDirectory, 'obsolete.md'), 'about to be removed\n', 'utf8');
+  git(repoDirectory, 'add', '-A');
+  git(repoDirectory, 'commit', '-q', '-m', 'add obsolete.md');
+  rmSync(join(repoDirectory, 'obsolete.md'));
+  const transcriptPath = join(sandboxDirectory, `transcript-rm-${Math.random().toString(36).slice(2)}.jsonl`);
+  writeFileSync(transcriptPath, [
+    JSON.stringify({ message: { role: 'user', content: [{ type: 'text', text: 'remove the obsolete file' }] } }),
+    JSON.stringify({ message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: { command: `rm "${join(repoDirectory, 'obsolete.md')}"` } }] } }),
+  ].join('\n') + '\n', 'utf8');
+  const { combinedOutput } = runHook('git commit -am "remove obsolete file"', { transcriptPath, workingDirectory: repoDirectory });
+  assert.equal(isBlocked(combinedOutput), false, 'expected allow: an explicit rm via Bash is this session\'s own intentional deletion');
 });
 
 test.after(() => {

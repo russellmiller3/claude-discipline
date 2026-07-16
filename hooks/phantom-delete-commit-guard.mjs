@@ -11,10 +11,22 @@
  * deletions/modifications — silently reverting the landing. The 4th bite rolled back a 141-line
  * Truth-ledger rewrite as a stale "modification".
  *
- * THE TELL: the deleted/modified paths were never created or edited by THIS session (checked
- * against the session transcript's Write/Edit/MultiEdit/shell-redirect history, same technique as
- * delete-audit-guard.mjs). A session cannot legitimately commit the removal or rewrite of content
- * it never touched from a primary checkout — that is almost always someone else's landed work.
+ * THE TELL (REDESIGNED 2026-07-16 — see "lots of issues" below): a path is phantom when it is BOTH
+ * (a) untouched by THIS session (Write/Edit/MultiEdit/shell-redirect/rm history, same technique as
+ * delete-audit-guard.mjs) AND (b) its current content is a REVERT — it exactly matches this path's
+ * OWN blob at some ANCESTOR commit of HEAD (historicalMatchCommit). (b) is the actual signature of
+ * the bug: a stale checkout's disk still holds OLD, already-recorded content while HEAD moved on.
+ *
+ * WHY "untouched by session" ALONE WAS WRONG (the recurring false-positive family, worst on
+ * 2026-07-16): Russell's dominant workflow is "read HANDOFF.md, continue a prior session's WIP,
+ * commit it" — files modified BEFORE this session started are, by definition, never in ITS
+ * transcript, yet committing them is exactly the ask. The old rule ("untouched ⇒ phantom") blocked
+ * that constantly, forcing PHANTOM_DELETE_OK=1 on ordinary, correct commits. The new second
+ * condition fixes it without reopening the real bug: inherited WIP is NOVEL content (it was never
+ * a git blob before), so it never historically-matches and is never phantom. A genuine stale-CAS
+ * revert's content, by construction, is OLD content the repo already recorded — it always matches
+ * an ancestor, so it still blocks. Untouched + novel now correctly passes; untouched + a revert to
+ * history still blocks.
  *
  * WHAT COUNTS AS "IN PLAY" for the commit being attempted (2026-07-04 false-positive rework):
  *   - staged deletions (`D` in the index column) and staged modifications (`M` in the index
@@ -306,6 +318,13 @@ export function sessionTouchedPaths(sessionEntries) {
         for (const redirectMatch of shellCommand.matchAll(/(?:^|\s)>{1,2}\s*"?([^\s"|;&]+)"?/g)) {
           try { touchedPaths.add(resolve(redirectMatch[1]).toLowerCase()); } catch { /* unresolvable — skip */ }
         }
+        // An explicit deletion command (rm/git rm/del/Remove-Item) is this session's own
+        // intentional work on that path too — not just writes count as "touched."
+        for (const deleteMatch of shellCommand.matchAll(/(?:^|[&;|]|\s)(?:rm|git\s+rm|del|Remove-Item)\s+(?:-{1,2}[A-Za-z-]+\s+)*"?([^\s"|;&]+)"?/gi)) {
+          const deletedTarget = deleteMatch[1];
+          if (!deletedTarget || deletedTarget.startsWith('-')) continue;
+          try { touchedPaths.add(resolve(deletedTarget).toLowerCase()); } catch { /* unresolvable — skip */ }
+        }
       }
     }
   }
@@ -337,6 +356,90 @@ function headTrackedPaths(repoDirectory, candidatePaths) {
   if (lsTreeText === null) return [];
   const trackedSet = new Set(lsTreeText.split('\n').map((line) => line.trim().replace(/^"|"$/g, '')).filter(Boolean));
   return candidatePaths.filter((candidatePath) => trackedSet.has(candidatePath));
+}
+
+/**
+ * Batched blob-hash lookup: for each of `commitShas`, the blob hash of `repoRelativePath` at that
+ * commit, if it exists there. ONE `git cat-file --batch-check` call resolves the whole list — avoids
+ * spawning a subprocess per (commit, path) pair, which would be too slow in a PreToolUse hook for a
+ * file with a long history (HANDOFF.md changes almost every session).
+ */
+function blobHashesAt(repoDirectory, commitShas, repoRelativePath) {
+  if (!commitShas.length) return new Map();
+  const batchCheckInput = commitShas.map((sha) => `${sha}:${repoRelativePath}`).join('\n') + '\n';
+  let batchCheckResult;
+  try {
+    batchCheckResult = spawnSync('git', ['-C', repoDirectory, 'cat-file', '--batch-check=%(objectname)'], { input: batchCheckInput, encoding: 'utf8' });
+  } catch {
+    return new Map();
+  }
+  if (!batchCheckResult || batchCheckResult.error || batchCheckResult.status !== 0) return new Map();
+  const batchCheckLines = (batchCheckResult.stdout || '').split('\n');
+  const blobHashBySha = new Map();
+  commitShas.forEach((sha, index) => {
+    const line = (batchCheckLines[index] || '').trim();
+    if (/^[0-9a-f]{40}$/i.test(line)) blobHashBySha.set(sha, line);
+  });
+  return blobHashBySha;
+}
+
+/** Commits reachable from HEAD that touched `repoRelativePath`, newest first, capped for performance
+ *  — proving "existed at SOME point" only needs a generous cap, not full history. */
+function commitsTouchingPath(repoDirectory, repoRelativePath, cap = 200) {
+  const logText = gitOutputOrNull(repoDirectory, 'log', '-n', String(cap), '--format=%H', 'HEAD', '--', repoRelativePath);
+  if (logText === null) return [];
+  return logText.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+/** Blob hash of `repoRelativePath` as it sits in the INDEX right now (a prior `git add` already
+ *  ran), or null if the index has no entry for it. */
+function stagedBlobHash(repoDirectory, repoRelativePath) {
+  const revParseOutput = gitOutputOrNull(repoDirectory, 'rev-parse', `:${repoRelativePath}`);
+  if (revParseOutput === null) return null;
+  const blobHash = revParseOutput.trim();
+  return /^[0-9a-f]{40}$/i.test(blobHash) ? blobHash : null;
+}
+
+/** Blob hash of `repoRelativePath`'s CURRENT WORKING-TREE file, or null if it doesn't exist on disk. */
+function workingTreeBlobHash(repoDirectory, repoRelativePath) {
+  const hashObjectOutput = gitOutputOrNull(repoDirectory, 'hash-object', '--', repoRelativePath);
+  if (hashObjectOutput === null) return null;
+  const blobHash = hashObjectOutput.trim();
+  return /^[0-9a-f]{40}$/i.test(blobHash) ? blobHash : null;
+}
+
+/**
+ * THE CORE FIX (2026-07-16): does this MODIFIED path's current content (staged if already `git
+ * add`-ed, else the working-tree file) exactly match its OWN content at some ANCESTOR commit of
+ * HEAD? If so, committing it reverts that path to old, already-recorded content — the actual
+ * signature of the stale-checkout bug. If the content matches nothing in the path's own history, it
+ * cannot be a revert — it is necessarily NOVEL, and must never block regardless of session
+ * provenance. Returns the matching ancestor sha, or null when the content is novel.
+ */
+export function historicalMatchCommit(repoDirectory, repoRelativePath) {
+  // Working-tree content wins: for a MODIFIED (still-present-on-disk) path, disk is what `-a`/a
+  // fresh `git add` will actually capture. The index can otherwise still hold an UNCHANGED blob
+  // (identical to HEAD) at the moment this hook runs, before the pending add/`-a` has executed —
+  // checking that stale index entry first would trivially "match" HEAD and miss novel disk content
+  // entirely (the bug this ordering fixes, 2026-07-16). Only fall back to the index when the file is
+  // gone from disk (already staged-but-since-deleted outside a normal `git rm`, an edge case).
+  const currentBlobHash = workingTreeBlobHash(repoDirectory, repoRelativePath) || stagedBlobHash(repoDirectory, repoRelativePath);
+  if (!currentBlobHash) return null;
+  const candidateCommits = commitsTouchingPath(repoDirectory, repoRelativePath);
+  const blobHashBySha = blobHashesAt(repoDirectory, candidateCommits, repoRelativePath);
+  for (const sha of candidateCommits) {
+    if (blobHashBySha.get(sha) === currentBlobHash) return sha;
+  }
+  return null;
+}
+
+/** Is `repoRelativePath` absent from `commitSha`'s tree? Used to corroborate a co-occurring
+ *  DELETION against the same stale sync-point a historically-matched MODIFICATION already pinned
+ *  down — if that commit also lacked the deleted path, the checkout being frozen there explains
+ *  the deletion too, not just the modification. */
+function pathAbsentAt(repoDirectory, commitSha, repoRelativePath) {
+  const blobHashBySha = blobHashesAt(repoDirectory, [commitSha], repoRelativePath);
+  return !blobHashBySha.has(commitSha);
 }
 
 /**
@@ -406,7 +509,8 @@ function main() {
   const porcelainText = gitOutputOrNull(repoDirectory, 'status', '--porcelain');
   if (porcelainText === null) { process.exit(0); return; } // missing git or non-repo — fail open
 
-  let inPlayPaths;
+  let headTrackedDeletionPaths;
+  let modificationPaths;
   try {
     // Scope the unstaged worktree changes to what the pending `git add` will actually stage: a whole-tree add
     // ('all') sweeps everything; an explicit-path add scopes to its named files/dirs; a plain commit sweeps
@@ -417,10 +521,12 @@ function main() {
     });
     // Deletions must additionally be tracked in THIS repo's own HEAD — a commit cannot delete a
     // path its HEAD never contained (added-then-deleted, or landed only on another branch/main).
-    inPlayPaths = [...headTrackedPaths(repoDirectory, deletions), ...modifications];
+    headTrackedDeletionPaths = headTrackedPaths(repoDirectory, deletions);
+    modificationPaths = modifications;
   } catch {
     process.exit(0); return;
   }
+  const inPlayPaths = [...headTrackedDeletionPaths, ...modificationPaths];
   if (!inPlayPaths.length) { process.exit(0); return; }
 
   const repoRootText = gitOutputOrNull(repoDirectory, 'rev-parse', '--show-toplevel');
@@ -454,16 +560,44 @@ function main() {
         return false; // unresolvable path — don't accuse what we can't identify
       }
     };
-    // Original check: phantom deletions/modifications (files never touched this session), EXCEPT
-    // purely-additive modifications (an append: 0 deleted lines) — those cannot revert landed work.
-    phantomPaths = inPlayPaths.filter((repoRelativePath) =>
-      isUntouched(repoRelativePath) && !purelyAdditivePaths.has(repoRelativePath));
-    // NEW: large deletion check — staged files with >50 lines deleted, never touched this session.
-    // These are almost certainly accidental sweeps of prior-session WIP or stale-checkout reverts.
-    for (const largePath of largeDeletionPaths) {
-      if (isUntouched(largePath) && !phantomPaths.includes(largePath)) {
-        phantomPaths.push(largePath);
+
+    // ── MODIFICATIONS: phantom only when untouched by session AND the current content is a REVERT
+    // to some ancestor commit's already-recorded blob (2026-07-16 fix). Content that matches
+    // NOTHING in the path's own history cannot be reverting anyone's landed work — it is novel —
+    // and must never block, regardless of session provenance. This is what makes committing
+    // legitimate PRIOR-SESSION WIP (read HANDOFF.md, continue, commit) safe: inherited edits are
+    // real new content, never a match against history.
+    const untouchedModifications = modificationPaths.filter(
+      (repoRelativePath) => isUntouched(repoRelativePath) && !purelyAdditivePaths.has(repoRelativePath));
+    const modificationSyncPoints = new Map(); // path -> matching ancestor sha, for deletion corroboration below
+    const phantomModifications = untouchedModifications.filter((repoRelativePath) => {
+      const matchingAncestorSha = historicalMatchCommit(repoDirectory, repoRelativePath);
+      if (matchingAncestorSha) modificationSyncPoints.set(repoRelativePath, matchingAncestorSha);
+      return Boolean(matchingAncestorSha);
+    });
+
+    // ── DELETIONS: phantom when untouched by session — UNLESS a co-occurring phantom modification
+    // already pinned down a specific stale sync-point commit, AND that same commit ALSO lacks this
+    // path (corroboration: "the checkout is frozen before this file existed too," not just before
+    // the modified file's current content). With no corroborating modification, keep the
+    // conservative fallback (block) — a pure-deletion commit gives no independent evidence the
+    // checkout is merely stale rather than an intentional removal.
+    const phantomDeletions = headTrackedDeletionPaths.filter((repoRelativePath) => {
+      if (!isUntouched(repoRelativePath)) return false;
+      for (const syncPointSha of modificationSyncPoints.values()) {
+        if (pathAbsentAt(repoDirectory, syncPointSha, repoRelativePath)) return false; // corroborated staleness
       }
+      return true;
+    });
+
+    phantomPaths = [...phantomDeletions, ...phantomModifications];
+
+    // Large-deletion sweep check (2026-07-05 incident): the SAME historical-match requirement now
+    // applies — an untouched large deletion is only phantom when it's a revert to old recorded
+    // content, not a genuine (if large) rewrite that happens to be untouched by this session.
+    for (const largePath of largeDeletionPaths) {
+      if (phantomPaths.includes(largePath) || !isUntouched(largePath)) continue;
+      if (historicalMatchCommit(repoDirectory, largePath)) phantomPaths.push(largePath);
     }
   } catch {
     process.exit(0); return;
@@ -471,7 +605,8 @@ function main() {
   if (!phantomPaths.length) { process.exit(0); return; }
 
   const reason = [
-    'BLOCKED — this commit would bake in PHANTOM deletions/modifications of files this session never touched.',
+    'BLOCKED — this commit would bake in PHANTOM deletions/modifications: a REVERT to content this',
+    'repo already recorded, on paths this session never touched.',
     '',
     'This checkout\'s working tree looks STALE: a sibling agent\'s landing likely moved this branch\'s ref',
     'underneath it, so the just-landed files now read as deleted or reverted here. Committing them from a',
@@ -482,7 +617,10 @@ function main() {
     'session\'s uncommitted WIP (2026-07-05 incident: git add plans/ swept in RESULTS.md, METHODS.md,',
     'Truth-ledger.md with 1000+ line deletions each — silently destroying core docs).',
     '',
-    'Phantom paths (deleted/modified on disk, but never created or edited by this session):',
+    '(2026-07-16: committing genuinely NEW content this session inherited from a PRIOR session\'s WIP',
+    'is fine and does NOT trip this — only a path whose content exactly matches an OLDER commit blocks.)',
+    '',
+    'Phantom paths (revert to already-recorded content, never created or edited by this session):',
     ...phantomPaths.map((phantomPath) => `  - ${phantomPath}`),
     '',
     'Fix — restore the landed content, then commit only YOUR files by explicit path:',
