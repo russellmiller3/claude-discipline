@@ -112,8 +112,13 @@ Russell's rule (2026-07-16): "I want the monitor created BEFORE the experiment l
 A paid pod / training run that starts with nobody watching can die (or stall silently) and
 not be noticed for a whole session — exactly how exp150 lost 3 reader checkpoints.
 
-Start a Monitor FIRST (liveness poll + finalize/teardown loop), THEN launch. Use the Monitor
-tool to attach a live watch on the run before you spend on it.
+Do this BEFORE launching, in order:
+  1. Build the browser monitor from Russell's STANDARD template — copy
+     ~/.claude/skills/live-watch/watch-template.html to <repo>/docs/<exp>-live.html and edit ONLY
+     its CONFIG block (arms, seeds, metric, the purpose cards). Do NOT hand-roll a bespoke page.
+  2. Serve it and give Russell the clickable link.
+  3. Start a Monitor (the Monitor tool) for the liveness/finalize loop.
+  4. THEN launch.
 
 If this genuinely does not need a Monitor (a smoke/dry-run, or you are re-attaching after the
 Monitor already exists), add the token ${ENV_OVERRIDE} to your reply, or set ${ENV_OVERRIDE}=1.`;
@@ -132,7 +137,8 @@ was given to Russell this session.
 
 Russell's rule (2026-07-16): "when you create a monitor you must give me a link." A chat-only
 Monitor isn't enough — Russell wants a URL he can open to WATCH the run: a served watch page
-(e.g. http://localhost:PORT/....html) or a *-live.html watch page.
+(e.g. http://localhost:PORT/....html) or a *-live.html watch page. The page MUST be built from the
+STANDARD template (~/.claude/skills/live-watch/watch-template.html, CONFIG edited only) — not hand-rolled.
 
 Give Russell the watch link, then stop. Escape: ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
 
