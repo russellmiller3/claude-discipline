@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { evaluate, reachableSharedLibs } from './check-runner-logger-before-build.mjs';
+import { evaluate, reachableSharedLibs, looksLikeExperiment } from './check-runner-logger-before-build.mjs';
 
 let passed = 0;
 function test(name, runCase) { runCase(); passed++; console.log(`  ✓ ${name}`); }
@@ -25,7 +25,56 @@ test('blocks on two MEDIUM signal families (retry + concurrency)', () => {
   assert.ok(Array.isArray(verdict.matched) && verdict.matched.length >= 2);
 });
 
+test('blocks a plain experiment script by NAME alone (no infra vocabulary at all)', () => {
+  const filePath = 'C:/Users/rmill/Desktop/programming/legible/scripts/exp96_train.py';
+  const content = 'model = build_model()\nresult = model(x)\nprint(result)\n';
+  const verdict = evaluate({ toolName: 'Write', filePath, content, hasSiblingLib: true });
+  assert.equal(verdict.block, true);
+});
+
+test('blocks a runpod_exp launcher by NAME alone', () => {
+  const filePath = 'C:/Users/rmill/Desktop/programming/legible/scripts/runpod_exp96.py';
+  const content = 'print("launching")\n';
+  assert.equal(evaluate({ toolName: 'Write', filePath, content, hasSiblingLib: true }).block, true);
+});
+
+test('blocks on experiment CONTENT signals (train + checkpoint + epoch) with a generic name', () => {
+  const filePath = 'C:/Users/rmill/Desktop/programming/legible/scripts/model_runner.py';
+  const content = 'def train(model):\n    for epoch in range(10):\n        save_checkpoint(model)\n';
+  const verdict = evaluate({ toolName: 'Write', filePath, content, hasSiblingLib: true });
+  assert.equal(verdict.block, true);
+  assert.ok(verdict.matched.some((m) => m.includes('experiment-file-identity')));
+});
+
+test('looksLikeExperiment: true for exp<N> path convention', () => {
+  assert.equal(looksLikeExperiment('scripts/exp105_train.py', ''), true);
+});
+
+test('looksLikeExperiment: false for an unrelated helper with < 2 content signals', () => {
+  assert.equal(looksLikeExperiment('scripts/utils.py', 'def epoch_label(): pass\n'), false);
+});
+
 // ---- true negatives (PASS) --------------------------------------------------
+
+test('passes an experiment-named file that ALREADY imports runner/Logger', () => {
+  const filePath = 'C:/Users/rmill/Desktop/programming/legible/scripts/exp96_train.py';
+  const content = 'from runner import TrainingLifecycle\nfrom logger import StructuredLogger\ndef train(model):\n    pass\n';
+  assert.equal(evaluate({ toolName: 'Write', filePath, content, hasSiblingLib: true }).block, false);
+});
+
+test('passes an experiment-named file with the override token', () => {
+  const filePath = 'C:/Users/rmill/Desktop/programming/legible/scripts/exp96_train.py';
+  const content = '# runner-logger-checked: uses shared TrainingLifecycle via a helper module\ndef train(model):\n    pass\n';
+  assert.equal(evaluate({ toolName: 'Write', filePath, content, hasSiblingLib: true }).block, false);
+});
+
+test('passes an experiment-named file when no sibling lib is reachable', () => {
+  const filePath = 'C:/somewhere/unrelated/exp1_train.py';
+  const content = 'def train(model):\n    pass\n';
+  assert.equal(evaluate({ toolName: 'Write', filePath, content, hasSiblingLib: false }).block, false);
+});
+
+
 
 test('passes when the file REUSES runner (import from runner)', () => {
   const content = 'from runner import Runner, TelemetryRecorder\nwith ThreadPoolExecutor() as p:\n    pass\n';

@@ -23,12 +23,27 @@
 // HOW IT WORKS
 // ============
 // Fires PreToolUse on Write. When a NEW source file under a `programming/`
-// project (one whose tree contains a sibling `runner/` or `Logger/`) reads like
-// reusable infrastructure (concurrency/retry/pod/telemetry/logging signals) AND
-// shows no sign of actually reusing runner/Logger, it BLOCKS with
-// permissionDecision:'deny'. The fix is literal: open the repo, read the README,
-// grep for the capability — THEN, if it's genuinely domain-specific glue, add
-// the `runner-logger-checked` token (in a comment) and Write again.
+// project (one whose tree contains a sibling `runner/` or `Logger/`) EITHER
+// (a) reads like reusable infrastructure (concurrency/retry/pod/telemetry/
+// logging signals), OR (b) IS an experiment script by identity (naming
+// convention like exp<N>/runpod_exp<N>/modal_*.py, or trains a model / drives
+// a GPU pod job) — AND shows no sign of actually reusing runner/Logger — it
+// BLOCKS with permissionDecision:'deny'. The fix is literal: open the repo,
+// read the README, grep for the capability — THEN, if it's genuinely
+// domain-specific glue, add the `runner-logger-checked` token (in a comment)
+// and Write again.
+//
+// EXTENDED 2026-07-16 (Russell, verbatim: "for any experiment to use Runner
+// and Logger... inspect any experiment to confirm their usage or otherwise
+// block"): the original signal set only caught files that SMELLED like
+// hand-rolled infra (ThreadPoolExecutor, retry loops, etc). A plain experiment
+// script that just trains a model or launches a pod with none of that
+// vocabulary sailed through untouched, even though the whole point is that
+// EVERY experiment routes through Runner (retry/resume/pulses/telemetry/
+// TrainingLifecycle) and Logger (structured+redacted logging) — see
+// `~/.claude/CLAUDE.md` "Check Runner + Logger BEFORE building ANY infra".
+// Added a second, independent detector keyed on EXPERIMENT IDENTITY (not
+// vocabulary smell) so a clean-looking experiment script still gets checked.
 //
 // TEETH: permissionDecision 'deny'. Escape: `runner-logger-checked` in the file
 // content, or CHECK_RUNNER_LOGGER_BEFORE_BUILD_OK=1 in env.
@@ -75,6 +90,28 @@ const MEDIUM_SIGNALS = [
   /live[_ -]?feed/i,
   /gpu[_ -]?(hourly|cost|pod)/i,
 ];
+
+// EXPERIMENT IDENTITY signals — this file IS an experiment (a training run, a
+// sweep, a GPU-pod job), independent of whether it happens to also read like
+// hand-rolled infra. Legible's convention: scripts/exp<N>_*.py,
+// scripts/runpod_exp<N>.py, scripts/modal_*.py. Path match alone is enough
+// (the naming convention IS the signal); otherwise TWO distinct content
+// families must match (mirrors the MEDIUM-signal threshold above).
+const EXPERIMENT_PATH = /(^|[\\/])(runpod|modal)_\w*\.py$|(^|[\\/])exp\d+[_.]|[_-]exp\d+([_.]|$)/i;
+const EXPERIMENT_CONTENT_SIGNALS = [
+  /\brunpod\b/i,
+  /\bmodal\b[^\n]{0,20}\brun\b/i,
+  /def\s+train\s*\(/,
+  /\.fit\(/,
+  /\bcuda\b/i,
+  /\bcheckpoint\b/i,
+  /\bepoch\b/i,
+];
+
+export function looksLikeExperiment(filePath, content) {
+  if (EXPERIMENT_PATH.test(filePath || '')) return true;
+  return EXPERIMENT_CONTENT_SIGNALS.filter((re) => re.test(content || '')).length >= 2;
+}
 
 // Evidence the file ALREADY reuses runner/Logger — if present, never block.
 // These include Runner's own exported classes: referencing them IS reuse.
@@ -133,12 +170,17 @@ export function evaluate({ toolName, filePath, content, hasSiblingLib }) {
 
   const strong = STRONG_SIGNALS.filter((re) => re.test(content));
   const medium = MEDIUM_SIGNALS.filter((re) => re.test(content));
-  const fires = strong.length >= 1 || medium.length >= 2;
+  const isExperiment = looksLikeExperiment(filePath, content);
+  const fires = strong.length >= 1 || medium.length >= 2 || isExperiment;
   if (!fires) return { block: false };
 
   return {
     block: true,
-    matched: [...strong.map((re) => re.source), ...medium.map((re) => re.source)].slice(0, 6),
+    matched: [
+      ...strong.map((re) => re.source),
+      ...medium.map((re) => re.source),
+      ...(isExperiment ? ['experiment-file-identity (name/train/pod signals)'] : []),
+    ].slice(0, 6),
   };
 }
 
@@ -161,8 +203,11 @@ function main() {
     const libs = reachableSharedLibs(dirname(resolve(filePath))) || ['runner', 'Logger'];
     const reason = `BUILD BLOCKED — check the shared libs BEFORE writing ${basename(filePath)}.
 
-This file reads like reusable infrastructure (matched: ${verdict.matched.join(', ')}) but shows no sign of
-reusing the shared plumbing. Reachable shared lib(s): ${libs.join(', ')}.
+This file reads like reusable infrastructure OR like an experiment script (matched: ${verdict.matched.join(', ')})
+but shows no sign of reusing the shared plumbing. Reachable shared lib(s): ${libs.join(', ')}.
+
+Every experiment routes through Runner (retry/resume/concurrency/pulses/TrainingLifecycle) and Logger
+(structured + redacted logging) — never hand-rolled equivalents.
 
 Do this FIRST (literally, not from memory):
   1. ls  programming/runner  &&  read its README.md ("Ownership rule")   ← retry/resume/concurrency/pulses/
