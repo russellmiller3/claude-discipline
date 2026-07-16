@@ -19,10 +19,12 @@
  * HOOK_DRY_OVERRIDE=1.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const OVERRIDE = /\bdry-reviewed\s*:/i;
+// The declaration a NEW hook must carry, proving its author swept the category index first (2026-07-15).
+const NEW_HOOK_CATEGORY = /new-hook-category\s*:/i;
 
 // Helpers that now live in lib/transcript.mjs. A hand-rolled `function <name>(` defining any of these,
 // in a hook that does NOT import the shared lib, is a DRY violation we block.
@@ -82,6 +84,38 @@ Override (a genuinely DISTINCT helper that only shares a name): add  dry-reviewe
 to the edit, or set HOOK_DRY_OVERRIDE=1.`;
 }
 
+// NEW-HOOK CATEGORY SWEEP (2026-07-15, Russell — after 20 overlapping hooks had to be consolidated 20->5).
+// A Write that CREATES a new hooks/*.mjs (the file doesn't exist yet) must declare which HOOKBOOK category it
+// belongs to — the mechanical "sweep before you add a sibling" that turns the create-hook skill's advisory Rule 0
+// into a hard step. Editing an EXISTING hook is exempt (an Edit, or a Write that overwrites): extending is the
+// path we WANT. Pure + exported for the test.
+export function evaluateNewHook({ toolName, fileExists, content }) {
+  if (toolName !== 'Write') return { block: false };   // only a Write can create a file; Edit/MultiEdit = extend
+  if (fileExists) return { block: false };             // overwriting an existing hook is not a NEW hook
+  const source = String(content || '');
+  if (OVERRIDE.test(source) || NEW_HOOK_CATEGORY.test(source)) return { block: false };
+  return { block: true };
+}
+
+function newHookDenial(filePath) {
+  const name = norm(filePath).split('/').pop() || 'this hook';
+  return `NEW HOOK — SWEEP THE EXISTING HOOKS FIRST (one hook per idea): "${name}".
+
+Russell's rule (2026-07-15, after 20 overlapping hooks had to be consolidated to 5): before ADDING a hook, scan
+the CATEGORY INDEX at the top of ~/.claude/hooks/HOOKBOOK.md — 16 categories covering all 113 hooks — and find the
+one this belongs to. If an existing hook in that category ALMOST covers it, EXTEND that hook; don't ship a sibling.
+
+Categories: Git safety · Git worktree/branch hygiene · Agent lifecycle · Bench/long-run · Code structure/quality ·
+Test/verify/root-cause · Build/dist freshness · Docs/explainer/spec sync · Learnings system · Meta (hook discipline) ·
+Session continuity · Output style/voice · Keep-executing · Process-discipline meta · Project-scoped · Control tower.
+
+Then prove you looked by putting this in the new hook's header comment:
+  new-hook-category: <category> — nearest existing hook is <X>; it does NOT cover this because <why>
+
+(A genuinely brand-new idea no category holds: same token with "new category: <name>".)
+Override: HOOK_DRY_OVERRIDE=1, or  dry-reviewed: <why>  in the content.`;
+}
+
 function main() {
   let event;
   try { event = JSON.parse(readFileSync(0, 'utf8') || '{}'); } catch { process.exit(0); }
@@ -97,16 +131,22 @@ function main() {
     || (Array.isArray(input.edits) ? input.edits.map((edit) => edit.new_string || '').join('\n') : '')
     || '';
 
-  const verdict = evaluateDry(content);
-  if (!verdict.block) process.exit(0);
-
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'deny',
-      permissionDecisionReason: denial(input.file_path || input.path, verdict.reimplemented),
-    },
+  const emitDeny = (permissionDecisionReason) => process.stdout.write(JSON.stringify({
+    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason },
   }));
+
+  // Check 1 — DRY: no re-implementing a shared-lib helper.
+  const verdict = evaluateDry(content);
+  if (verdict.block) { emitDeny(denial(input.file_path || input.path, verdict.reimplemented)); process.exit(0); }
+
+  // Check 2 — NEW-HOOK category sweep: a brand-new hook must declare its category.
+  let fileExists = false;
+  try { fileExists = existsSync(input.file_path || input.path); } catch { fileExists = false; }
+  if (evaluateNewHook({ toolName: event.tool_name, fileExists, content }).block) {
+    emitDeny(newHookDenial(input.file_path || input.path));
+    process.exit(0);
+  }
+
   process.exit(0);
 }
 

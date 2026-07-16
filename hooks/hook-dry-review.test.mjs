@@ -7,7 +7,7 @@ import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { isPolicedHookFile, evaluateDry } from './hook-dry-review.mjs';
+import { isPolicedHookFile, evaluateDry, evaluateNewHook } from './hook-dry-review.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const HOOK = join(here, 'hook-dry-review.mjs');
@@ -52,8 +52,21 @@ function runHook({ tool_name = 'Write', file_path, content, env = {} }) {
   ok(/transcript\.mjs/.test(hookOutput), 'e2e: denial points at the shared lib');
 }
 {
-  const hookOutput = runHook({ file_path: '/home/x/.claude/hooks/new-guard.mjs', content: "import { roleOf } from './lib/transcript.mjs';" });
-  ok(hookOutput.trim() === '', 'e2e: lib-importing hook is allowed (no output)');
+  // A NEW hook must pass BOTH gates: import the lib (DRY) AND declare its category (new-hook sweep).
+  const hookOutput = runHook({ file_path: '/home/x/.claude/hooks/new-guard.mjs', content: "// new-hook-category: Meta — nearest is hookbook-sync; this does something else\nimport { roleOf } from './lib/transcript.mjs';" });
+  ok(hookOutput.trim() === '', 'e2e: lib-importing hook WITH a category declaration is allowed (no output)');
+}
+
+// ── evaluateNewHook: the NEW-HOOK category sweep (2026-07-15) ─────────────────
+ok(evaluateNewHook({ toolName: 'Write', fileExists: false, content: '// a brand-new hook, no category declared' }).block, 'new hook Write with no category declaration blocks');
+ok(!evaluateNewHook({ toolName: 'Write', fileExists: false, content: '// new-hook-category: Git safety — nearest is no-write-to-main; different because X' }).block, 'new hook WITH a new-hook-category declaration passes');
+ok(!evaluateNewHook({ toolName: 'Write', fileExists: false, content: '// dry-reviewed: genuinely distinct' }).block, 'the dry-reviewed override passes the new-hook gate too');
+ok(!evaluateNewHook({ toolName: 'Write', fileExists: true, content: 'no category' }).block, 'a Write that OVERWRITES an existing hook is not a new hook -> passes');
+ok(!evaluateNewHook({ toolName: 'Edit', fileExists: false, content: 'no category' }).block, 'an Edit (extend path) is never gated by the new-hook sweep');
+{
+  const hookOutput = runHook({ file_path: '/home/x/.claude/hooks/brand-new-idea.mjs', content: 'export function main(){}' });
+  ok(/permissionDecision/.test(hookOutput) && /deny/.test(hookOutput), 'e2e: a brand-new hook with no category is denied');
+  ok(/SWEEP THE EXISTING HOOKS|new-hook-category/.test(hookOutput), 'e2e: the denial forces the category sweep');
 }
 {
   const hookOutput = runHook({ file_path: '/home/x/.claude/hooks/new-guard.mjs', content: 'function readTranscript(){}', env: { HOOK_DRY_OVERRIDE: '1' } });
