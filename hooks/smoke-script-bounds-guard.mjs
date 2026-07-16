@@ -21,6 +21,14 @@
  * match /smoke/i, any non-code extension. Deliberately narrow and high-signal by design — it
  * looks for evidence FOR smallness, not against it, so it can't be fooled by an absent bad sign.
  *
+ * ALSO EXEMPT (Russell, 2026-07-16): a plain DOM / browser / unit test that merely happens to be
+ * named like "smoke.mjs" — e.g. a jsdom test that loads an HTML file and asserts DOM/localStorage
+ * over a handful of fixed cases. Such a file has no training/eval loop and no large iterable, so
+ * "prove a small bound" is meaningless for it. Recognised by an import of jsdom, @testing-library,
+ * vitest, node:test, or (node:)assert. The teeth stay: the exemption is REFUSED if the same file
+ * also references training/eval vocabulary (train/epoch/dataset/batch/model iteration), so a real
+ * training smoke script that happens to `import assert` still has to prove its bound.
+ *
  * Override (rare — a smoke script that is genuinely bounded some other way, e.g. wall-clock
  * self-timeout): set SMOKE_BOUNDS_GUARD_OVERRIDE=1 in env.
  * Fail-open on any internal error — never brick a legitimate Write.
@@ -45,6 +53,26 @@ const BOUND_CEILING = 20;
 // literal number (e.g. slicing a returned collection down inline).
 const MONKEYPATCH_CAP = /=\s*lambda[^\n]*\[\s*:\s*[0-9]{1,3}\s*\]/i;
 const WALLCLOCK_SELFGUARD = /\b(?:timeout|deadline|max_seconds|time\.monotonic\(\)\s*-|elapsed\s*[<>])\b/i;
+
+// A DOM / browser / unit test imports one of these — jsdom, @testing-library/*, vitest, node:test,
+// or (node:)assert. Matched only in an import/require position so a stray "assert" string elsewhere
+// doesn't trip it. Presence of any of these marks the file as a unit test, not a training probe.
+const UNIT_TEST_MODULE = /(?:\bfrom\s+|\brequire\s*\(\s*|\bimport\s+)['"](?:jsdom|@testing-library\/[\w.-]+|vitest|node:test|node:assert(?:\/strict)?|assert)['"]/i;
+// ML training / eval vocabulary. If a smoke file names any of these it is NOT a plain DOM/unit test
+// and keeps the guard's teeth even if it also imports assert — a real training smoke that uses
+// node:assert must still prove its bound. `model.<method>` catches "model iteration" without
+// flagging a bare `model` variable common in web code.
+const TRAINING_SIGNAL = /\b(?:train(?:ing|er|s)?|epochs?|datasets?|dataloaders?|batch(?:es)?|minibatch|fine[-_]?tun\w*|eval(?:uate|uation|s)?|checkpoint\w*|gradients?|optimi[sz]ers?|backprop\w*|backward|max_epochs|max_steps|num_steps|steps_per_epoch|n_epochs)\b|\bmodel\s*\.\s*\w+/i;
+
+// True when the file is clearly a DOM/browser/unit test (imports a unit-test module) and shows NO
+// training/eval vocabulary — the case where "prove a small bound" is meaningless and the guard
+// must step aside. False for a training smoke script even if it imports assert.
+export function isUnitOrDomTest(scriptContent) {
+	const source = String(scriptContent || '');
+	if (!UNIT_TEST_MODULE.test(source)) return false;
+	if (TRAINING_SIGNAL.test(source)) return false;
+	return true;
+}
 
 export function hasExplicitSmallBound(scriptContent) {
 	const source = String(scriptContent || '');
@@ -77,6 +105,9 @@ function main() {
 	if (!isSmokeScript(filePath)) process.exit(0);
 
 	const scriptContent = event.tool_input?.content || '';
+	// A plain DOM/browser/unit test named like "smoke" has no bound to prove — step aside (unless it
+	// also talks training/eval, in which case keep the teeth). Fail-open on any error.
+	try { if (isUnitOrDomTest(scriptContent)) process.exit(0); } catch { process.exit(0); }
 	let bounded;
 	try { bounded = hasExplicitSmallBound(scriptContent); } catch { process.exit(0); } // fail-open
 	if (bounded) process.exit(0);
