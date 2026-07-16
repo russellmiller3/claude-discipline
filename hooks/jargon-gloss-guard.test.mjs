@@ -33,6 +33,29 @@ function runHook(transcriptPath, env = {}) {
   });
 }
 
+/**
+ * A MULTI-TURN transcript: each turn is a real human prompt followed by an assistant reply
+ * (optionally with tool_use blocks). The LAST turn is "the current turn" the hook judges; every
+ * earlier turn is prior-session history the session-memory scan should be able to see.
+ */
+function writeMultiTurnTranscript(turns) {
+  const transcriptPath = join(mkdtempSync(join(tmpdir(), 'jargon-transcript-')), 'transcript.jsonl');
+  const body = turns
+    .map((turn) => {
+      const assistantContent = [{ type: 'text', text: turn.assistantText }];
+      for (const toolUse of turn.toolUses || []) {
+        assistantContent.push({ type: 'tool_use', name: toolUse.name, input: toolUse.input });
+      }
+      return (
+        jsonLine({ message: { role: 'user', content: turn.userText || 'go on' } }) +
+        jsonLine({ message: { role: 'assistant', content: assistantContent } })
+      );
+    })
+    .join('');
+  writeFileSync(transcriptPath, body, 'utf8');
+  return transcriptPath;
+}
+
 test('blocks when jargon appears with no gloss nearby', () => {
   const transcriptPath = writeTranscript({
     assistantText: 'The pretrained arm used BCE loss on outcome labels, which is why it failed.',
@@ -151,4 +174,98 @@ test('a reply with no jargon at all passes untouched', () => {
 
   assert.equal(hookRun.status, 0);
   assert.equal(hookRun.stdout, '');
+});
+
+// ── SESSION MEMORY (2026-07-15) ─────────────────────────────────────────────
+// Before this fix, a term glossed several turns ago got flagged all over again the moment it was
+// reused without a fresh gloss — forcing the same override every few turns for jargon Russell had
+// already seen explained. These tests lock in the fix.
+
+test('SESSION MEMORY: term glossed earlier this session is not re-flagged when reused unglossed later', () => {
+  const transcriptPath = writeMultiTurnTranscript([
+    {
+      userText: 'why did the run fail',
+      assistantText: 'It used a checkpoint (a saved snapshot of the model\'s weights partway through training) from an old run.',
+    },
+    {
+      userText: 'and then what happened',
+      assistantText: 'We loaded that checkpoint and kept going from there, no other changes.',
+    },
+  ]);
+  const hookRun = runHook(transcriptPath);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '', 'a term glossed in an earlier turn should not block a later reply that reuses it');
+});
+
+test('SESSION MEMORY: a term never glossed before still blocks (existing behavior preserved)', () => {
+  const transcriptPath = writeMultiTurnTranscript([
+    {
+      userText: 'what happened on the first run',
+      assistantText: 'The first run just set up the folders, nothing technical to report yet.',
+    },
+    {
+      userText: 'and the second run',
+      assistantText: 'We loaded a checkpoint and kept going from there, no other changes.',
+    },
+  ]);
+  const hookRun = runHook(transcriptPath);
+
+  assert.equal(hookRun.status, 0);
+  const hookOutput = JSON.parse(hookRun.stdout);
+  assert.equal(hookOutput.decision, 'block');
+  assert.match(hookOutput.reason, /checkpoint/);
+});
+
+test('SESSION MEMORY: override granted earlier this session for a term is not re-blocked later', () => {
+  const transcriptPath = writeMultiTurnTranscript([
+    {
+      userText: 'why did the run fail',
+      assistantText: 'It used a checkpoint from an old run. jargon-gloss override: already walked through checkpoints earlier today.',
+    },
+    {
+      userText: 'and then what happened',
+      assistantText: 'We loaded that checkpoint and kept going from there, no other changes.',
+    },
+  ]);
+  const hookRun = runHook(transcriptPath);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '', 'a term covered by an earlier override should stay exempt for the rest of the session');
+});
+
+test('SESSION MEMORY: Russell using the term himself in an earlier message exempts it later', () => {
+  const transcriptPath = writeMultiTurnTranscript([
+    {
+      userText: 'just resume from the last checkpoint, I know what that is',
+      assistantText: 'Got it, resuming now.',
+    },
+    {
+      userText: 'ok what happened',
+      assistantText: 'We loaded the checkpoint and kept going from there, no other changes.',
+    },
+  ]);
+  const hookRun = runHook(transcriptPath);
+
+  assert.equal(hookRun.status, 0);
+  assert.equal(hookRun.stdout, '', 'a term Russell already used himself should not need a gloss later');
+});
+
+test('SESSION MEMORY: a genuinely NEW term introduced later in a long session still blocks', () => {
+  const transcriptPath = writeMultiTurnTranscript([
+    {
+      userText: 'why did the run fail',
+      assistantText: 'It used a checkpoint (a saved snapshot of the model\'s weights partway through training) from an old run.',
+    },
+    {
+      userText: 'ok, and what about the second issue',
+      assistantText: 'Separately, the trained model solves zero percent because its argmax lands on the wrong answer.',
+    },
+  ]);
+  const hookRun = runHook(transcriptPath);
+
+  assert.equal(hookRun.status, 0);
+  const hookOutput = JSON.parse(hookRun.stdout);
+  assert.equal(hookOutput.decision, 'block');
+  assert.match(hookOutput.reason, /argmax/, 'a term never glossed before (argmax) must still block, even though an unrelated term (checkpoint) was already glossed this session');
 });

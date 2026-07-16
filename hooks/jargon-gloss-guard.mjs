@@ -16,8 +16,22 @@
  * follow, need to follow hook no jargon. fix hook"). Only checks the FIRST occurrence of each term
  * per reply — once glossed, later mentions are fine. Skips any term the "Already known ... :"
  * reminder line lists (dynamically read from the transcript, e.g. "embedding").
+ *
+ * SESSION MEMORY (2026-07-15): the checks above are all CURRENT-TURN-ONLY, so a term glossed two
+ * turns ago got flagged all over again the moment it was reused without a fresh gloss — forcing
+ * the same override every few turns for jargon Russell had already seen explained, defeating the
+ * point (avoid re-explaining terms he already has). Fixed by scanning every PRIOR turn this
+ * session (everything before the current turn's human prompt) for evidence a term is already
+ * known: it was glossed once before (same GLOSS_MARKERS check, applied to earlier assistant
+ * replies), an explicit `jargon-gloss override:` was already granted in a reply that used that
+ * term, or Russell's own message already used the term himself. Any of those exempts the term for
+ * the REST of the session — this is additive to (not a replacement for) the "Already known ...:"
+ * reminder-line mechanism. Known limitation: this does not detect a materially different technical
+ * sense of the same word reused later (e.g. "checkpoint" as a save-point vs. a literal border
+ * checkpoint) — exact-term matching only, same as the rest of this hook.
  */
 import { readFileSync, existsSync } from 'node:fs';
+import { readTranscript, roleOf, contentBlocks, currentTurnEntries, lastAssistantText as lastAssistantTextOfEntries } from './lib/transcript.mjs';
 
 const CODE_EXTENSIONS = /\.(go|rs|js|ts|jsx|tsx|py|rb|java|kt|swift|c|cpp|h|cs|ex|exs|ml|hs|clj|scala|lua|php|sh|bash|mjs|cjs)$/i;
 const DOC_PATHS = /\.(md|txt|json|toml|yaml|yml|html?|css|svg)$/i;
@@ -69,12 +83,16 @@ function sentencesOf(replyText) {
   return replyText.split(/(?<=[.!?])\s+|\n+/).filter(Boolean);
 }
 
+/** Word-boundary, case-insensitive regex for a jargon term (escapes regex metacharacters once). */
+function termRegex(term) {
+  return new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+}
+
 function findUnglossedTerm(replyText, alreadyKnownTerms) {
   const sentences = sentencesOf(replyText);
   for (const term of JARGON_TERMS) {
     if (alreadyKnownTerms.has(term.toLowerCase())) continue;
-    const termPattern = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-    const sentenceIndex = sentences.findIndex((sentence) => termPattern.test(sentence));
+    const sentenceIndex = sentences.findIndex((sentence) => termRegex(term).test(sentence));
     if (sentenceIndex === -1) continue; // term not used this reply
 
     const nearbyText = sentences.slice(sentenceIndex, sentenceIndex + 2).join(' ');
@@ -82,6 +100,56 @@ function findUnglossedTerm(replyText, alreadyKnownTerms) {
     if (!isGlossed) return term;
   }
   return null;
+}
+
+/** Only the plain-text blocks of an entry (skip tool_use/tool_result — those aren't Russell's or
+ * Claude's own words, and tool output could accidentally contain a jargon word and falsely
+ * "teach" it to the session-memory scanner below). */
+function textBlocksOf(entry) {
+  return contentBlocks(entry)
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('\n');
+}
+
+/**
+ * Scan every entry BEFORE the current turn for evidence a jargon term is already known to
+ * Russell this session, so it doesn't need re-glossing:
+ *   - an earlier ASSISTANT reply glossed the term (same GLOSS_MARKERS check as findUnglossedTerm)
+ *   - an earlier ASSISTANT reply used `jargon-gloss override:` AND that reply used the term
+ *     (the override was granted for that term, even without a fresh gloss next to it)
+ *   - an earlier USER (Russell's own) message used the term at all — if he wrote it, he knows it
+ * Returns a Set of lowercased terms exempt for the rest of the session.
+ */
+function extractSessionKnownTerms(priorEntries) {
+  const known = new Set();
+  for (const entry of priorEntries) {
+    const role = roleOf(entry);
+    if (role !== 'assistant' && role !== 'user') continue;
+    const spokenWords = textBlocksOf(entry);
+    if (!spokenWords) continue;
+
+    if (role === 'assistant') {
+      const hasOverride = /jargon-gloss override:/i.test(spokenWords);
+      const sentences = sentencesOf(spokenWords);
+      for (const term of JARGON_TERMS) {
+        const key = term.toLowerCase();
+        if (known.has(key)) continue;
+        const sentenceIndex = sentences.findIndex((sentence) => termRegex(term).test(sentence));
+        if (sentenceIndex === -1) continue; // term not used in this earlier reply
+        const nearbyText = sentences.slice(sentenceIndex, sentenceIndex + 2).join(' ');
+        const isGlossed = GLOSS_MARKERS.some((marker) => marker.test(nearbyText));
+        if (isGlossed || hasOverride) known.add(key);
+      }
+    } else {
+      for (const term of JARGON_TERMS) {
+        const key = term.toLowerCase();
+        if (known.has(key)) continue;
+        if (termRegex(term).test(spokenWords)) known.add(key);
+      }
+    }
+  }
+  return known;
 }
 
 function main() {
@@ -106,45 +174,24 @@ function main() {
   if (!transcriptText) process.exit(0);
   if (process.env.JARGON_GLOSS_OVERRIDE === '1') process.exit(0);
 
-  const lines = transcriptText.split('\n').filter(Boolean);
-  let lastAssistantText = '';
+  const allEntries = readTranscript(transcriptPath);
+  const currentEntries = currentTurnEntries(allEntries);
+  if (currentEntries.length === 0) process.exit(0); // no assistant reply yet
+
+  const lastAssistantText = lastAssistantTextOfEntries(currentEntries);
+  if (!lastAssistantText.trim()) process.exit(0);
+
   let codeWasWritten = false;
-  let inCurrentTurn = false;
-
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let entry;
-    try { entry = JSON.parse(lines[i]); } catch { continue; }
-    const role = entry.message?.role || entry.role;
-    const content = entry.message?.content || entry.content || [];
-
-    if (role === 'assistant' && !lastAssistantText) {
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          if (block?.type === 'text' && typeof block.text === 'string') lastAssistantText += block.text + '\n';
-          if (block?.type === 'tool_use' && (block.name === 'Write' || block.name === 'Edit')) {
-            if (isCodeFile(block.input?.file_path || '')) codeWasWritten = true;
-          }
-        }
-      } else if (typeof content === 'string') {
-        lastAssistantText = content;
+  for (const entry of currentEntries) {
+    if (roleOf(entry) !== 'assistant') continue;
+    for (const toolUse of contentBlocks(entry)) {
+      if (toolUse?.type !== 'tool_use') continue;
+      if ((toolUse.name === 'Write' || toolUse.name === 'Edit') && isCodeFile(toolUse.input?.file_path || '')) {
+        codeWasWritten = true;
       }
-      inCurrentTurn = true;
-      continue;
-    }
-
-    if (inCurrentTurn) {
-      if (role === 'assistant' && Array.isArray(content)) {
-        for (const block of content) {
-          if (block?.type === 'tool_use' && (block.name === 'Write' || block.name === 'Edit')) {
-            if (isCodeFile(block.input?.file_path || '')) codeWasWritten = true;
-          }
-        }
-      }
-      if (role === 'user') break;
     }
   }
 
-  if (!lastAssistantText.trim()) process.exit(0);
   // The gloss rule is ALWAYS on (Russell's output style). But a terse coding status beat
   // ("wired the loss into the loop") isn't where jargon-walls happen — a long EXPLANATION is.
   // So on a turn that also wrote code, only check when the final message is substantial. A
@@ -154,8 +201,14 @@ function main() {
   if (codeWasWritten && wordCount < CODE_TURN_EXPLANATION_MIN_WORDS) process.exit(0);
   if (/jargon-gloss override:/i.test(lastAssistantText)) process.exit(0);
 
+  // Prior-session evidence (glossed once already / override already granted for this term /
+  // Russell himself already used the term) is everything BEFORE the current turn started.
+  const priorEntries = allEntries.slice(0, allEntries.length - currentEntries.length);
+  const sessionKnownTerms = extractSessionKnownTerms(priorEntries);
+
   const alreadyKnownTerms = extractAlreadyKnownTerms(transcriptText);
-  const unglossedTerm = findUnglossedTerm(lastAssistantText, alreadyKnownTerms);
+  const exemptTerms = new Set([...alreadyKnownTerms, ...sessionKnownTerms]);
+  const unglossedTerm = findUnglossedTerm(lastAssistantText, exemptTerms);
   if (!unglossedTerm) process.exit(0);
 
   const reason =
