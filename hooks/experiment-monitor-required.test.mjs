@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isLaunchCommand, evaluate } from './experiment-monitor-required.mjs';
+import { isLaunchCommand, isTrainingLaunch, evaluate } from './experiment-monitor-required.mjs';
 
 // ── transcript builders ──────────────────────────────────────────────────────
 const bash = (command) => ({ role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: { command } }] });
@@ -155,6 +155,62 @@ test('Stop: BLOCK when launch+monitor+link but no interim stream at Stop', () =>
   assert.equal(verdict.block, true);
   assert.equal(verdict.mode, 'stop');
   assert.match(verdict.reason, /interim|stream|trial data/i);
+});
+
+// ── Checkpoint setup required on a TRAINING launch (Russell 2026-07-17) ──────
+const TRAIN = 'python scripts/run_exp154_full_seed.py --seed 7 --decision-epochs 25';
+const TRAIN_WITH_CHECKPOINT = TRAIN + ' --checkpoint-every-steps 50';
+// a prior tool-use that wires step-level checkpointing into the trainer
+const checkpointWiring = () => bash('grep -n checkpoint_if_due scripts/train_exp153_bundles.py');
+
+test('isTrainingLaunch: a full-seed training launch is a training launch', () => {
+  assert.equal(isTrainingLaunch(TRAIN), true);
+  assert.equal(isTrainingLaunch('python runpod_exp154.py launch --decision-epochs 25'), true);
+});
+test('isTrainingLaunch: a race / eval launch is NOT a training launch', () => {
+  assert.equal(isTrainingLaunch('python exp153_bundle_race.py --bundle-root x'), false);
+  assert.equal(isTrainingLaunch('python runpod_exp153.py launch --rows --gate'), false);
+});
+test('isTrainingLaunch: a capacity smoke is NOT a training launch (10 steps, no durable ckpt)', () => {
+  assert.equal(isTrainingLaunch('python scripts/run_exp154_full_seed.py --capacity-smoke --max-steps 10'), false);
+});
+test('isTrainingLaunch: running the trainer TEST file is NOT a training launch', () => {
+  assert.equal(isTrainingLaunch('python -m pytest scripts/test_train_exp153_bundles.py -q'), false);
+});
+test('isTrainingLaunch: finalize / reads are NOT training launches', () => {
+  assert.equal(isTrainingLaunch('python runpod_exp154.py finalize'), false);
+  assert.equal(isTrainingLaunch('cat scripts/run_exp154_full_seed.py'), false);
+  assert.equal(isTrainingLaunch(''), false);
+});
+
+test('PreToolUse: DENY a training launch with a monitor+interim but NO checkpoint setup', () => {
+  const verdict = evaluate({ event: 'PreToolUse', command: TRAIN, entries: [monitor(), stream()] });
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.mode, 'deny');
+  assert.match(verdict.reason, /checkpoint/i);
+});
+test('PreToolUse: ALLOW a training launch that carries a checkpoint flag', () => {
+  const verdict = evaluate({ event: 'PreToolUse', command: TRAIN_WITH_CHECKPOINT, entries: [monitor(), stream()] });
+  assert.equal(verdict.block, false);
+});
+test('PreToolUse: ALLOW a training launch when a prior tool-use wired checkpointing', () => {
+  const verdict = evaluate({ event: 'PreToolUse', command: TRAIN, entries: [checkpointWiring(), monitor(), stream()] });
+  assert.equal(verdict.block, false);
+});
+test('PreToolUse: a NON-training launch is not checkpoint-gated (race/eval)', () => {
+  // runpod_exp153 launch is not training → checkpoint check skipped; monitor+interim still required
+  const verdict = evaluate({ event: 'PreToolUse', command: LAUNCH, entries: [monitor(), stream()] });
+  assert.equal(verdict.block, false);
+});
+test('Stop: BLOCK a training launch that ran with no checkpoint setup', () => {
+  const verdict = evaluate({ event: 'Stop', entries: [bash(TRAIN), monitor(), stream(), liveness(), say(LINK)] });
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.mode, 'stop');
+  assert.match(verdict.reason, /checkpoint/i);
+});
+test('Stop: ALLOW a training launch with checkpoint setup wired', () => {
+  const verdict = evaluate({ event: 'Stop', entries: [checkpointWiring(), bash(TRAIN), monitor(), stream(), liveness(), say(LINK)] });
+  assert.equal(verdict.block, false);
 });
 
 // ── Stop: JOB-liveness required, not just pod status (Russell 2026-07-17, the $13 bleed) ──

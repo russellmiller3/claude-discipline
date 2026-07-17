@@ -82,6 +82,21 @@ const PYTHON_MODAL = /\b(?:python[0-9.]*|py)\b[\s\S]*\bmodal_\w*\.py\b/;
 // and the finalize/teardown step (which runs AFTER a launch, not a new launch).
 const NOT_A_LAUNCH = /\bfinalize\b|--help\b|(?:^|\s)-h(?:\s|$)|--dry-run\b|--smoke\b|--check\b|--list\b/;
 
+// Russell's rule (2026-07-17): "experiment hook should block launching without checkpoint
+// setup." A TRAINING launch (long, paid, stateful) that isn't wired for step-level
+// checkpointing loses ALL in-progress work to a crash / network hiccup / preempted pod.
+// A TRAINING launch = a python run of a full-seed / train_* script, OR a launcher launch
+// carrying a real training marker (--decision-epochs / --mask-steps / full-seed). It is NOT
+// a race/eval launch (nothing to checkpoint), a 10-step capacity/overfit smoke, a pytest run
+// of a test_*.py, or finalize/reads.
+const TRAINING_SCRIPT_RE = /(?:^|[\/\\\s])(?:run_\w*_full_seed|train_\w+)\.py\b/;
+const PYTEST_RE = /\bpytest\b|(?:^|[\/\\\s])test_\w+\.py\b/;
+const TRAINING_SMOKE_RE = /--capacity[_-]?smoke\b|\boverfit_smoke\b|--max-steps\s+\d\b/i;
+const LAUNCH_TRAINING_MARKER = /full[_-]seed|--decision-epochs|--mask-steps/i;
+// Evidence that step-level checkpointing IS wired: a checkpoint flag on the launch, the
+// Runner checkpoint-cadence API, a resume flag, or a persistent-volume checkpoint target.
+const CHECKPOINT_SETUP_RE = /checkpoint_if_due|CheckpointPolicy|CheckpointCadence|resume_step|publish_checkpoint|--checkpoint[_-]?(?:every|steps|interval|seconds)|checkpoint[_-]?every[_-]?steps|--resume\b|network[_-]?volume/i;
+
 /**
  * True when a Bash command actually STARTS an experiment/pod/training run.
  * Precise on purpose: excludes finalize/help/dry-run/smoke/check/list and plain
@@ -91,6 +106,23 @@ export function isLaunchCommand(command) {
   if (!command || typeof command !== 'string') return false;
   if (NOT_A_LAUNCH.test(command)) return false;
   return RUNPOD_LAUNCH.test(command) || MODAL_RUN.test(command) || PYTHON_MODAL.test(command);
+}
+
+/**
+ * True when a command STARTS a real model-TRAINING run — the thing that must be wired
+ * for step-level checkpointing. Excludes race/eval launches (nothing to checkpoint), a
+ * 10-step capacity/overfit smoke, a pytest run of a test_*.py, and finalize/reads.
+ */
+export function isTrainingLaunch(command) {
+  if (!command || typeof command !== 'string') return false;
+  if (NOT_A_LAUNCH.test(command)) return false;
+  if (PYTEST_RE.test(command)) return false;         // running the trainer's tests, not training
+  if (TRAINING_SMOKE_RE.test(command)) return false; // a ~10-step smoke has nothing durable to save
+  // The interpreter as a COMMAND token (followed by args) — not the ".py" file extension,
+  // so `cat run_x_full_seed.py` (the "py" in ".py") never counts as running the trainer.
+  const runsTrainingScript = /(?:^|\s)(?:python[0-9.]*|py)\s+/.test(command) && TRAINING_SCRIPT_RE.test(command);
+  const launchesTraining = isLaunchCommand(command) && LAUNCH_TRAINING_MARKER.test(command);
+  return runsTrainingScript || launchesTraining;
 }
 
 // Flatten a transcript into its tool-uses in order: [{ name, command }]. `command`
@@ -195,6 +227,23 @@ A pod \`desiredStatus\`/\`get pod\` check does NOT satisfy this — that is exac
 
 Escape (the run already finished / genuinely can't be probed): ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
 
+const NO_CHECKPOINT_REASON = `TRAINING LAUNCH WITHOUT CHECKPOINT SETUP — a paid training run is starting but nothing
+saves its progress mid-run.
+
+Russell's rule (2026-07-17): "the experiment hook should block launching without checkpoint setup."
+A long training run that only saves at the end loses EVERYTHING to a crash, a network hiccup, or a
+preempted spot pod — the exact in-progress-seed loss step-level checkpointing exists to stop.
+
+Runner already owns the durable pieces — wire them in before launching:
+  1. In the training loop, checkpoint on a cadence:
+     CheckpointPolicy(every_steps=N, every_seconds=T) + lifecycle.checkpoint_if_due(step=..., cadence=...)
+     (the time cadence is the network-hiccup safety net — a slow-step run still rescues on a wall clock).
+  2. On relaunch, resume_step(lifecycle, identity) restarts one past the last verified checkpoint.
+  3. Point checkpoints at a persistent Network Volume (survives pod death), not the pod's ephemeral disk.
+Then pass the checkpoint knobs on the launch (e.g. --checkpoint-every-steps N) so this run is durable.
+
+Escape (a genuinely un-checkpointable run, or a short bounded run): ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
+
 // Shared: does any run this session stream interim trial data home? (a refresher/feeder that
 // pulls or writes the live/think JSONL the dashboard reads). Russell's rule, 2026-07-17.
 function streamsInterimData(toolUses) {
@@ -208,6 +257,15 @@ function probesJobLiveness(toolUses) {
   return (toolUses || []).some((toolUse) => JOB_LIVENESS_RE.test(toolUse?.command || ''));
 }
 
+// Shared: is step-level checkpointing wired for this training launch? Evidence in the launch
+// command itself, any tool-use command this session, or the assistant's reply text. Russell's
+// rule, 2026-07-17: a training launch without checkpoint setup loses everything to an interruption.
+function hasCheckpointSetup(toolUses, command, replyText) {
+  if (CHECKPOINT_SETUP_RE.test(command || '')) return true;
+  if (CHECKPOINT_SETUP_RE.test(replyText || '')) return true;
+  return (toolUses || []).some((toolUse) => CHECKPOINT_SETUP_RE.test(toolUse?.command || ''));
+}
+
 /**
  * PURE core. `entries` is the parsed transcript (array). Returns
  * { block, mode?, reason? }. Never throws on malformed input.
@@ -219,12 +277,18 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
   const toolUses = toolUsesInOrder(entries);
 
   if (event === 'PreToolUse') {
-    if (!isLaunchCommand(command)) return { block: false };
+    // Any launch OR a training-script run — a full-seed trainer isn't a runpod/modal launch
+    // but still needs a monitor, an interim stream, and checkpoint setup.
+    if (!isLaunchCommand(command) && !isTrainingLaunch(command)) return { block: false };
     const hasMonitor = toolUses.some((toolUse) => toolUse.name === MONITOR_TOOL);
     if (!hasMonitor) return { block: true, mode: 'deny', reason: DENY_REASON };
     // Monitor exists — but does interim trial data actually stream? (Russell 2026-07-17)
     if (!streamsInterimData(toolUses) && !INTERIM_STREAM_RE.test(command || '')) {
       return { block: true, mode: 'deny', reason: NO_INTERIM_REASON };
+    }
+    // A TRAINING launch must be wired for step-level checkpointing (Russell 2026-07-17).
+    if (isTrainingLaunch(command) && !hasCheckpointSetup(toolUses, command, replyText)) {
+      return { block: true, mode: 'deny', reason: NO_CHECKPOINT_REASON };
     }
     return { block: false };
   }
@@ -235,7 +299,9 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
     let lastMonitorIndex = -1;
     toolUses.forEach((toolUse, index) => {
       if (toolUse.name === MONITOR_TOOL) lastMonitorIndex = index;
-      if (toolUse.name === 'Bash' && isLaunchCommand(toolUse.command)) lastLaunchIndex = index;
+      if (toolUse.name === 'Bash' && (isLaunchCommand(toolUse.command) || isTrainingLaunch(toolUse.command))) {
+        lastLaunchIndex = index;
+      }
     });
     if (lastLaunchIndex < 0) return { block: false };
     if (lastMonitorIndex < lastLaunchIndex) {
@@ -249,6 +315,11 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
     if (!streamsInterimData(toolUses)) return { block: true, mode: 'stop', reason: NO_INTERIM_REASON };
     // And does anything probe JOB liveness (not just pod status)? (Russell 2026-07-17, the $13 bleed)
     if (!probesJobLiveness(toolUses)) return { block: true, mode: 'stop', reason: NO_JOB_LIVENESS_REASON };
+    // And if the launch was a TRAINING run, was step-level checkpointing wired? (Russell 2026-07-17)
+    const lastLaunchCommand = toolUses[lastLaunchIndex]?.command || '';
+    if (isTrainingLaunch(lastLaunchCommand) && !hasCheckpointSetup(toolUses, lastLaunchCommand, allAssistantText(entries))) {
+      return { block: true, mode: 'stop', reason: NO_CHECKPOINT_REASON };
+    }
     return { block: false };
   }
 

@@ -261,6 +261,13 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-17** — Five pod/experiment guardrails from a $13 OOM bleed: `pod-full-run-capacity-guard`
+  (a full-shape capacity smoke must prove the card before a full-training launch), `pod-teardown-rescue-guard`
+  (rescue results before a raw pod DELETE), `pod-cost-circuit-breaker` (mid-turn timer halts a paid pod up too
+  long with no fresh job-liveness probe), `main-task-focus-guard` (block drift from the recorded MAIN TASK).
+  `experiment-monitor-required` extended: now demands a *job*-liveness probe (not just pod status) AND blocks a
+  TRAINING launch that isn't wired for step-level checkpointing (a run that only saves at stage-freeze loses the
+  in-progress seed to a crash / network hiccup / preempted spot pod).
 - **2026-07-15** — `require-langdocs-read.mjs`'s external-API override is now sticky per file:
   previously the check only scanned the CURRENT edit's diff for the `api-docs-read:` token, so a
   file that already had it from an earlier accepted edit still re-blocked on every later edit
