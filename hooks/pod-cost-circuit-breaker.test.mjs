@@ -119,3 +119,32 @@ test('fails safe on malformed input', () => {
   assert.equal(evaluate({}).surface, false);
   assert.equal(evaluate({ event: 'PostToolUse', command: null, state: null, now: null }).surface, false);
 });
+
+// ── INTEGRATION must-not-over-fire: the real hook process stays SILENT on legit input ──
+// (proves the deny hook allows innocent Bash commands, not just that it blocks the bad ones)
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { rmSync } from 'node:fs';
+const HERE = dirname(fileURLToPath(import.meta.url));
+const HOOK = join(HERE, 'pod-cost-circuit-breaker.mjs');
+const TEST_STATE = join(HERE, '.pcb-test-state.json');
+function runHook(command, extraEnv) {
+  try { rmSync(TEST_STATE, { force: true }); } catch { /* fresh state */ }
+  const proc = spawnSync('node', [HOOK], {
+    input: JSON.stringify({ hook_event_name: 'PostToolUse', tool_input: { command } }),
+    encoding: 'utf8',
+    env: { ...process.env, POD_COST_BREAKER_STATE: TEST_STATE, ...(extraEnv || {}) },
+  });
+  return ((proc.stdout || '') + (proc.stderr || '')).trim();
+}
+test('integration: allows an innocent Bash command with no pod armed (does not over-fire)', () => {
+  assert.equal(runHook('git status --short'), ''); // no launch in state → nothing to block → silent
+});
+test('integration: allows the paid launch itself (arms the timer, no block)', () => {
+  assert.equal(runHook('python scripts/run_exp154_full_seed.py --decision-epochs 25'), '');
+});
+test('integration: env override keeps it silent', () => {
+  assert.equal(runHook('git status', { POD_COST_BREAKER_OK: '1' }), '');
+  try { rmSync(TEST_STATE, { force: true }); } catch { /* cleanup */ }
+});
