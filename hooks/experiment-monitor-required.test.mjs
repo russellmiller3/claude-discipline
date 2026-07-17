@@ -13,6 +13,8 @@ const monitor = () => ({ role: 'assistant', content: [{ type: 'tool_use', name: 
 const say = (text) => ({ role: 'assistant', content: [{ type: 'text', text }] });
 const LAUNCH = 'python runpod_exp153.py launch --rows --gate';
 const LINK = 'watch it live: http://localhost:8153/docs/exp153-3seed-live.html';
+// a refresher/feeder that streams interim trial data home (Russell 2026-07-17)
+const stream = () => bash('python scripts/exp153_live_refresher.py --pull runs/exp153_live.jsonl');
 
 // ── isLaunchCommand: precise detection, no false positives ───────────────────
 test('isLaunchCommand: runpod launch is a launch', () => {
@@ -55,10 +57,18 @@ test('PreToolUse: DENY launch when no Monitor exists yet', () => {
   assert.match(verdict.reason, /Monitor/);
 });
 
-// ── PreToolUse: ALLOW a launch when a Monitor precedes it ────────────────────
-test('PreToolUse: ALLOW launch when a Monitor precedes it', () => {
-  const verdict = evaluate({ event: 'PreToolUse', command: LAUNCH, entries: [monitor()] });
+// ── PreToolUse: ALLOW a launch when a Monitor AND an interim stream precede it ─
+test('PreToolUse: ALLOW launch when a Monitor + interim stream precede it', () => {
+  const verdict = evaluate({ event: 'PreToolUse', command: LAUNCH, entries: [monitor(), stream()] });
   assert.equal(verdict.block, false);
+});
+
+// ── PreToolUse: DENY a launch that has a Monitor but NO interim stream ─────────
+test('PreToolUse: DENY launch with a Monitor but no live interim stream', () => {
+  const verdict = evaluate({ event: 'PreToolUse', command: LAUNCH, entries: [monitor()] });
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.mode, 'deny');
+  assert.match(verdict.reason, /interim|stream|trial data/i);
 });
 
 // ── PreToolUse: do NOT fire on non-launch commands (finalize/help/reads) ──────
@@ -78,7 +88,7 @@ test('Stop: BLOCK when a launch happened and no Monitor followed it', () => {
   assert.equal(verdict.mode, 'stop');
 });
 test('Stop: ALLOW when a Monitor follows the last launch AND a watch link was given', () => {
-  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), say(LINK)] });
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), say(LINK)] });
   assert.equal(verdict.block, false);
 });
 
@@ -90,11 +100,11 @@ test('Stop: BLOCK when launch + Monitor but NO watch link was given', () => {
   assert.match(verdict.reason, /link/i);
 });
 test('Stop: ALLOW with a localhost link', () => {
-  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), say('open http://127.0.0.1:8153/docs/x.html')] });
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), say('open http://127.0.0.1:8153/docs/x.html')] });
   assert.equal(verdict.block, false);
 });
 test('Stop: ALLOW with a *-live.html watch page reference', () => {
-  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), say('see docs/exp153-race-live.html')] });
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), say('see docs/exp153-race-live.html')] });
   assert.equal(verdict.block, false);
 });
 test('Stop: no-link block does NOT fire when there was no launch', () => {
@@ -134,4 +144,13 @@ test('fails open on malformed/empty evaluate input', () => {
 });
 test('does not fire on unrelated events', () => {
   assert.equal(evaluate({ event: 'PostToolUse', command: LAUNCH, entries: [] }).block, false);
+});
+
+
+// ── Stop: BLOCK a launch+monitor+link that never streamed interim trial data ──
+test('Stop: BLOCK when launch+monitor+link but no interim stream at Stop', () => {
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), say(LINK)] });
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.mode, 'stop');
+  assert.match(verdict.reason, /interim|stream|trial data/i);
 });

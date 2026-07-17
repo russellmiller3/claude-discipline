@@ -52,6 +52,14 @@ const MONITOR_TOOL = 'Monitor';
 // watch page. Russell's rule (2026-07-16): a Monitor must come with a link.
 const LINK_RE = /(https?:\/\/\S+)|(?:localhost|127\.0\.0\.1):\d+|[\w.-]+-live\.html/i;
 
+// Russell's rule (2026-07-17, verbatim: "you're supposed to stream results and actual
+// data from trials i can watch. make that a rule ... SET IN EXPERIMENT HOOK"): a monitor
+// that shows no LIVE interim trial data is useless. Before a launch, evidence must exist
+// that interim data will stream home — a refresher/feeder that pulls or writes the live
+// and/or think JSONL the dashboard reads. Detected as any tool-use command referencing
+// the live/think feed or a refresher/feeder.
+const INTERIM_STREAM_RE = /_live\.jsonl|_think\.jsonl|live[_-]?refresher|live[_-]?feeder|--stream-interim|scp[\s\S]*(?:_live|_think)\.jsonl/i;
+
 // A launch is one of: a runpod launcher run with the `launch` verb; a `modal run`;
 // or a python invocation of a modal_*.py job script.
 // Forward order only — the runpod launcher is INVOKED then handed the `launch`
@@ -142,6 +150,31 @@ STANDARD template (~/.claude/skills/live-watch/watch-template.html, CONFIG edite
 
 Give Russell the watch link, then stop. Escape: ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
 
+const NO_INTERIM_REASON = `MONITOR STREAMS NO LIVE TRIAL DATA — the run will launch but nothing feeds the
+dashboard REAL interim results.
+
+Russell's rule (2026-07-17, verbatim): "you're supposed to stream results and actual data from
+trials i can watch. make that a rule." A monitor whose bars fill only at the END — or that shows
+status/0/null instead of real per-step trial data — is FORBIDDEN.
+
+Before launching, wire the interim stream:
+  1. The trainer must eval a fast SUBSAMPLE every ~25 steps and write a REAL metric to a
+     (pod-local, for remote) runs/<exp>_live.jsonl, AND emit think rows every ~100 steps with the
+     exact tool call, its result, right/wrong, and WHY-wrong (measured[].call/result/why — the
+     format the standard template now renders). A decode-gate-only metric computed at the end is NOT enough.
+  2. Start a REFRESHER (reference: marcus/scripts/exp153_live_refresher.py) that scp-pulls the
+     pod's <exp>_live.jsonl + <exp>_think.jsonl home continuously, so the served page shows the
+     numbers climbing live.
+
+If the trainer only scores at the end, fix THAT first (add the subsample eval + think emit).
+Escape (rare — a genuinely metric-less run): ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
+
+// Shared: does any run this session stream interim trial data home? (a refresher/feeder that
+// pulls or writes the live/think JSONL the dashboard reads). Russell's rule, 2026-07-17.
+function streamsInterimData(toolUses) {
+  return (toolUses || []).some((toolUse) => INTERIM_STREAM_RE.test(toolUse?.command || ''));
+}
+
 /**
  * PURE core. `entries` is the parsed transcript (array). Returns
  * { block, mode?, reason? }. Never throws on malformed input.
@@ -155,8 +188,12 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
   if (event === 'PreToolUse') {
     if (!isLaunchCommand(command)) return { block: false };
     const hasMonitor = toolUses.some((toolUse) => toolUse.name === MONITOR_TOOL);
-    if (hasMonitor) return { block: false };
-    return { block: true, mode: 'deny', reason: DENY_REASON };
+    if (!hasMonitor) return { block: true, mode: 'deny', reason: DENY_REASON };
+    // Monitor exists — but does interim trial data actually stream? (Russell 2026-07-17)
+    if (!streamsInterimData(toolUses) && !INTERIM_STREAM_RE.test(command || '')) {
+      return { block: true, mode: 'deny', reason: NO_INTERIM_REASON };
+    }
+    return { block: false };
   }
 
   if (event === 'Stop') {
@@ -175,6 +212,8 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
     if (!LINK_RE.test(allAssistantText(entries))) {
       return { block: true, mode: 'stop', reason: NO_LINK_REASON };
     }
+    // And does interim trial data actually stream home? (Russell 2026-07-17)
+    if (!streamsInterimData(toolUses)) return { block: true, mode: 'stop', reason: NO_INTERIM_REASON };
     return { block: false };
   }
 
