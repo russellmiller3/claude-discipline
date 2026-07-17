@@ -19,7 +19,8 @@
     "compass-line-guard":       [{ "event": "Stop", "timeout": 5 }],
     "husky-on-new-projects":    [{ "event": "SessionStart", "timeout": 5 }],
     "rebuild-after-commit":     [{ "event": "Stop", "timeout": 5 }],
-    "stamp-build-fingerprint":  [{ "event": "PostToolUse", "matcher": "Bash", "timeout": 5 }]
+    "stamp-build-fingerprint":  [{ "event": "PostToolUse", "matcher": "Bash", "timeout": 5 }],
+    "background-orphan-guard":  [{ "event": "PreToolUse", "matcher": "Bash", "timeout": 5 }]
   },
 
   "tier2_memory": {
