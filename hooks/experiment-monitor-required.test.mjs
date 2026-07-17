@@ -15,6 +15,8 @@ const LAUNCH = 'python runpod_exp153.py launch --rows --gate';
 const LINK = 'watch it live: http://localhost:8153/docs/exp153-3seed-live.html';
 // a refresher/feeder that streams interim trial data home (Russell 2026-07-17)
 const stream = () => bash('python scripts/exp153_live_refresher.py --pull runs/exp153_live.jsonl');
+// a JOB-liveness probe: ssh the pod, check the remote process + tail the job log (Russell 2026-07-17, the $13 bleed)
+const liveness = () => bash('ssh root@1.2.3.4 "pgrep -f train_exp154 && tail -3 /workspace/jobs/seed-7/nohup.out"');
 
 // ── isLaunchCommand: precise detection, no false positives ───────────────────
 test('isLaunchCommand: runpod launch is a launch', () => {
@@ -88,7 +90,7 @@ test('Stop: BLOCK when a launch happened and no Monitor followed it', () => {
   assert.equal(verdict.mode, 'stop');
 });
 test('Stop: ALLOW when a Monitor follows the last launch AND a watch link was given', () => {
-  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), say(LINK)] });
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), liveness(), say(LINK)] });
   assert.equal(verdict.block, false);
 });
 
@@ -100,11 +102,11 @@ test('Stop: BLOCK when launch + Monitor but NO watch link was given', () => {
   assert.match(verdict.reason, /link/i);
 });
 test('Stop: ALLOW with a localhost link', () => {
-  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), say('open http://127.0.0.1:8153/docs/x.html')] });
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), liveness(), say('open http://127.0.0.1:8153/docs/x.html')] });
   assert.equal(verdict.block, false);
 });
 test('Stop: ALLOW with a *-live.html watch page reference', () => {
-  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), say('see docs/exp153-race-live.html')] });
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), liveness(), say('see docs/exp153-race-live.html')] });
   assert.equal(verdict.block, false);
 });
 test('Stop: no-link block does NOT fire when there was no launch', () => {
@@ -153,4 +155,22 @@ test('Stop: BLOCK when launch+monitor+link but no interim stream at Stop', () =>
   assert.equal(verdict.block, true);
   assert.equal(verdict.mode, 'stop');
   assert.match(verdict.reason, /interim|stream|trial data/i);
+});
+
+// ── Stop: JOB-liveness required, not just pod status (Russell 2026-07-17, the $13 bleed) ──
+test('Stop: BLOCK when launch+monitor+link+interim but NO job-liveness probe', () => {
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), say(LINK)] });
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.mode, 'stop');
+  assert.match(verdict.reason, /job.?liveness|pod alive|dead job|process/i);
+});
+test('Stop: ALLOW when a job-liveness probe (ssh pgrep + tail job log) is present', () => {
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), liveness(), say(LINK)] });
+  assert.equal(verdict.block, false);
+});
+test('Stop: a pod-STATUS poll does NOT satisfy job-liveness', () => {
+  const podStatusPoll = bash('curl -s https://api.runpod.io/graphql -d \'{"query":"{myself{pods{desiredStatus}}}"}\'');
+  const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), podStatusPoll, say(LINK)] });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /job.?liveness|pod alive|process/i);
 });

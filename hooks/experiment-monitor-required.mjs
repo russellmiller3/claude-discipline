@@ -60,6 +60,15 @@ const LINK_RE = /(https?:\/\/\S+)|(?:localhost|127\.0\.0\.1):\d+|[\w.-]+-live\.h
 // the live/think feed or a refresher/feeder.
 const INTERIM_STREAM_RE = /_live\.jsonl|_think\.jsonl|live[_-]?refresher|live[_-]?feeder|--stream-interim|scp[\s\S]*(?:_live|_think)\.jsonl/i;
 
+// Russell's rule (2026-07-17, the $13 exp154 bleed): "a pod-lifecycle watcher must probe JOB
+// liveness (remote process / log freshness), not just POD desiredStatus." A RUNNING pod with a
+// DEAD job looks identical to a slow one on a status-only feeder — that blind spot let a
+// crashed run bleed $12.74 over 3 hours. Evidence a JOB-liveness probe exists: an ssh that runs
+// a remote process check (ps/pgrep/pkill -0/nvidia-smi) or tails the remote job log, OR an
+// explicit hang/freshness/job-alive detector. A pod-STATUS check (desiredStatus/get pod) does
+// NOT count — that is exactly the thing that under-measured.
+const JOB_LIVENESS_RE = /\bssh\b[\s\S]*(?:\bps\b|pgrep|pkill\s*-0|nvidia-smi|tail[\s\S]*(?:nohup|stdout|job|\.log))|job[_-]?liveness|hang[_-]?detect(?:or|ion)?|log[_-]?freshness|process[_-]?alive|job[_-]?alive|no[_ -]update[_ -]in/i;
+
 // A launch is one of: a runpod launcher run with the `launch` verb; a `modal run`;
 // or a python invocation of a modal_*.py job script.
 // Forward order only — the runpod launcher is INVOKED then handed the `launch`
@@ -169,10 +178,34 @@ Before launching, wire the interim stream:
 If the trainer only scores at the end, fix THAT first (add the subsample eval + think emit).
 Escape (rare — a genuinely metric-less run): ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
 
+const NO_JOB_LIVENESS_REASON = `MONITOR PROBES POD STATUS, NOT JOB LIVENESS — a launch is running but nothing
+checks whether the JOB is actually alive.
+
+The $13 lesson (exp154, 2026-07-17): the full 7B run OOM-crashed minutes in, but the POD stayed
+RUNNING (pod alive != job alive), CPU 88% idle, no python process — and because the monitor fed on
+pod \`desiredStatus\` only, it looked like "still training" for 3 HOURS while 3 pods bled $12.74 doing
+nothing. A status-only feeder cannot tell a dead job from a slow one.
+
+Wire a JOB-liveness probe (not a pod-status poll):
+  1. Probe the remote PROCESS: ssh the pod and \`pgrep -f <trainer>\` / \`ps\` / \`nvidia-smi\` — or tail the
+     remote job log (nohup.out / stdout / the job's .log) and check its FRESHNESS (mtime moving).
+  2. A hang detector on the live feed: "no update in 45s -> job dead" flags it in under a minute
+     instead of 3 hours.
+A pod \`desiredStatus\`/\`get pod\` check does NOT satisfy this — that is exactly the blind spot.
+
+Escape (the run already finished / genuinely can't be probed): ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
+
 // Shared: does any run this session stream interim trial data home? (a refresher/feeder that
 // pulls or writes the live/think JSONL the dashboard reads). Russell's rule, 2026-07-17.
 function streamsInterimData(toolUses) {
   return (toolUses || []).some((toolUse) => INTERIM_STREAM_RE.test(toolUse?.command || ''));
+}
+
+// Shared: does any tool-use this session probe JOB liveness (remote process / log freshness /
+// hang detector), not just pod status? The $13 exp154 bleed: a status-only feeder showed a dead
+// job as "RUNNING" for 3 hours. Russell's rule, 2026-07-17: probe the JOB, not the pod.
+function probesJobLiveness(toolUses) {
+  return (toolUses || []).some((toolUse) => JOB_LIVENESS_RE.test(toolUse?.command || ''));
 }
 
 /**
@@ -214,6 +247,8 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
     }
     // And does interim trial data actually stream home? (Russell 2026-07-17)
     if (!streamsInterimData(toolUses)) return { block: true, mode: 'stop', reason: NO_INTERIM_REASON };
+    // And does anything probe JOB liveness (not just pod status)? (Russell 2026-07-17, the $13 bleed)
+    if (!probesJobLiveness(toolUses)) return { block: true, mode: 'stop', reason: NO_JOB_LIVENESS_REASON };
     return { block: false };
   }
 
