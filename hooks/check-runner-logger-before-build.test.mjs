@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { evaluate, reachableSharedLibs, looksLikeExperiment } from './check-runner-logger-before-build.mjs';
+import { evaluate, evaluateEdit, reachableSharedLibs, looksLikeExperiment } from './check-runner-logger-before-build.mjs';
 
 let passed = 0;
 function test(name, runCase) { runCase(); passed++; console.log(`  ✓ ${name}`); }
@@ -86,9 +86,32 @@ test('passes when the file references TrainingLifecycle (a Runner export)', () =
   assert.equal(evaluate({ toolName: 'Write', filePath: pyPath, content, hasSiblingLib: true }).block, false);
 });
 
-test('passes with the override token present', () => {
+test('BLOCKS the override token when the file ALSO hand-rolls plumbing (token cannot bless a ThreadPoolExecutor)', () => {
+  // The 2026-07-19 hole: the self-cert token was a blanket rubber-stamp — a file
+  // could claim "checked" while cloning the exact plumbing Runner owns. A pool /
+  // retry / pulse / teardown is never "domain glue", so a STRONG signal voids the token.
   const content = '# runner-logger-checked: domain glue, Runner owns the launch\nwith ThreadPoolExecutor() as p:\n    pass\n';
-  assert.equal(evaluate({ toolName: 'Write', filePath: pyPath, content, hasSiblingLib: true }).block, false);
+  const verdict = evaluate({ toolName: 'Write', filePath: pyPath, content, hasSiblingLib: true });
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.tokenVoided, true);
+});
+
+test('BLOCKS an experiment worker that hand-rolls pool+pulse+retry even WITH the token (the demonstrated hole)', () => {
+  const filePath = 'C:/Users/rmill/Desktop/programming/marcus/scripts/exp147b_full_worker.py';
+  const content = '"""runner-logger-checked: domain glue."""\n'
+    + 'from concurrent.futures import ProcessPoolExecutor, as_completed\n'
+    + 'def pulse(s): open("agent-pulse.log","a").write(s)\n'
+    + 'def train(seed):\n    for attempt in range(3):\n        pass\n';
+  assert.equal(evaluate({ toolName: 'Write', filePath, content, hasSiblingLib: true }).block, true);
+});
+
+test('PASSES the token for genuine domain glue with NO hand-rolled plumbing (mask-smoke shape)', () => {
+  // The regression guard: a pure science worker (loads a model, imposes a mask)
+  // that correctly delegates its lifecycle elsewhere still self-certifies cleanly.
+  const filePath = 'C:/Users/rmill/Desktop/programming/marcus/scripts/exp147b_mask_smoke.py';
+  const content = '"""runner-logger-checked: science worker; lifecycle owned by runpod_exp147.py."""\n'
+    + 'from transformers import AutoModelForCausalLM\ndef run_mask_smoke(device):\n    return {"cuda": True}\n';
+  assert.equal(evaluate({ toolName: 'Write', filePath, content, hasSiblingLib: true }).block, false);
 });
 
 test('passes when only ONE medium signal matches (below threshold)', () => {
@@ -101,9 +124,79 @@ test('passes when no sibling shared lib is reachable', () => {
   assert.equal(evaluate({ toolName: 'Write', filePath: pyPath, content, hasSiblingLib: false }).block, false);
 });
 
-test('passes for an Edit (only a fresh Write is the build moment)', () => {
-  const content = 'with ThreadPoolExecutor() as p:\n    teardown()\n';
-  assert.equal(evaluate({ toolName: 'Edit', filePath: pyPath, content, hasSiblingLib: true }).block, false);
+test('Edit path: BLOCKS adding a hand-rolled turn_metrics dict (the 2026-07-17 incident)', () => {
+  // This is literally the edit that should have been caught: a parallel per-turn
+  // telemetry dict added next to programming/runner, which owns ExperimentTelemetry.
+  const newString = `        this_turn = {
+            "model_calls": 1, "wall_ms": turn.wall_ms,
+            "input_tokens": turn.input_tokens,
+            "turn_metrics": [],
+            "steps": [],
+        }
+        turn_metrics.append(this_turn)`;
+  const verdict = evaluateEdit({ filePath: pyPath, newString, fullContent: '', hasSiblingLib: true });
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.path, 'edit-parallel-mechanism');
+});
+
+test('Edit path: BLOCKS adding a record_tool_call reimplementation', () => {
+  const newString = 'def record_tool_call(self, name, args):\n    self._log.append({"name": name, "args": args})\n';
+  const verdict = evaluateEdit({ filePath: pyPath, newString, fullContent: '', hasSiblingLib: true });
+  assert.equal(verdict.block, true);
+});
+
+test('Edit path: BLOCKS adding a bespoke clipping/redaction helper', () => {
+  const newString = 'def _clip_obj(obj, limit):\n    """Clip long strings — bespoke redaction."""\n    return obj[:limit]\n';
+  const verdict = evaluateEdit({ filePath: pyPath, newString, fullContent: '', hasSiblingLib: true });
+  assert.equal(verdict.block, true);
+});
+
+test('Edit path: BLOCKS adding a hand-rolled retry loop via Edit', () => {
+  const newString = 'def retry_the_call(fn):\n    while attempt < 5:\n        try: return fn()\n        except: attempt += 1\n';
+  const verdict = evaluateEdit({ filePath: pyPath, newString, fullContent: '', hasSiblingLib: true });
+  assert.equal(verdict.block, true);
+});
+
+test('Edit path: BLOCKS adding a custom Logger/Recorder class', () => {
+  const newString = 'class CheapTelemeter:\n    def __init__(self): self.events = []\n';
+  const verdict = evaluateEdit({ filePath: pyPath, newString, fullContent: '', hasSiblingLib: true });
+  assert.equal(verdict.block, true);
+});
+
+test('Edit path: PASSES a normal feature edit (no infra vocabulary)', () => {
+  const newString = 'def add_shipping(cart, cost):\n    cart.total += cost\n    return cart\n';
+  const verdict = evaluateEdit({ filePath: pyPath, newString, fullContent: '', hasSiblingLib: true });
+  assert.equal(verdict.block, false);
+});
+
+test('Edit path: PASSES when the new code itself imports the real lib', () => {
+  // Adding a record_tool_call wrapper that DELEGATES to ExperimentTelemetry is reuse, not parallel.
+  const newString = 'def record_tool_call(self, name, args):\n    from runner import ExperimentTelemetry\n    self._tel.record_tool_call(name, arguments=args)\n';
+  const verdict = evaluateEdit({ filePath: pyPath, newString, fullContent: '', hasSiblingLib: true });
+  assert.equal(verdict.block, false);
+});
+
+test('Edit path: PASSES when no sibling lib is reachable', () => {
+  const newString = 'turn_metrics = []\ndef record_tool_call(): pass\n';
+  const verdict = evaluateEdit({ filePath: '/c/somewhere/else/app.py', newString, fullContent: '', hasSiblingLib: false });
+  assert.equal(verdict.block, false);
+});
+
+test('Edit path: PASSES with the override token in the new code', () => {
+  const newString = '# runner-logger-checked: this is domain glue\nturn_metrics = []\n';
+  const verdict = evaluateEdit({ filePath: pyPath, newString, fullContent: '', hasSiblingLib: true });
+  assert.equal(verdict.block, false);
+});
+
+test('Edit path: PASSES for a test file (test_ prefix)', () => {
+  const newString = 'turn_metrics = []\n';
+  const verdict = evaluateEdit({ filePath: 'C:/x/scripts/test_app.py', newString, fullContent: '', hasSiblingLib: true });
+  assert.equal(verdict.block, false);
+});
+
+test('Edit path: fails open on empty input', () => {
+  assert.equal(evaluateEdit({}).block, false);
+  assert.equal(evaluateEdit({ filePath: '', newString: '', hasSiblingLib: true }).block, false);
 });
 
 test('passes for a test file (test_ prefix)', () => {

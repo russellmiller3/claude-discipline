@@ -121,12 +121,32 @@ const REUSE_REFS = [
   /\bDurableRunner\b/,
   /\bTrainingLifecycle\b/,
   /\bTelemetryRecorder\b/,
+  /\bExperimentTelemetry\b/,
+  /\bcreate_logger\b/,
+  /\bRunFileSink\b/,
   /\bSshRemoteJob\b|\bRemoteJobSpec\b/,
   /\bRunPodTrainingProvider\b/,
   /programming[/\\]runner/i,
   /\bfrom\s+logger\b|\bimport\s+logger\b/i,
   /programming[/\\]Logger/i,
   /\bStructuredLogger\b|\bredact/i,
+];
+
+// PARALLEL-MECHANISM vocabulary — adding one of these via an Edit means you're
+// hand-rolling a capability the shared lib ALREADY owns (telemetry/recording/
+// logging/concurrency/retry). This is the gap that let a hand-rolled `turn_metrics`
+// dict get added alongside ExperimentTelemetry (Russell, 2026-07-17: "christ you
+// dummy"). Only fires on Edit (Write is already covered by the main path).
+const PARALLEL_MECHANISM_SIGNALS = [
+  /\bturn_metrics\b/,                       // hand-rolled per-turn transcript = ExperimentTelemetry
+  /\brecord_tool_call\b|\brecord_model_exchange\b/,  // ExperimentTelemetry's own API, reimplemented
+  /\bexperiment_telemetry\b/i,              // naming a fake sibling to the real module
+  /\btelemetry_excerpt\b|\btool_log\b|\bper_turn_log\b/i,  // bespoke recording dicts
+  /\bclass\s+\w*(Logger|Telemeter|Recorder|Transcript)\w*\s*[(:]/,  // a custom logger/recorder class
+  /\bdef\s+record_\w+\s*\(/,               // a hand-rolled record_* method (shadows the real API)
+  /\bdef\s+\w*clip\w*_obj\s*\(/,            // bespoke redaction/clipping (Logger owns redaction)
+  /\bThreadPoolExecutor\b|\bProcessPoolExecutor\b/,  // hand-rolled concurrency (Runner owns pools)
+  /\bdef\s+\w*retry\w*\s*\(|\bwhile\s+attempt\b/i,   // hand-rolled retry (Runner owns retry+backoff)
 ];
 
 function readPayload() {
@@ -162,25 +182,93 @@ export function evaluate({ toolName, filePath, content, hasSiblingLib }) {
   if (!content) return { block: false };
   if (!hasSiblingLib) return { block: false }; // nothing to reuse — don't nag
 
-  // Escape hatches.
-  if (content.includes(OVERRIDE_TOKEN)) return { block: false };
-
-  // Already reusing the shared libs → pass.
+  // Genuine reuse always passes — importing the lib IS proof you found it.
   if (REUSE_REFS.some((re) => re.test(content))) return { block: false };
 
   const strong = STRONG_SIGNALS.filter((re) => re.test(content));
   const medium = MEDIUM_SIGNALS.filter((re) => re.test(content));
   const isExperiment = looksLikeExperiment(filePath, content);
+
+  // Self-cert token — but EARNED, not asserted. Before 2026-07-19 the token was a
+  // blanket rubber-stamp: a file could carry `runner-logger-checked` in a docstring
+  // and still hand-roll a ProcessPoolExecutor + pulse + retry — the exact plumbing
+  // Runner owns (proven by feeding the hook that payload: it exited 0). A pool /
+  // retry / teardown / hand-rolled pulse is NEVER "domain glue", so ANY STRONG signal
+  // VOIDS the token. The token still exempts genuine domain science (a model + a mask,
+  // no hand-rolled infra); to hand-roll plumbing anyway, import runner or take the
+  // deliberate env override CHECK_RUNNER_LOGGER_BEFORE_BUILD_OK=1.
+  const hasToken = content.includes(OVERRIDE_TOKEN);
+  if (hasToken && strong.length === 0) return { block: false };
+
   const fires = strong.length >= 1 || medium.length >= 2 || isExperiment;
   if (!fires) return { block: false };
 
   return {
     block: true,
+    tokenVoided: hasToken && strong.length > 0,
     matched: [
       ...strong.map((re) => re.source),
       ...medium.map((re) => re.source),
       ...(isExperiment ? ['experiment-file-identity (name/train/pod signals)'] : []),
     ].slice(0, 6),
+  };
+}
+
+// PURE core for the Edit path. The Write path catches fresh infra files; the Edit
+// path catches a DIFFERENT failure — adding a PARALLEL mechanism to an existing
+// file that already sits next to a shared lib owning that exact capability.
+// The incident (2026-07-17): a hand-rolled `turn_metrics` dict + `record_`-style
+// helpers were Edit'd into codeservo_job_agent.py, reimplementing what
+// ExperimentTelemetry (programming/runner) already provides — while runner was a
+// sibling the whole time. The hook's Write path never saw it (no fresh file), and
+// even if it had, the file already imports `from runner import DurableRunner` so
+// the reuse-check would pass. The narrow signal: the NEW code adds a recording /
+// logging / telemetry / concurrency / retry mechanism that the lib already owns.
+//
+// `newString` is the Edit's added content. `fullContent` is the file after the
+// edit (best-effort) — if the file as a whole ALREADY reuses the lib, we trust
+// that the author knows the lib exists and only block if the new code introduces
+// a *second, parallel* mechanism with no reuse reference of its own.
+export function evaluateEdit({ filePath, newString, fullContent, hasSiblingLib }) {
+  if (!filePath || !SOURCE_EXT.test(filePath)) return { block: false };
+  if (/\.(test|spec)\.|(^|[/\\])test_/.test(filePath)) return { block: false };
+  const added = newString || '';
+  if (!added) return { block: false };
+  if (!hasSiblingLib) return { block: false };
+  if (added.includes(OVERRIDE_TOKEN)) return { block: false };
+
+  // Does the NEW code add a parallel mechanism the lib already owns?
+  const parallel = PARALLEL_MECHANISM_SIGNALS.filter((re) => re.test(added));
+  if (parallel.length === 0) return { block: false };
+
+  // Does the NEW code itself reference the real lib API? If the author is, e.g.,
+  // adding a `record_tool_call` wrapper that delegates to ExperimentTelemetry,
+  // that's reuse, not a parallel mechanism. NOTE: we use a STRICTER reuse set
+  // than the Write path — real imports/API names only. The Write path's REUSE_REFS
+  // includes bare `\bredact\b` (loose, for prose), which false-matches the word
+  // "redaction" in a comment and would let a parallel mechanism through.
+  const EDIT_REUSE_REFS = [
+    /\bfrom\s+runner\b|\bimport\s+runner\b/,
+    /\bExperimentTelemetry\b/,
+    /\bTelemetryRecorder\b/,
+    /\bcreate_logger\b/,
+    /\bRunFileSink\b/,
+    /\bfrom\s+logger\b|\bimport\s+logger\b/i,
+  ];
+  if (EDIT_REUSE_REFS.some((re) => re.test(added))) return { block: false };
+
+  // Also pass if the surrounding file clearly already routes through the lib
+  // for THIS capability (the author is consistent, this is a continuation).
+  // Conservative: require BOTH a reuse ref AND the parallel signal NOT to be a
+  // pure reimplementation marker (e.g. `record_tool_call` defined as a fresh fn).
+  // We keep this simple: if the full file reuses the lib, warn-don't-block is
+  // too soft (Rule 1 — hooks need teeth). We still block, because the new code
+  // itself adds a parallel mechanism without referencing the lib.
+
+  return {
+    block: true,
+    matched: parallel.map((re) => re.source).slice(0, 6),
+    path: 'edit-parallel-mechanism',
   };
 }
 
@@ -197,11 +285,64 @@ function main() {
       ? Boolean(reachableSharedLibs(dirname(resolve(filePath))))
       : false;
 
+    // EDIT path: catch a parallel mechanism being added to an existing file that
+    // sits next to a shared lib owning that capability. Fires BEFORE the Write
+    // path (an Edit is not a Write, so the Write path would no-op on it anyway).
+    if (toolName === 'Edit') {
+      const newString = input.new_string || '';
+      const editVerdict = evaluateEdit({
+        filePath,
+        newString,
+        fullContent: content,
+        hasSiblingLib,
+      });
+      if (editVerdict.block) {
+        const libs = reachableSharedLibs(dirname(resolve(filePath))) || ['runner', 'Logger'];
+        const reason = `EDIT BLOCKED — you're adding a parallel mechanism the shared lib already owns.
+
+The new code in ${basename(filePath)} introduces a capability (matched: ${editVerdict.matched.join(', ')})
+that a reachable shared lib ALREADY provides: ${libs.join(', ')}.
+
+This is the "christ you dummy" failure (2026-07-17): hand-rolling a per-turn telemetry dict + record_*
+helpers RIGHT NEXT TO programming/runner, which already exports ExperimentTelemetry (record_tool_call,
+record_model_exchange, snapshot) — a parallel system that can never feed telemetry_report or
+paired_comparison, and that drifts from the canonical logger every other eval already speaks.
+
+Before this edit lands, do this FIRST (literally):
+  1. ls  programming/runner  &&  grep for the capability (telemetry / record_tool_call / snapshot).
+  2. ls  programming/Logger  &&  read its README — one validated + redacted event shape, create_logger.
+  3. If the lib owns it, USE IT: import the real API and route the new code through it.
+     A project writes only DOMAIN-SPECIFIC glue — never its own telemetry, logging, retry, or concurrency.
+
+If you HAVE checked and this genuinely needs a local mechanism the lib can't provide (rare), add the
+token \`${OVERRIDE_TOKEN}\` in a comment in the new code and Edit again. Env escape: ${ENV_OVERRIDE}=1.`;
+
+        process.stdout.write(JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: reason,
+          },
+        }));
+        process.exit(0);
+      }
+      // Edit didn't trip the parallel-mechanism check — let it through (the Write
+      // path below only applies to fresh files, so for Edit we're done).
+      process.exit(0);
+    }
+
     const verdict = evaluate({ toolName, filePath, content, hasSiblingLib });
     if (!verdict.block) { process.exit(0); }
 
     const libs = reachableSharedLibs(dirname(resolve(filePath))) || ['runner', 'Logger'];
+    const tokenVoidedNote = verdict.tokenVoided
+      ? `\nThe \`${OVERRIDE_TOKEN}\` token is present but VOID here — you're hand-rolling the exact plumbing the lib owns
+(matched: ${verdict.matched.join(', ')}). A pool / retry / teardown / hand-rolled pulse is never "domain glue", so the
+token can't bless it. The ONLY escapes are: (a) genuinely import the runner API, or (b) the deliberate env override
+${ENV_OVERRIDE}=1 (a conscious, logged bypass) — NOT re-adding the token.\n`
+      : '';
     const reason = `BUILD BLOCKED — check the shared libs BEFORE writing ${basename(filePath)}.
+${tokenVoidedNote}
 
 This file reads like reusable infrastructure OR like an experiment script (matched: ${verdict.matched.join(', ')})
 but shows no sign of reusing the shared plumbing. Reachable shared lib(s): ${libs.join(', ')}.
