@@ -1,6 +1,6 @@
 # Skillbook
 
-The skills' answer to the [Hookbook](HOOKBOOK.md). Per-skill reference for Claude Discipline — **7 workflow skills**. Hooks enforce
+The skills' answer to the [Hookbook](HOOKBOOK.md). Per-skill reference for Claude Discipline — **8 workflow skills** (7 build-cycle + 1 learnings-maintenance). Hooks enforce
 ("you can't do the wrong thing"); skills are the *workflows* ("the right thing is
 one command away"). They're optional (`node scripts/install.mjs --skills`) and
 **generic by design** — they carry the *method* with project-specifics stripped,
@@ -45,6 +45,10 @@ Enforces "if a feature exists in the code but not the docs, it doesn't exist." *
 ## `handoff` — cold-start the next session
 **Invoke:** "handoff", "save context", "write a resume prompt", "I'm done for now", or when switching tasks.
 Writes `HANDOFF.md` for a **cold agent** (often a cheaper model) so it resumes without re-deriving state from chat or git logs. Optimized for completeness over brevity, with a load-bearing section order: **action first** (pick-up-here: branch, head commit, test command, item 1) → resume order → what's broken/stubbed → full next-session detail. The bridge between this session's full context and the next session's empty one.
+
+## `distill-learnings` — refine the raw learnings pile into enforced guards
+**Invoke:** `/distill-learnings`, "distill the learnings", "mine learnings", "turn learnings into hooks"; also prompted by the `learnings-distill-nudge` hook when a backlog builds up.
+The maintenance counterpart to capture: a `learnings.md` is an append-only pile of surface gotchas, so this runs the periodic **distillation** (boiling many scattered notes down to the few root causes underneath them) — cluster the loose lessons by root cause, run a first-principles teardown on each cluster, consolidate the file, and for anything that recurred **propose an enforced hook or rule** so it can't happen again. Closes the Getty loop (mistake → learning → *enforcement*) mechanically. **Human-in-the-loop:** it consolidates the notes freely but never builds a hook or spawns an agent without your explicit yes.
 
 ---
 
