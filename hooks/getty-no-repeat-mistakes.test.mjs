@@ -216,5 +216,47 @@ const assistantSays = (replyText) => ({ type: 'assistant', message: { role: 'ass
   if (existsSync(freshMarker)) rmSync(freshMarker);
 }
 
+// 2026-07-19 Fix A + B: a self-caught costly admission arms a GETTY-WORTHY marker (no Russell
+// correction needed), and a Getty-worthy marker is cleared ONLY by a hook, never a learning.
+{
+  const marker = join(tmpdir(), `getty-selfcaught-${process.pid}-${seq++}.json`);
+  if (existsSync(marker)) rmSync(marker);
+  // (a) a self-caught admission in MY OWN reply arms the marker and blocks when no hook was built.
+  const selfCaught = stopRun('I introduced a bug — my own mistake force-deleted a running pod, wasted a paid launch', [], marker);
+  check('self-caught admission arms Getty + blocks with no hook built', isBlocked(selfCaught) && existsSync(marker));
+  if (existsSync(marker)) rmSync(marker);
+}
+{
+  // A pre-armed GETTY-WORTHY marker (self-caught), scanning from entry 0 so this turn's edit counts.
+  const gettyWorthyMarker = () => {
+    const marker = join(tmpdir(), `getty-worthy-${process.pid}-${seq++}.json`);
+    writeFileSync(marker, JSON.stringify({ repeat: false, gettyWorthy: true, correction: 'my own bug killed a pod', ts: 1, armedAtEntryIndex: 0 }));
+    return marker;
+  };
+  // (b) a learnings.md edit alone does NOT clear a Getty-worthy marker.
+  const learningOnly = gettyWorthyMarker();
+  check('Getty-worthy marker NOT satisfied by a learnings.md edit alone', isBlocked(stopRun('added a learning', ['C:/Users/rmill/Desktop/programming/Macher/learnings.md'], learningOnly)));
+  if (existsSync(learningOnly)) rmSync(learningOnly);
+  // (b2) a CLAUDE.md edit also does NOT clear it (Fix B: advisory rules don't clear a Getty-worthy).
+  const claudeMdOnly = gettyWorthyMarker();
+  check('Getty-worthy marker NOT satisfied by a CLAUDE.md edit', isBlocked(stopRun('added a rule', ['C:/Users/rmill/.claude/CLAUDE.md'], claudeMdOnly)));
+  if (existsSync(claudeMdOnly)) rmSync(claudeMdOnly);
+  // (c) a hooks/*.mjs edit DOES clear it.
+  const hookEdit = gettyWorthyMarker();
+  check('Getty-worthy marker IS satisfied by a hooks/*.mjs edit', !isBlocked(stopRun('built the guard', ['C:/Users/rmill/.claude/hooks/new-guard.mjs'], hookEdit)) && !existsSync(hookEdit));
+}
+{
+  // (d) a plain first-time (non-costly) correction still clears with a learning — no regression.
+  const firstTime = join(tmpdir(), `getty-firsttime-${process.pid}-${seq++}.json`);
+  writeFileSync(firstTime, JSON.stringify({ repeat: false, correction: 'you forgot to gloss a term', ts: 1, armedAtEntryIndex: 0 }));
+  check('first-time correction still clears with a learnings.md edit', !isBlocked(stopRun('captured the lesson', ['C:/Users/rmill/Desktop/programming/Macher/learnings.md'], firstTime)) && !existsSync(firstTime));
+}
+{
+  // (e) fail-open on malformed input.
+  const marker = join(tmpdir(), `getty-malformed-${process.pid}-${seq++}.json`);
+  const proc = spawnSync('node', [HOOK], { input: 'not json', encoding: 'utf8', env: { ...process.env, GETTY_MARKER_PATH: marker } });
+  check('fail-open on malformed input', proc.status === 0 && (proc.stdout || '').trim() === '');
+}
+
 if (failures.length) { console.error(`\n${failures.length} check(s) failed.`); process.exit(1); }
 console.log('\nAll getty-no-repeat-mistakes checks passed.');

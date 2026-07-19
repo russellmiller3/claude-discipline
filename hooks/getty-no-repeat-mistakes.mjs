@@ -58,6 +58,22 @@ const CORRECTION_PATTERNS = [
   /\byou did(?:n['’]?t) (run|test|check|read|update|follow)\b/i,
 ];
 
+// SELF-CAUGHT Getty admissions (Fix A, 2026-07-19): a costly mistake I catch and OWN in my OWN reply
+// text must arm the Getty loop even though Russell never corrected me. HIGH-PRECISION on purpose — only
+// the phrasings the model uses when it admits a costly slip (a killed paid pod, a destructive auto-action,
+// a bug it just introduced); NOT a flaky attempt to self-detect every mistake. All of these name real
+// cost, so they arm a GETTY-WORTHY marker (a hook, not a learning, is required to clear it — Fix B).
+const SELF_CAUGHT_PATTERNS = [
+  /\bmy (own )?(bug|mistake|error|screwup|fault)\b/i,
+  /\bthe fix'?s own bug\b/i,
+  /\bgetty (mistake|moment|worthy|miss)\b/i,
+  /\bi introduced (a |the )?(bug|regression|error)\b/i,
+  /\bkilled a (live|running)\b/i,
+  /\b(wasted|bled|burned) a (paid )?(pod|run|launch)\b/i,
+  /\bforce-delet\w+ a (live|running)\b/i,
+];
+const isSelfCaughtAdmission = (text) => SELF_CAUGHT_PATTERNS.some((pattern) => pattern.test(String(text || '')));
+
 // System-INJECTED content that lands in the user slot but is NOT Russell speaking: background-agent
 // completion notices, harness reminders, hook output. The reward signal is Russell's OWN correction
 // wording — never a notification. Detecting "you skipped"/"again" inside an agent's design doc or a
@@ -89,6 +105,15 @@ function entriesSinceMarkerArmed(transcriptPath, armedAtEntryIndex) {
   const entries = readTranscript(transcriptPath);
   const startIndex = Number.isInteger(armedAtEntryIndex) ? Math.max(0, armedAtEntryIndex) : 0;
   return entries.slice(startIndex);
+}
+
+// Index of the last user-role entry — the start of the CURRENT turn. A self-caught marker armed at Stop
+// scopes its satisfaction scan from here, so this turn's own hook edits count toward clearing it.
+function lastUserEntryIndex(entries) {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    if (entries[index]?.type === 'user') return index;
+  }
+  return 0;
 }
 
 // File paths edited by mutating tools across the given entries.
@@ -148,9 +173,28 @@ function hookQuestionAskedIn(entries) {
   return false;
 }
 
+// OVERRIDE ALREADY STATED (2026-07-04, Russell: the guard re-fired every turn because Russell's
+// standing Getty instruction itself contains "never make the same mistake twice" — a repeat pattern —
+// so UserPromptSubmit re-armed the marker on every turn even though the assistant had already stated
+// "getty-override: hook already built and approved by Russell this session" multiple times). Once the
+// assistant has stated a getty-override for THIS mistake in the session, the gate is closed: neither
+// UserPromptSubmit re-arms nor Stop blocks. Scans assistant text blocks across the given entries.
+function overrideStatedIn(entries) {
+  for (const entry of entries) {
+    if (entry.type !== 'assistant') continue;
+    const blocks = entry.message?.content;
+    if (typeof blocks === 'string') { if (OVERRIDE.test(blocks)) return true; continue; }
+    if (!Array.isArray(blocks)) continue;
+    for (const block of blocks) {
+      if (block?.type === 'text' && OVERRIDE.test(block.text || '')) return true;
+    }
+  }
+  return false;
+}
+
 // Russell's ANSWER to that question — a user-role entry (plain reply, or an AskUserQuestion
 // tool_result) whose text affirms it. Matches a bare "yes" as well as a chosen-option echo.
-const AFFIRMATIVE_ANSWER = /\byes\b|\byeah\b|\byep\b|\bsure\b|\bdo it\b|\bgo ahead\b|\bbuild it\b/i;
+const AFFIRMATIVE_ANSWER = /\byes\b|\byeah\b|\byep\b|\bsure\b|\bdo it\b|\bgo ahead\b|\bbuild it\b|\bkeep it\b|\bkeep\b/i;
 function hookQuestionAnsweredYesIn(entries) {
   for (const entry of entries) {
     if (entry.type !== 'user') continue;
@@ -185,6 +229,11 @@ async function main() {
     const message = payload.prompt || payload.user_prompt || '';
     if (SYSTEM_INJECTED.test(message)) return; // a notification/reminder, not Russell correcting me
     if (!isCorrection(message)) return;
+    // Don't re-arm if the assistant already stated a getty-override for this mistake earlier in the
+    // session — Russell's standing Getty instruction contains "never make the same mistake twice",
+    // which is itself a repeat pattern, so without this guard the marker re-arms every turn forever.
+    const priorEntries = readTranscript(payload.transcript_path);
+    if (overrideStatedIn(priorEntries)) return;
     const repeat = isRepeat(message);
     // Record how far into the transcript we are RIGHT NOW, so the Stop-side satisfaction check can
     // scan every entry from this correction forward — across as many turns as it takes to ask,
@@ -215,12 +264,26 @@ Clear by adding a learning. Override: "getty-override: <why no rule is needed>".
   }
 
   // END of turn: if a correction is pending, require the artifact (learning, or a hook for repeats).
-  if (!existsSync(MARKER_PATH)) return;
-  let marker;
-  try { marker = JSON.parse(readFileSync(MARKER_PATH, 'utf8')); } catch { clearMarker(); return; }
-
   const reply = lastAssistantTextOf(payload.transcript_path);
-  if (OVERRIDE.test(reply)) { clearMarker(); return; }
+  const allEntries = readTranscript(payload.transcript_path);
+  // Override: the LAST reply's token clears it (fast path), AND any prior assistant turn in the
+  // session that stated getty-override: also clears it — the assistant may have stated the override
+  // in an earlier turn and the current turn's reply is plain work prose (2026-07-04 re-fire fix).
+  if (OVERRIDE.test(reply) || overrideStatedIn(allEntries)) { clearMarker(); return; }
+
+  let marker;
+  if (existsSync(MARKER_PATH)) {
+    try { marker = JSON.parse(readFileSync(MARKER_PATH, 'utf8')); } catch { clearMarker(); return; }
+  } else if (isSelfCaughtAdmission(reply)) {
+    // Fix A: a self-caught, cost-naming admission in MY OWN reply arms a GETTY-WORTHY marker even
+    // though Russell never corrected me. Scope satisfaction to the CURRENT turn's edits forward, so a
+    // hook built THIS turn (the ideal — catch + permanently fix in one) clears it with no nag.
+    const armedAtEntryIndex = lastUserEntryIndex(allEntries);
+    marker = { repeat: false, gettyWorthy: true, correction: reply.slice(0, 300), ts: Date.now(), armedAtEntryIndex };
+    try { mkdirSync(dirname(MARKER_PATH), { recursive: true }); writeFileSync(MARKER_PATH, JSON.stringify(marker)); } catch { /* fail open */ }
+  } else {
+    return; // nothing pending and nothing self-caught
+  }
 
   const sessionEntries = entriesSinceMarkerArmed(payload.transcript_path, marker.armedAtEntryIndex);
   const editedPaths = editedPathsIn(sessionEntries);
@@ -233,14 +296,28 @@ Clear by adding a learning. Override: "getty-override: <why no rule is needed>".
   const askedAndApprovedAndActed = hookQuestionAskedIn(sessionEntries)
     && hookQuestionAnsweredYesIn(sessionEntries)
     && (hookBuilt || hookDispatched);
-  const satisfied = marker.repeat
+  // Fix B (Russell 2026-07-19: "getty fixes should be stop hooks"): a GETTY-WORTHY marker — a REPEAT,
+  // OR a self-caught admission that named real cost — is cleared ONLY by a hooks/*.mjs (built or
+  // dispatched). A learnings.md bullet or a CLAUDE.md rule is ADVISORY — the model can ignore it, which
+  // is exactly how the mistake recurred — so it does NOT clear a Getty-worthy marker. `learningAdded`
+  // stays a valid clear ONLY for the cheap first-time, non-costly correction path.
+  const gettyWorthy = marker.repeat || marker.gettyWorthy;
+  const satisfied = gettyWorthy
     ? (hookBuilt || hookDispatched || askedAndApprovedAndActed)
     : (learningAdded || hookBuilt || hookDispatched);
 
   if (satisfied) { clearMarker(); return; }
 
-  const correctionQuote = marker.correction ? `\nRussell said: "${marker.correction}"\n` : '';
-  const reason = marker.repeat
+  const correctionQuote = marker.correction
+    ? `\n${marker.gettyWorthy && !marker.repeat ? 'You admitted' : 'Russell said'}: "${marker.correction}"\n`
+    : '';
+  const reason = (marker.gettyWorthy && !marker.repeat)
+    ? `STOP-BLOCKED — Getty rule: you caught your OWN costly mistake → build a PERMANENT GLOBAL fix now (J. Paul Getty: never make the same one twice).
+${correctionQuote}
+Russell 2026-07-19: "the getty hook should have forced you to stop and create a permanent global fix." A learnings.md bullet or a CLAUDE.md rule is ADVISORY — the model can ignore it, which is exactly how this recurred. A Getty-worthy fix must have TEETH.
+Before stopping, build/strengthen a \`~/.claude/hooks/*.mjs\` that would BLOCK (or auto-do) this class of mistake — with its \`*.test.mjs\`, registered in settings.json, a HOOKBOOK row. (A background-Agent dispatch naming the hooks/*.mjs also clears this.)
+Override only if a hook genuinely can't catch it: "getty-override: <why>".`
+    : marker.repeat
     ? `STOP-BLOCKED — Getty rule: REPEAT mistake → ASK Russell before building a hook (J. Paul Getty: never make the same one twice).
 ${correctionQuote}
 A learning already failed to stop this. Before stopping:
