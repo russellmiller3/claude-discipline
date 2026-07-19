@@ -262,6 +262,10 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-18** — New `entry-point-guard`: blocks a `.mjs` self-execution check that is always-false on
+  Windows (`import.meta.url === process.argv[1]` / a `file://`-concat) — the file silently never runs when
+  executed directly (bit a daemon + two hooks). Deny message hands over the basename fix; the working forms
+  pass untouched. 11 tests.
 - **2026-07-18** — Closed the learnings loop from capture to *enforcement*: new `learnings-distill-nudge`
   (SessionStart) counts undistilled lessons since the last pass and prompts the new `/distill-learnings`
   skill — a batch first-principles teardown that clusters the raw gotchas by root cause, consolidates the
