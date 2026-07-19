@@ -94,3 +94,12 @@ test('does NOT block a normal feature turn (no bug reported)', () => {
   assert.equal(classifyTurn(turn).sawError, false);
   assert.equal(shouldBlockForLearning(classifyTurn(turn)), false);
 });
+
+test('allows / must-not-fire: a routine turn with no bug + no fix does not block', () => {
+  const turn = [
+    { role: 'user', content: [{ type: 'text', text: 'add a taco-finder feature to the party line' }] },
+    { role: 'assistant', content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'src/x.ts' } }] },
+  ];
+  // legitimate, non-debugging work → the gate must stay silent
+  assert.equal(shouldBlockForLearning(classifyTurn(turn)), false);
+});
