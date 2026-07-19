@@ -113,6 +113,7 @@ known-words list; regression test added.*
 | `learnings-error-match` | PostToolUse | When an error appears, surfaces the matching past lesson — *and drops a marker* |
 | `require-learnings-ack` | PreToolUse(Edit) | Blocks code edits until you've actually read the surfaced lesson |
 | `learnings-write-nudge` | PostToolUse+Stop | Blocks stop when you fixed a real bug but wrote no learning |
+| `learnings-distill-nudge` | SessionStart | When the raw `learnings.md` pile has grown (8+ new lessons, or a smaller backlog older than a week), nudges to run `/distill-learnings` — the batch first-principles pass that clusters the loose gotchas by root cause, consolidates, and proposes an *enforced hook/rule* for anything that recurred. Advisory (never auto-runs the agent). |
 | `getty-no-repeat-mistakes` | UserPromptSubmit+Stop | On a correction, requires a learning; on a REPEAT correction, a learning already failed — requires asking to build a hook instead |
 | `handoff-continuity` | SessionStart+UserPromptSubmit+Stop | Fires every ~5 turns (and on compaction/"handoff"); blocks stop until `HANDOFF.md` is re-pruned whole-file, not just appended |
 | `new-repo-scaffold` | PostToolUse(Bash) | On `git init`, writes a README (North Star / user-stories / roadmap / GTM), `HANDOFF.md`, `learnings.md` + a commit-gate config; never overwrites |
@@ -261,6 +262,12 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-18** — Closed the learnings loop from capture to *enforcement*: new `learnings-distill-nudge`
+  (SessionStart) counts undistilled lessons since the last pass and prompts the new `/distill-learnings`
+  skill — a batch first-principles teardown that clusters the raw gotchas by root cause, consolidates the
+  file, and proposes an enforced hook/rule for anything that bit twice. Shared counting/watermark math in
+  `hooks/lib/learningsWatermark.mjs` (`--status` / `--mark` CLI); nudge is advisory (a hook never
+  auto-spawns the reasoning agent). 11 tests. Skillbook now lists 8 skills.
 - **2026-07-17** — Five pod/experiment guardrails from a $13 OOM bleed: `pod-full-run-capacity-guard`
   (a full-shape capacity smoke must prove the card before a full-training launch), `pod-teardown-rescue-guard`
   (rescue results before a raw pod DELETE), `pod-cost-circuit-breaker` (mid-turn timer halts a paid pod up too
