@@ -11,7 +11,16 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isPaidLaunch, probesJobLiveness, isTeardown, evaluate } from './pod-cost-circuit-breaker.mjs';
+import { isPaidLaunch, probesJobLiveness, isTeardown, evaluate, isInScopedRepo } from './pod-cost-circuit-breaker.mjs';
+
+test('scope: only marcus/legible repos arm the breaker', () => {
+  assert.equal(isInScopedRepo('C:\\Users\\rmill\\Desktop\\programming\\marcus'), true);
+  assert.equal(isInScopedRepo('C:\\Users\\rmill\\Desktop\\programming\\marcus\\scripts'), true);
+  assert.equal(isInScopedRepo('/home/rmill/programming/legible/exp'), true);
+  assert.equal(isInScopedRepo('C:\\Users\\rmill\\Desktop\\programming\\Macher'), false);
+  assert.equal(isInScopedRepo('/home/rmill/programming/legible-notes'), false); // not a path segment
+  assert.equal(isInScopedRepo(undefined), false);
+});
 
 const MINUTE = 60 * 1000;
 const STALE = 4 * MINUTE;
@@ -125,7 +134,7 @@ test('fails safe on malformed input', () => {
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { rmSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HOOK = join(HERE, 'pod-cost-circuit-breaker.mjs');
 const TEST_STATE = join(HERE, '.pcb-test-state.json');
@@ -147,4 +156,20 @@ test('integration: allows the paid launch itself (arms the timer, no block)', ()
 test('integration: env override keeps it silent', () => {
   assert.equal(runHook('git status', { POD_COST_BREAKER_OK: '1' }), '');
   try { rmSync(TEST_STATE, { force: true }); } catch { /* cleanup */ }
+});
+
+test('integration: unscoped repo stays silent even with an armed+stale pod (the Macher false-positive fix)', () => {
+  const armedStale = join(HERE, '.pcb-scope-state.json');
+  const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+  writeFileSync(armedStale, JSON.stringify({ launchAt: tenMinutesAgo, lastLivenessAt: tenMinutesAgo, lastSurfacedAt: 0 }));
+  const spawnWith = (workingDirectory) => spawnSync('node', [HOOK], {
+    input: JSON.stringify({ hook_event_name: 'PostToolUse', cwd: workingDirectory, tool_input: { command: 'git status' } }),
+    encoding: 'utf8',
+    env: { ...process.env, POD_COST_BREAKER_STATE: armedStale },
+  });
+  const macher = spawnWith('C:\\Users\\rmill\\Desktop\\programming\\Macher');
+  assert.equal(((macher.stdout || '') + (macher.stderr || '')).trim(), ''); // scoped-out → silent
+  const marcus = spawnWith('C:\\Users\\rmill\\Desktop\\programming\\marcus');
+  assert.match(((marcus.stdout || '') + (marcus.stderr || '')).trim(), /PAID POD BLEEDING/); // in-scope → blocks
+  try { rmSync(armedStale, { force: true }); } catch { /* cleanup */ }
 });

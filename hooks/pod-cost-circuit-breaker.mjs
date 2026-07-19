@@ -33,6 +33,14 @@ import { fileURLToPath } from 'node:url';
 
 const ENV_OVERRIDE = 'POD_COST_BREAKER_OK';
 const ESCAPE_TOKEN = /\bPOD_COST_BREAKER_OK\b/;
+
+// SCOPE: only the repos that actually run paid pods arm this breaker (Russell, 2026-07-19). Elsewhere
+// (e.g. Macher, a web app) it only ever false-positived off stale state, so it no-ops entirely there.
+// Matched as a path segment so `.../programming/marcus/...` or `.../legible/...` count, nothing else.
+const SCOPED_REPO_RE = /[\\/](marcus|legible)(?:[\\/]|$)/i;
+export function isInScopedRepo(workingDirectory) {
+  return typeof workingDirectory === 'string' && SCOPED_REPO_RE.test(workingDirectory);
+}
 const STATE_FILE = process.env.POD_COST_BREAKER_STATE || resolve(homedir(), '.claude', 'state', 'pod-cost-breaker.json');
 const STALE_MS = Number(process.env.POD_COST_STALE_MS ?? 4 * 60 * 1000);   // no job-liveness probe in 4 min → halt
 const CADENCE_MS = Number(process.env.POD_COST_CADENCE_MS ?? 6 * 60 * 1000); // re-surface the same bleed at most every 6 min
@@ -153,6 +161,9 @@ function main() {
     const payload = readPayload();
     const event = payload.hook_event_name || payload.hookEventName || '';
     if (event !== 'PostToolUse') process.exit(0);
+    // Only marcus/legible run paid pods — everywhere else this breaker is pure false-positive, so skip.
+    const workingDirectory = payload.cwd || payload.workingDirectory || process.cwd();
+    if (!isInScopedRepo(workingDirectory)) process.exit(0);
     const command = (payload.tool_input || {}).command || '';
     const replyText = payload.reply_text || '';
     if (ESCAPE_TOKEN.test(command) || ESCAPE_TOKEN.test(replyText)) process.exit(0);
