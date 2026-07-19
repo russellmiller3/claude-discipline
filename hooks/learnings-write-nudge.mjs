@@ -13,8 +13,9 @@
 // re-nudge on every commit in a streak).
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join as joinPath, resolve as resolvePath, dirname } from 'node:path';
+import { join as joinPath, resolve as resolvePath, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const GLOBAL_LEARNINGS_PATH = resolvePath(homedir(), '.claude', 'learnings.md');
 const ROOT_MARKERS = ['.git', 'CLAUDE.md', 'AGENTS.md', 'package.json'];
@@ -120,31 +121,42 @@ function onPostToolUse(hookEvent) {
 // dismissed as trivial). Mirrors Russell's other gates: enforce, with an out.
 
 const STRONG_ERROR_RE = /\b(SyntaxError|TypeError|ReferenceError|RangeError|Traceback)\b|❌\s*Failed:\s*[1-9]|\bException\b/;
+// A behavioral bug throws no stack trace — the human reports it. When RUSSELL says something is broken
+// ("doesn't work", "still hangs", "busy signal", "why does it…"), that IS the error signal. Without this,
+// an hour-long debugging saga with no exception (e.g. the inbound-token / busy-signal fix) escaped the gate.
+export const USER_BUG_REPORT_RE = /\b(does(?:n'?t| not) work|not working|still (?:broke|broken|fails?|failing|hang|hangs|busy|wrong|says)|broken|hangs? up|busy signal|no (?:answer|sound|audio)|can'?t (?:call|connect|hear)|keeps? (?:saying|doing|failing)|wrong (?:number|name|city)|frustrat|why (?:is|does|won'?t|are|can'?t)|it'?s wrong)\b/i;
 const CODE_FILE_RE = /\.(mjs|cjs|js|ts|jsx|tsx|svelte|vue|py|css|svx)\b/i;
 const FILE_WRITE_BASH_RE = /writeFileSync|sed\s+-i|Out-File|Set-Content|tee\b|>\s*["']?\S|\.slice\(1\)/;
+// A fix isn't always a code-file edit. Infra/config fixes (a wrangler secret, a deploy, a provider API
+// mutation, a fix/feat commit) leave no source diff — but they ARE the fix. Without this, the whole class
+// of live-service debugging (e.g. the inbound-token / party-line fixes) escapes the gate.
+const FIX_ACTION_RE = /wrangler\s+(?:secret\s+put|deploy)|\/(?:update|create|publish|delete)-[a-z-]+|method['"\\:\s]+(?:PATCH|POST|PUT|DELETE)|update-phone-number|\bfix\([^)]*\):|\bfeat\([^)]*\):/i;
 const LEARNINGS_RE = /learnings\.md/i;
 const DISMISS_RE = /\b(no-learning-needed|trivial-fix-no-learning|no learning needed)\b/i;
 
 import { readTranscript, roleOf, contentBlocks, currentTurnEntries } from './lib/transcript.mjs';
 
-function onStop(hookEvent) {
-	const turnEntries = currentTurnEntries(readTranscript(hookEvent.transcript_path));
-	if (turnEntries.length === 0) return;
-
+/**
+ * PURE classifier — scan this turn's entries into the four booleans the block decision needs.
+ * Works on plain transcript-entry objects, so it's unit-testable with synthetic fixtures.
+ */
+export function classifyTurn(turnEntries) {
 	let sawError = false, sawFix = false, wroteLearning = false, dismissed = false;
-	for (const entry of turnEntries) {
+	for (const entry of turnEntries || []) {
+		const entryRole = roleOf(entry);
 		for (const block of contentBlocks(entry)) {
-			// tool_result outputs — count an error ONLY when the tool call actually
-			// FAILED (is_error) and its output names a strong error. Matching error
-			// words in any stdout (grep hits, test data, file contents I cat'd) would
-			// false-fire constantly and train reflexive dismissal — the anti-pattern.
+			// A human-reported bug is an error signal too — no stack trace needed. Only the USER's own
+			// words count (not my echo of them), so quoting the symptom back doesn't self-trigger.
+			if (entryRole === 'user' && block.type === 'text' && USER_BUG_REPORT_RE.test(block.text || '')) sawError = true;
+			// tool_result outputs — count an error ONLY when the tool call actually FAILED (is_error) and
+			// names a strong error. Matching error words in any stdout would false-fire constantly.
 			if (block.type === 'tool_result' && block.is_error === true) {
 				const resultText = typeof block.content === 'string' ? block.content
 					: Array.isArray(block.content) ? block.content.map((c) => c.text || '').join('\n') : '';
 				if (STRONG_ERROR_RE.test(resultText)) sawError = true;
 			}
-			// assistant text (dismiss token)
-			if (block.type === 'text' && DISMISS_RE.test(block.text || '')) dismissed = true;
+			// assistant text (dismiss token) — only the assistant can dismiss, not the user.
+			if (entryRole !== 'user' && block.type === 'text' && DISMISS_RE.test(block.text || '')) dismissed = true;
 			// assistant tool_uses (fix actions + learnings writes)
 			if (block.type === 'tool_use') {
 				const inputStr = JSON.stringify(block.input || '');
@@ -152,11 +164,24 @@ function onStop(hookEvent) {
 				const filePath = block.input?.file_path || block.input?.path || '';
 				if (['Edit', 'Write', 'MultiEdit'].includes(block.name) && CODE_FILE_RE.test(filePath)) sawFix = true;
 				if (['Bash', 'PowerShell'].includes(block.name) && FILE_WRITE_BASH_RE.test(inputStr) && CODE_FILE_RE.test(inputStr)) sawFix = true;
+				// infra/config fix (no source diff) — wrangler secret/deploy, provider API mutation, fix/feat commit.
+				if (['Bash', 'PowerShell'].includes(block.name) && FIX_ACTION_RE.test(inputStr)) sawFix = true;
 			}
 		}
 	}
+	return { sawError, sawFix, wroteLearning, dismissed };
+}
 
-	if (!(sawError && sawFix) || wroteLearning || dismissed) return;
+/** PURE decision — block only when a real bug got fixed and no lesson was logged (and not dismissed). */
+export function shouldBlockForLearning({ sawError, sawFix, wroteLearning, dismissed }) {
+	return Boolean(sawError && sawFix && !wroteLearning && !dismissed);
+}
+
+function onStop(hookEvent) {
+	const turnEntries = currentTurnEntries(readTranscript(hookEvent.transcript_path));
+	if (turnEntries.length === 0) return;
+
+	if (!shouldBlockForLearning(classifyTurn(turnEntries))) return;
 
 	process.stdout.write(JSON.stringify({
 		decision: 'block',
@@ -183,4 +208,5 @@ function main() {
 	process.exit(0);
 }
 
-main();
+// Entry-guard: run only when invoked directly (piped a hook payload), not when imported by a test.
+if (basename(process.argv[1] || '') === basename(fileURLToPath(import.meta.url))) main();
