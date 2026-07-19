@@ -121,6 +121,7 @@ known-words list; regression test added.*
 ### Tier 3 — Opinionated (great defaults; some teams will disagree — that's fine, toggle them off)
 | Hook | Event | What it enforces |
 |------|-------|------------------|
+| `experiment-runner-logger-reread` | UserPromptSubmit | The FRONT door to "reuse the shared libs, don't hand-roll infra": on experiment-build intent, injects the Runner + Logger ownership rule + README paths so the reread is unavoidable context (not an honor-system token), once per session. Pairs with the Write-time back-door guard |
 | `no-core-delegation-guard` | PreToolUse(Agent) | Agents OFF by default: DENIES every Agent spawn without a per-session signoff (env/sentinel/`AGENTS_APPROVED` token; "in parallel" ≠ signoff), and — even with signoff — BLOCKS delegating an EDIT to load-bearing code (per-repo `.claude/core-paths.txt`). Reading/auditing core and editing peripheral code pass. Override: `CORE_AGENT_OK`. For teams that want subagents on by default, toggle it off |
 | `no-backcompat` | PreToolUse(Write/Edit)+Stop | Pre-1.0 projects: replace old code outright; no fallback shims kept alive "just in case". Fires only on code-adjacent evidence (fenced code, API/syntax vocabulary, code punctuation) near the trigger word — a markdown doc's unrelated "deprecated" prose (e.g. a UI color palette note) no longer false-fires (fixed 2026-07-02, see HOOKBOOK) |
 | `root-cause-first` | PostToolUse | After repeated same-symptom fixes, forces a state-probe before the next swing |
