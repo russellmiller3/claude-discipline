@@ -32,6 +32,9 @@
 
 import { readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
+// Reuse the run-shape guard's quoted-string/inline-code blanker so a `git push` MENTIONED inside a
+// grep pattern / echo string / doc content doesn't read as an actual push. (2026-07-19 false-fire.)
+import { executableText } from './long-running-script-guard.mjs';
 
 // The push target — the first non-flag token after `git push` (a remote NAME or a literal path).
 function remoteNameFrom(normalizedCommand) {
@@ -76,6 +79,10 @@ function main() {
   if (typeof command !== 'string') process.exit(0);
 
   const c = command.replace(/\s+/g, ' ').trim();
+  // Scan the EXECUTABLE structure for the push, not text inside quotes/inline-code — a `grep "git push"`
+  // or `echo "git push origin main"` runs no push and must not block. (2026-07-19 false-fire.)
+  let executableCommand = c;
+  try { executableCommand = executableText(c); } catch { /* fall back to raw on any import/parse issue */ }
 
   // Honor an INLINE `PUSH_BRANCH_OVERRIDE=1 git push …` prefix. A PreToolUse hook runs BEFORE the shell
   // executes, so an env-var prefix on the command never reaches this process's `process.env` — the
@@ -83,8 +90,8 @@ function main() {
   // instead (also accepts it after a `;`/`&&`/`|` separator). (2026-07-18)
   if (/(?:^|[;&|]\s*)PUSH_BRANCH_OVERRIDE=1\s+/.test(c)) process.exit(0);
 
-  // Only fire on `git push`. If the command is unrelated, allow.
-  if (!/\bgit\s+push\b/.test(c)) process.exit(0);
+  // Only fire on an ACTUAL `git push` (in the executable structure, not a quoted mention). Else allow.
+  if (!/\bgit\s+push\b/.test(executableCommand)) process.exit(0);
 
   // Allow `git push --delete <branch>` / `git push origin :<branch>` —
   // those are CLEANING UP the remote, which is what we want.

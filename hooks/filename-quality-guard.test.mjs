@@ -23,6 +23,12 @@ test('ALLOWS "drain" and other real engineering terms one edit from a listed wor
 test('still BLOCKS a genuine typo (findigns) after the drain allowlist', () => {
   assert.equal(assessFilename('findigns.md').ok, false);
 });
+// 2026-07-19: "match" (one edit from "watch") and "cases" (one edit from "causes") are real words.
+test('ALLOWS "match"/"cases" families (one edit from "watch"/"causes")', () => {
+  for (const good of ['match.md', 'quoted-string-matcher.mjs', 'file-watcher.ts', 'test-cases.md', 'edge-case.py']) {
+    assert.equal(assessFilename(good).ok, true, `expected ALLOW for ${good}`);
+  }
+});
 
 test('blocks common misspellings (near-miss, one edit away)', () => {
   for (const bad of ['recieve.js', 'lenght.ts', 'benchmrk.mjs', 'summery-report.md', 'transcrpit.txt']) {

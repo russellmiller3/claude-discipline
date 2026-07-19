@@ -108,6 +108,9 @@ const COMMON_WORDS = new Set([
   // "drain" (a log drain — Heroku/Fly/Papertrail) is NOT a typo of "brain". Listing = known-good.
   // (2026-07-17, "test_telemetry_drain.py" false-blocked.)
   'drain', 'drains', 'sink', 'sinks', 'pump', 'pumps', 'spool', 'stub', 'stubs', 'fake', 'fakes',
+  // "match" sits one edit from "watch" (m↔w) and was false-blocked as a typo; both are real words.
+  // "case"/"cases" sits one edit from "cause"/"causes" — also real. (2026-07-19, filename false-blocks.)
+  'match', 'matches', 'matcher', 'matching', 'watcher', 'watches', 'case', 'cases',
 ]);
 
 // Optimal String Alignment distance (Levenshtein + adjacent transposition counted as one edit). Bounded

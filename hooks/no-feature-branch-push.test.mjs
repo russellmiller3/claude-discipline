@@ -117,6 +117,13 @@ test('ignores non-push commands entirely', () => {
   assert.equal(isBlocked(child.stdout), false);
 });
 
+// 2026-07-19 false-fire: "git push" MENTIONED inside a quoted string (a grep pattern, an echo, doc
+// content) runs no push and must not block.
+test('ALLOWS a grep/echo that merely mentions "git push" in a quoted string', () => {
+  assert.equal(isBlocked(runHook('grep -n "Blocks git push" docs/HOOKBOOK.md').stdout), false);
+  assert.equal(isBlocked(runHook('echo "run git push origin main to ship"').stdout), false);
+});
+
 test('PUSH_BRANCH_OVERRIDE=1 always allows', () => {
   const child = runHook('git push origin some-feature-branch', {
     env: { PUSH_BRANCH_OVERRIDE: '1' },
