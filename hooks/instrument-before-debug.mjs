@@ -191,6 +191,11 @@ export function isSourceLogicFile(filePath) {
   if (!SOURCE_LOGIC.test(normalized)) return false;
   if (NOT_LOGIC.test(normalized)) return false;
   if (/[\\/]hooks[\\/]/i.test(normalized)) return false; // editing the hooks themselves is not app-debugging
+  // Ops/build scripts (scripts/**, *.config.*) construct external config (a Retell agent, a deploy step)
+  // and have NO in-app runtime request path to instrument — a FEATURE edit to one is not a bug hunt, so
+  // the gate must not fire. (2026-07-19, make-party-agent.mjs / make-owner-agent.mjs false-blocked 4×.)
+  if (/(?:^|\/)scripts\//i.test(normalized)) return false;
+  if (/\.config\.[a-z0-9]+$/i.test(normalized)) return false;
   return true;
 }
 

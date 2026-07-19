@@ -66,6 +66,25 @@ test('isSourceLogicFile is false for pytest test_*.py and Go *_test.go files', (
   assert.ok(isSourceLogicFile('src/enact_loop.py')); // the implementation is still logic
 });
 
+// 2026-07-19 FALSE-BLOCK: the gate blocked 4 FEATURE edits to Retell agent BUILD scripts
+// (scripts/make-party-agent.mjs / make-owner-agent.mjs) — ops scripts that mint external config have
+// no in-app runtime path to instrument. Exempt scripts/** and *.config.*; keep real app logic gated.
+test('isSourceLogicFile is false for ops/build scripts (scripts/**, *.config.*)', () => {
+  assert.equal(isSourceLogicFile('scripts/make-party-agent.mjs'), false);
+  assert.equal(isSourceLogicFile('scripts/make-owner-agent.mjs'), false);
+  assert.equal(isSourceLogicFile('app.config.js'), false);
+  assert.equal(isSourceLogicFile('vite.config.ts'), false);
+  // CONTROL: real app logic is still source logic.
+  assert.ok(isSourceLogicFile('src/lib/server/gateway.ts'));
+  assert.ok(isSourceLogicFile('src/lib/engine/router.ts'));
+});
+test('decideEdit does NOT block a feature edit to an ops build-script while the gate is open', () => {
+  assert.equal(decideEdit({ gateActive: true, instrumented: false, filePath: 'scripts/make-party-agent.mjs', editText: 'agent.depth = 2;', fileExists: true }).block, false);
+});
+test('decideEdit STILL blocks a blind fix to real server logic during an open gate (control)', () => {
+  assert.equal(decideEdit({ gateActive: true, instrumented: false, filePath: 'src/lib/server/tierRouter.ts', editText: 'tier.model = "x";', fileExists: true }).block, true);
+});
+
 test('isInstrumentationEdit recognizes added logging', () => {
   assert.ok(isInstrumentationEdit('console.log("tier failed", tierError);'));
   assert.ok(isInstrumentationEdit('appendFileSync(logPath, JSON.stringify(row));'));
