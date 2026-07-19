@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { extractSignals, computeGaps } from './retell-deploy-guard.mjs';
+import { extractSignals, computeGaps, extractHardcodedBase, extractLiveIds, staleBaseWarning } from './retell-deploy-guard.mjs';
 
 let passed = 0;
 function test(name, runCase) { runCase(); passed++; console.log(`  ✓ ${name}`); }
@@ -140,6 +140,68 @@ test('extractSignals: null / empty input → clean empty signals (fails open)', 
   assert.equal(signals.partyRebuilt, false);
   assert.equal(signals.ownerRebuilt, false);
   assert.equal(signals.secretPuts.size, 0);
+});
+
+// ── PreToolUse: stale clone-base ──────────────────────────────────────────────
+const partyScript = (id) => `import x;\nconst currentLlmId = 'llm_z';\nconst currentAgentId = '${id}';\n`;
+const architecture = (party, owner) => `Docs.\nSome party agent_ffffffffffffffffffffffffff mention earlier.\n- Current live (2026-07-19): party \`${party}\`, owner\n  \`${owner}\`.\n`;
+
+test('extractHardcodedBase: reads currentAgentId; null when absent', () => {
+  assert.equal(extractHardcodedBase(partyScript('agent_base1')), 'agent_base1');
+  assert.equal(extractHardcodedBase("const other = 'agent_x';"), null);
+});
+
+test('extractLiveIds: reads the Current-live line (line-wrap safe), ignores incidental mentions', () => {
+  const live = extractLiveIds(architecture('agent_liveparty', 'agent_liveowner'));
+  assert.equal(live.party, 'agent_liveparty'); // NOT the earlier incidental agent_fff… mention
+  assert.equal(live.owner, 'agent_liveowner'); // parsed even though it wrapped to the next line
+});
+
+test('staleBaseWarning: BLOCKS a party rebuild whose base != the recorded live id', () => {
+  const warning = staleBaseWarning({
+    command: 'node scripts/make-party-agent.mjs',
+    scriptText: partyScript('agent_stale'),
+    architectureText: architecture('agent_liveparty', 'agent_liveowner')
+  });
+  assert.match(warning, /Clone-base looks STALE/);
+  assert.match(warning, /agent_stale/);
+  assert.match(warning, /agent_liveparty/);
+});
+
+test('MUST-ALLOW: base already matches the recorded live id → no warning', () => {
+  assert.equal(staleBaseWarning({
+    command: 'node scripts/make-party-agent.mjs',
+    scriptText: partyScript('agent_liveparty'),
+    architectureText: architecture('agent_liveparty', 'agent_liveowner')
+  }), null);
+});
+
+test('MUST-ALLOW: dynamic base (no hardcoded currentAgentId, e.g. owner script) → no warning', () => {
+  assert.equal(staleBaseWarning({
+    command: 'node scripts/make-owner-agent.mjs',
+    scriptText: "const currentAgentId = demoState.retellAgentId ?? env.RETELL_AGENT_ID;",
+    architectureText: architecture('agent_liveparty', 'agent_liveowner')
+  }), null);
+});
+
+test('MUST-ALLOW: ARCHITECTURE has no Current-live line → fail open (no warning)', () => {
+  assert.equal(staleBaseWarning({
+    command: 'node scripts/make-party-agent.mjs',
+    scriptText: partyScript('agent_stale'),
+    architectureText: 'ARCHITECTURE with no live record here.'
+  }), null);
+});
+
+test('MUST-ALLOW: escape token in command → no warning even if stale', () => {
+  assert.equal(staleBaseWarning({
+    command: 'stale-base-ok: intentional && node scripts/make-party-agent.mjs',
+    scriptText: partyScript('agent_stale'),
+    architectureText: architecture('agent_liveparty', 'agent_liveowner')
+  }), null);
+});
+
+test('MUST-ALLOW: a non-rebuild command → no warning', () => {
+  assert.equal(staleBaseWarning({ command: 'npm test', scriptText: partyScript('agent_stale'), architectureText: architecture('a', 'b') }), null);
 });
 
 console.log(`\n${passed} tests passed`);

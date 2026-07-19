@@ -27,6 +27,12 @@
  * Gates on the ACTIONS (the real commands ran) + the STATE (the id is on disk in the docs), never on
  * a self-asserted claim (Rule 1.6).
  *
+ * PreToolUse half (added 2026-07-19): BEFORE a `make-{party,owner}-agent.mjs` run, block it if the
+ * script's hardcoded clone-base (`const currentAgentId = 'agent_…'`) differs from the current-live id
+ * ARCHITECTURE.md records — cloning a stale base silently reverts live prompt changes (hit live this day).
+ * Fires only when staleness is PROVABLE (hardcoded base + a differing recorded live id); a dynamic base
+ * or a missing record fails open. Escape: prepend `stale-base-ok: <why>` to the command, or STALE_BASE_OK=1.
+ *
  * Escape (deliberate orphan / not deploying this mint): put `retell-deploy-ok: <why>` in your reply
  * or the command, or set RETELL_DEPLOY_GUARD_OK=1. Fails OPEN on any error.
  */
@@ -45,9 +51,50 @@ const OWNER_SECRET = 'RETELL_AGENT_ID';
 const NEW_PARTY_ID_RE = /NEW AGENT:\s*(agent_[a-z0-9]+)/i;
 const NEW_OWNER_ID_RE = /NEW OWNER AGENT:\s*(agent_[a-z0-9]+)/i;
 const ESCAPE_RE = /retell-deploy-ok\s*:|RETELL_DEPLOY_GUARD_OK/;
+// PreToolUse half: catch a rebuild about to clone a STALE base. `const currentAgentId = 'agent_…'` is the
+// hardcoded base the party script clones FROM (the owner script resolves its base dynamically, no hardcode).
+const REBUILD_RE = /make-(party|owner)-agent\.mjs/;
+const HARDCODED_BASE_RE = /const\s+currentAgentId\s*=\s*['"](agent_[a-z0-9]+)['"]/;
+const STALE_BASE_ESCAPE_RE = /stale-base-ok\s*:/i;
 
 function secretPutRe(secretName) {
   return new RegExp(`secret\\s+put\\s+${secretName}\\b`);
+}
+
+/** The hardcoded clone-base a make-*-agent.mjs script clones FROM (null if it resolves the base dynamically). */
+export function extractHardcodedBase(scriptText) {
+  return (scriptText || '').match(HARDCODED_BASE_RE)?.[1] || null;
+}
+
+/**
+ * The current-live agent ids ARCHITECTURE.md records on its canonical "Current live … party `agent_X`,
+ * owner `agent_Y`" line. Scoped to a 200-char window after "Current live" so incidental party/owner
+ * mentions elsewhere in the doc can't be mistaken for the live record; tolerant of the id wrapping a line.
+ */
+export function extractLiveIds(architectureText) {
+  const window = (architectureText || '').match(/current live[\s\S]{0,200}/i)?.[0] || '';
+  return {
+    party: window.match(/party\s+`?(agent_[a-z0-9]+)`?/i)?.[1] || null,
+    owner: window.match(/owner\s+`?(agent_[a-z0-9]+)`?/i)?.[1] || null
+  };
+}
+
+/**
+ * Warn when a rebuild is about to clone a STALE base. Pure over (command, the target script's text,
+ * ARCHITECTURE.md text) → warning string or null. Only fires when staleness is PROVABLE: the script has a
+ * hardcoded base AND ARCHITECTURE records a DIFFERENT current-live id for that line. A dynamic base (owner)
+ * or a missing/absent record → null (fail open — never block a rebuild we can't prove is stale).
+ */
+export function staleBaseWarning({ command = '', scriptText = '', architectureText = '' }) {
+  if (ESCAPE_RE.test(command) || STALE_BASE_ESCAPE_RE.test(command)) return null;
+  const rebuild = command.match(REBUILD_RE);
+  if (!rebuild) return null;
+  const line = rebuild[1]; // 'party' | 'owner'
+  const base = extractHardcodedBase(scriptText);
+  if (!base) return null; // dynamically-resolved base → nothing to be stale
+  const live = extractLiveIds(architectureText)[line];
+  if (!live || live === base) return null; // no recorded live id, or base already matches → fine
+  return `Clone-base looks STALE: make-${line}-agent.mjs clones ${base}, but ARCHITECTURE.md records the live ${line} agent as ${live}. Rebuilding from ${base} would silently REVERT live prompt changes. Update currentAgentId/currentLlmId to the live base first (confirm against the secret), or prepend "stale-base-ok: <why>" if this is intentional.`;
 }
 
 /**
@@ -150,6 +197,29 @@ function onStop(hookEvent) {
   }));
 }
 
+// ── PreToolUse: block a rebuild that would clone a STALE base ──────────────────
+function onPreToolUse(hookEvent) {
+  if (hookEvent.tool_name !== 'Bash') return;
+  if (process.env.STALE_BASE_OK === '1' || process.env.RETELL_DEPLOY_GUARD_OK === '1') return;
+  const command = hookEvent.tool_input?.command || '';
+  const rebuild = command.match(REBUILD_RE);
+  if (!rebuild) return;
+  const projectDirectory = hookEvent.cwd || process.cwd();
+  const warning = staleBaseWarning({
+    command,
+    scriptText: readIfExists(`${projectDirectory}/scripts/make-${rebuild[1]}-agent.mjs`),
+    architectureText: readIfExists(`${projectDirectory}/ARCHITECTURE.md`)
+  });
+  if (!warning) return;
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: warning
+    }
+  }));
+}
+
 function main() {
   let hookEvent;
   try { hookEvent = JSON.parse(readFileSync(0, 'utf8') || '{}'); }
@@ -157,6 +227,7 @@ function main() {
   try {
     const eventName = hookEvent.hook_event_name || hookEvent.hookEventName || '';
     if (eventName === 'Stop') onStop(hookEvent);
+    else if (eventName === 'PreToolUse') onPreToolUse(hookEvent);
   } catch { /* fail open */ }
   process.exit(0);
 }
