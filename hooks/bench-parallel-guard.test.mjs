@@ -143,3 +143,18 @@ test('end-to-end: real unchunked py -m bench.X invocation is DENIED', () => {
 test('end-to-end: plain echo mentioning a bench path is ALLOWED', () => {
   assert.equal(runHook('echo "see bench/foo.py for details" > README.md'), '');
 });
+
+// 2026-07-17 FALSE-BLOCK (Servo): `py -3 -m py_compile <changed files>` (a syntax check, <2s, runs
+// no tests/bench) was denied because a changed file's NAME contained a bench/sweep keyword. py_compile
+// compiles source to bytecode — categorically not a benchmark.
+test('py_compile syntax check over bench/sweep-named files is NOT a benchmark', () => {
+  assert.equal(looksLikeBenchmark('py -3 -m py_compile src/bench_runner.py tests/test_sweep.py'), false);
+  assert.equal(looksLikeBenchmark('python -m py_compile a_sweep.py'), false);
+});
+test('end-to-end: py_compile over a sweep-named file is ALLOWED', () => {
+  assert.equal(runHook('py -3 -m py_compile src/bench_runner.py tests/test_sweep.py'), '');
+});
+// REGRESSION: a genuine unchunked bench run is still denied.
+test('end-to-end: a real py -m bench.X is STILL denied (py_compile exemption stays narrow)', () => {
+  assert.notEqual(runHook('py -m bench.some_suite'), '');
+});

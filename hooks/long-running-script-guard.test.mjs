@@ -10,7 +10,7 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { stripHeredocBodies } from './long-running-script-guard.mjs';
+import { stripHeredocBodies, hasBackgroundJobFanOut, isUnitTestInvocation, isReadOnlyDiagnostic, isHookOrTempDiagnostic, isSanctionedInstantTool, looksLikeFanOutWork } from './long-running-script-guard.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const GUARD = join(here, 'long-running-script-guard.mjs');
@@ -104,6 +104,148 @@ check('still blocks a real bench harness run even when preceded by a heredoc wri
   const stripped = stripHeredocBodies("cat > f.py <<'PY'\nimport os\nbench sweep\nPY\npy f.py");
   check('stripHeredocBodies removes the body keywords', !/import|bench|sweep/.test(stripped));
   check('stripHeredocBodies keeps the trailing runner', /py f\.py/.test(stripped));
+}
+
+// 2026-07-03 FALSE-BLOCK: `cmd1 & cmd2 & cmd3 & wait` (bash's own job-backgrounding fan-out) always
+// read as unparalleled fan-out work — hasParallelEvidence only recognized keyword/flag evidence
+// (parallel, concurrency, xargs -P, Start-Job), never the shell's native &...&wait idiom, even though
+// backgrounding 2+ jobs and waiting on them plainly IS running them in parallel.
+check('allows a real & fan-out (2+ backgrounded jobs + wait) with progress evidence (the 2026-07-03 false-block)',
+  !isDenied('python train_a.py --shard 0 >> a.log 2>&1 & python train_b.py --shard 1 >> b.log 2>&1 & python train_c.py --shard 2 >> c.log 2>&1 & wait'));
+
+// REGRESSION: the same fan-out shape with NO progress evidence at all must still block -- the fix
+// only supplies PARALLEL evidence, it must not paper over a still-missing progress requirement.
+check('still blocks the same & fan-out shape when progress evidence is missing',
+  isDenied('python train_a.py --shard 0 & python train_b.py --shard 1 & python train_c.py --shard 2 & wait'));
+
+// REGRESSION: `&&` is sequential AND, not job-backgrounding -- must never be read as parallel fan-out.
+check('still blocks a sequential && chain masquerading as long work (no parallel evidence)',
+  isDenied('python train_a.py --shard 0 >> a.log && python train_b.py --shard 1 >> b.log'));
+
+// REGRESSION: a single backgrounded job is not fan-out (nothing to parallelize against).
+check('a lone backgrounded job + wait is not treated as parallel fan-out (still needs real evidence)',
+  isDenied('python backfill_all.py & wait'));
+
+// xargs -I{} WITHOUT -P is genuinely sequential (one item at a time) -- a literal --resume flag must
+// still be recognized as chunk/resume evidence, but the command must still block on missing PARALLEL
+// evidence since it is not actually parallel. Confirms --resume detection is not the bug here.
+check('still blocks xargs -I (no -P) even with --resume: genuinely sequential, missing parallel evidence only',
+  isDenied('find . -name "*.json" | xargs -I{} node ingest.mjs --resume --file {}'));
+
+// REGRESSION: xargs -P (real parallelism) with --resume already passed before this fix and must keep passing.
+check('allows xargs -P with --resume (already-correct case, unaffected by the fix)',
+  !isDenied('ls chunks/*.jsonl | xargs -P 4 -I {} node ingest.mjs --resume --chunk {} >> ingest.log 2>&1'));
+
+// REGRESSION: a genuinely shapeless long run must still block, unaffected by the new & detection.
+check('still blocks a bare shapeless long run (unaffected by the & fan-out fix)', isDenied('python train.py'));
+
+// 2026-07-05 FALSE-BLOCK: a fast UNIT-TEST file + pure READ-ONLY diagnostics were denied because a
+// training-keyword substring ('sweep','train','runs','sleepwake','steps') lived in the file PATH or
+// filename. A test_*.py run (or pytest) is a fast test, never a long fan-out job; a command built only
+// of wc/tail/head/ls/cat/grep/echo reads finished output and exits. Inspect the EXECUTED program +
+// flags, not path/filename substrings. (Russell's 2026-07-05 tuning ask.)
+// (a) a python target whose basename matches test_*.py is a unit-test run — allowed even with 'sweep' in the name.
+check('allows python scripts/test_modal_sweep.py (unit-test file, not a sweep job)',
+  !isDenied('python scripts/test_modal_sweep.py'));
+// (b) a pure read-only diagnostic (wc over run-log files) is instant — allowed even with 'runs'/'sleepwake' in paths.
+check('allows wc -l over runs/*.jsonl log files (read-only diagnostic)',
+  !isDenied('wc -l runs/proj47_runs.jsonl runs/sleepwake_runs.jsonl'));
+// REGRESSION: a GENUINE training run (word 'train' in the program name + a real --steps sweep) still blocks.
+check('still blocks a genuine proj47_train.py --steps run with no run-shape evidence',
+  isDenied('python scripts/proj47_train.py --single proj_every 1337 --steps 4000'));
+
+// More coverage for the 2026-07-05 fix so the exemption stays narrow.
+check('allows a pytest invocation targeting a sweep-named module', !isDenied('pytest tests/test_sweep_runner.py'));
+check('allows python -m pytest', !isDenied('python -m pytest tests/'));
+check('allows tail of a training run log (read-only)', !isDenied('tail -n 50 runs/train_sweep.log'));
+check('allows head+grep pipeline over a runs file (read-only)', !isDenied('head -100 runs/sweep_runs.jsonl | grep proj47'));
+// REGRESSION: a read-only exemption must not swallow a real long run hidden after a diagnostic in the chain.
+check('still blocks a real train run chained after a read-only diagnostic',
+  isDenied('wc -l runs/x.jsonl && python train.py --steps 4000'));
+// REGRESSION: test_*.py exemption must not fire for a non-test python file that merely lives beside tests.
+check('still blocks a real sweep file that is not a test_ file (proj47_sweep.py)',
+  isDenied('python scripts/proj47_sweep.py --steps 4000'));
+
+// Unit-test the two new classifiers directly.
+{
+  check('isUnitTestInvocation: true for python scripts/test_modal_sweep.py',
+    isUnitTestInvocation('python scripts/test_modal_sweep.py'));
+  check('isUnitTestInvocation: true for pytest tests/test_x.py', isUnitTestInvocation('pytest tests/test_x.py'));
+  check('isUnitTestInvocation: true for python -m pytest', isUnitTestInvocation('python -m pytest tests/'));
+  check('isUnitTestInvocation: false for a non-test python file (proj47_sweep.py)',
+    !isUnitTestInvocation('python scripts/proj47_sweep.py --steps 4000'));
+  check('isUnitTestInvocation: false for a bare train.py', !isUnitTestInvocation('python train.py'));
+
+  check('isReadOnlyDiagnostic: true for wc over two run files',
+    isReadOnlyDiagnostic('wc -l runs/proj47_runs.jsonl runs/sleepwake_runs.jsonl'));
+  check('isReadOnlyDiagnostic: true for a head|grep pipeline', isReadOnlyDiagnostic('head -100 runs/x.jsonl | grep proj47'));
+  check('isReadOnlyDiagnostic: true for tail of a log', isReadOnlyDiagnostic('tail -n 50 runs/train_sweep.log'));
+  check('isReadOnlyDiagnostic: false when a python run is in the chain',
+    !isReadOnlyDiagnostic('wc -l runs/x.jsonl && python train.py --steps 4000'));
+  check('isReadOnlyDiagnostic: false for a bare train run', !isReadOnlyDiagnostic('python train.py --steps 4000'));
+}
+
+// Unit-test hasBackgroundJobFanOut directly: 2+ single-& job separators plus a bare `wait`.
+{
+  check('hasBackgroundJobFanOut: true for a & b & c & wait', hasBackgroundJobFanOut('a & b & c & wait'));
+  check('hasBackgroundJobFanOut: false for a && b && c (sequential, no backgrounding)',
+    !hasBackgroundJobFanOut('a && b && c'));
+  check('hasBackgroundJobFanOut: false for a lone backgrounded job (cmd & wait)',
+    !hasBackgroundJobFanOut('cmd & wait'));
+  check('hasBackgroundJobFanOut: false with no wait at all (fire-and-forget, never joined)',
+    !hasBackgroundJobFanOut('a & b & c'));
+  check('hasBackgroundJobFanOut: false for the PowerShell call operator (single leading &, no bare wait)',
+    !hasBackgroundJobFanOut('& "C:\\Program Files\\App\\app.exe" arg1 arg2'));
+  check('hasBackgroundJobFanOut: true for mixed && and & separators as long as 2+ single-& plus wait',
+    hasBackgroundJobFanOut('a & b && c & wait'));
+}
+
+// 2026-07-16 FALSE-BLOCKS: running a HOOK file / temp-dir throwaway / live-fire JSON pipe, and the
+// launch-agent kit's brief GENERATOR, were all denied as "long scripts". They are instantaneous.
+{
+  // (A) hook file / temp dir / live-fire pipe — unit-level.
+  check('isHookOrTempDiagnostic: true for running a hook file', isHookOrTempDiagnostic('node C:/Users/rmill/.claude/hooks/experiment-manifest-guard.mjs'));
+  check('isHookOrTempDiagnostic: true for a /tmp throwaway script', isHookOrTempDiagnostic('node /tmp/dbg2.mjs'));
+  check('isHookOrTempDiagnostic: true for an AppData\\Local\\Temp script',
+    isHookOrTempDiagnostic('node C:/Users/rmill/AppData/Local/Temp/x.mjs'));
+  check('isHookOrTempDiagnostic: true for a live-fire JSON pipe into a hook',
+    isHookOrTempDiagnostic(`printf '{"hook_event_name":"PreToolUse","tool_name":"Bash"}' | node C:/Users/rmill/.claude/hooks/x.mjs`));
+  check('isHookOrTempDiagnostic: false for a real training run', !isHookOrTempDiagnostic('python train.py --steps 4000'));
+  // (A) integration — the guard must ALLOW these shapes even with training keywords nearby.
+  check('allows running a hook file (live-fire target)',
+    !isDenied('node C:/Users/rmill/.claude/hooks/experiment-manifest-guard.mjs'));
+  check('allows a live-fire JSON pipe into a hook',
+    !isDenied(`printf '{"hook_event_name":"PreToolUse","tool_input":{"command":"train sweep"}}' | node C:/Users/rmill/.claude/hooks/x.mjs`));
+  check('allows a /tmp diagnostic even with a training keyword in its name',
+    !isDenied('node /tmp/dbg_train_sweep.mjs'));
+
+  // (C) launch-agent kit brief generator — sub-second template emitter, MANDATED before every spawn.
+  check('isSanctionedInstantTool: true for an agent-kit brief emitter',
+    isSanctionedInstantTool('node ~/.claude/scripts/agent-kit/agent-brief.mjs --task-name x --repo y --mission z'));
+  check('isSanctionedInstantTool: false for an arbitrary node script', !isSanctionedInstantTool('node train_sweep.mjs'));
+  check('allows the agent-brief.mjs generator with many args (the circular-trap false-block)',
+    !isDenied('node ~/.claude/scripts/agent-kit/agent-brief.mjs --task-name fix-x --repo /r --mission m --merge-test "npm test" --goal g'));
+  // REGRESSION: a genuine training sweep is still gated (allowlist stays narrow).
+  check('still blocks a genuine train_sweep.py with no run-shape evidence', isDenied('python train_sweep.py --steps 4000'));
+}
+
+// 2026-07-17 FALSE-BLOCK: a single-pod, single-seed training launch was forced to prove parallelism it
+// cannot have — `--batch-size` matched the `--batch` fan-out flag, and the lone `train` keyword tripped
+// fan-out even for one seed. Fan-out means MULTIPLE units (plural --seeds / --all / a bare --batch).
+{
+  check('looksLikeFanOutWork: false for a single-seed launch with --batch-size (single-pod repro)',
+    !looksLikeFanOutWork('py -3 runpod_exp151.py launch --seed 9151 --batch-size 2 --task-count 4', here));
+  check('looksLikeFanOutWork: false for a lone train keyword + singular --seed',
+    !looksLikeFanOutWork('python train_qwen_dependent.py --seed 9151 --batch-size 2', here));
+  check('looksLikeFanOutWork: true for a plural --seeds multi-seed sweep',
+    looksLikeFanOutWork('python run_exp151_qwen_remote.py --seeds 151 152 153', here));
+  check('looksLikeFanOutWork: false for --batch-size 8 alone (a hyperparameter, not a batch selector)',
+    !looksLikeFanOutWork('python some_script.py --batch-size 8', here));
+  check('looksLikeFanOutWork: true for a bare --batch flag (a real batch/shard selector)',
+    looksLikeFanOutWork('node process-orders.mjs --batch', here));
+  // Integration: the single-pod launch no longer demands parallel evidence.
+  check('allows the single-pod launch (no fan-out, so no parallel requirement)',
+    !isDenied('py -3 runpod_exp151.py launch --artifact-root ../runs/exp151-smoke --seed 9151 --chain-length 2 --scale qwen2.5-coder-1.5b --steps 2 --batch-size 2 --task-count 4'));
 }
 
 if (failures.length) { console.error(`\n${failures.length} check(s) failed.`); process.exit(1); }

@@ -71,6 +71,23 @@ test('an explicit wall-clock self-guard counts even with no small literal', () =
   assert.equal(hasExplicitSmallBound('if time.monotonic() - started > max_seconds: break'), true);
 });
 
+// 2026-07-19 FALSE-BLOCK (marcus): `test_exp147b_mask_smoke.py` — a pytest unit test with static asserts
+// on a small mask tensor, no training loop, no dataset — was blocked only because a module it tests
+// carries "smoke" in its name. Pytest owns test_*.py collection/runtime; they are not smoke *scripts*.
+test('end-to-end ALLOW: a pytest test_*_smoke.py unit test is exempt (no iterable to bound)', () => {
+  const hookDecision = runHook(
+    'scripts/test_exp147b_mask_smoke.py',
+    'import pytest\n\ndef test_mask():\n    mask = build_mask(22)\n    assert mask.shape == (22, 22)\n    assert mask.sum() == 0\n',
+  );
+  assert.equal(hookDecision, '');
+});
+// REGRESSION: a real smoke SCRIPT (not a test_ file) with an opaque named counter is STILL denied —
+// the pytest exemption is basename-scoped and must not touch the guard's core opaque-counter case.
+test('end-to-end: a non-test smoke script with MAX_EPOCHS is STILL denied after the pytest exemption', () => {
+  const hookDecision = runHook('scripts/train_seed_smoke.py', 'MAX_EPOCHS = 2\ntrain_writer_seed(seed=1337)\n');
+  assert.equal(isDenied(hookDecision), true);
+});
+
 test('end-to-end: DENIES a real smoke script shaped exactly like the motivating incident', () => {
   const hookDecision = runHook('scripts/smoke_exp150_deranged.py', 'MAX_EPOCHS = 2\ntrain_writer_seed(seed=1337)\n');
   assert.equal(isDenied(hookDecision), true);

@@ -131,6 +131,33 @@ test('read-only mention of a sibling repo -> allows (read/write intent carve-out
   rmSync(parentDirectory, { recursive: true, force: true });
 });
 
+// 2026-07-16 FALSE-BLOCK: a brief referencing a sibling ONLY read-only (a sys.path import shim
+// `export SRC=<sibling>/src`, reading reference lines) was blocked because the shim clause carries
+// neither a read nor write cue. A self-declared `SIBLING_READ_ONLY:` marker + no git-write clears it.
+test('SIBLING_READ_ONLY marker on a read-only shim (no git-write in sibling) -> allows', () => {
+  const parentDirectory = mkdtempSync(join(tmpdir(), 'agent-spawn-siblings-'));
+  const sessionRepo = join(parentDirectory, 'session'); mkdirSync(join(sessionRepo, '.git'), { recursive: true });
+  const siblingRepo = join(parentDirectory, 'sibling'); mkdirSync(join(siblingRepo, '.git'), { recursive: true });
+  const decision = decideFor(
+    { description: 'import shim', prompt: `${FULL_WORKTREE_BRIEF} export SKAFFEN_SRC=${siblingRepo}/src for imports. SIBLING_READ_ONLY: ${siblingRepo}`, run_in_background: true, isolation: 'worktree' },
+    { workingDirectory: sessionRepo },
+  );
+  assert.equal(isBlocked(decision), false);
+  rmSync(parentDirectory, { recursive: true, force: true });
+});
+test('SIBLING_READ_ONLY marker does NOT disarm a real git-write in the sibling -> still blocks', () => {
+  const parentDirectory = mkdtempSync(join(tmpdir(), 'agent-spawn-siblings-'));
+  const sessionRepo = join(parentDirectory, 'session'); mkdirSync(join(sessionRepo, '.git'), { recursive: true });
+  const siblingRepo = join(parentDirectory, 'sibling'); mkdirSync(join(siblingRepo, '.git'), { recursive: true });
+  const decision = decideFor(
+    { description: 'sneaky write', prompt: `${FULL_WORKTREE_BRIEF} SIBLING_READ_ONLY: ${siblingRepo}. Then git -C ${siblingRepo} checkout -b feature/x.`, run_in_background: true, isolation: 'worktree' },
+    { workingDirectory: sessionRepo },
+  );
+  assert.equal(isBlocked(decision), true);
+  assert.match(reasonOf(decision), /SIBLING repo/);
+  rmSync(parentDirectory, { recursive: true, force: true });
+});
+
 // ── Gate: WIDGET-UX (needs a widget.html on disk) ────────────────────────────────────────────────
 test('brief exposing UX via a CLI in a project with widget.html -> blocks (widget-ux gate)', () => {
   const projectRoot = mkdtempSync(join(tmpdir(), 'agent-spawn-widget-'));

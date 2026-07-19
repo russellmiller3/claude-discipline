@@ -10,6 +10,7 @@ import {
   isTurnStale,
   humanTurnsSince,
   lastHumanPromptIndex,
+  isTddContext,
 } from './instrument-before-debug.mjs';
 
 // Minimal transcript-entry builders matching what lib/transcript.mjs expects (message.role/content).
@@ -29,6 +30,40 @@ test('debugSignal stays quiet on normal, non-debug prompts', () => {
   assert.equal(debugSignal('add a new feature for exporting rows'), null);
   assert.equal(debugSignal('what movies are playing this weekend'), null);
   assert.equal(debugSignal('refactor the recipe runner for clarity'), null);
+});
+
+// 2026-07-16 FALSE-BLOCK: a TDD red→green cycle opened the gate — a freshly-written FAILING pytest
+// (the designed RED) is not an in-app failure to instrument. TDD narration / test-runner markers must
+// suppress the gate; a real in-app complaint must still open it.
+test('debugSignal returns null in a TDD context (red→green, not in-app debugging)', () => {
+  assert.equal(debugSignal('expect RED (import/field missing), then implement to green'), null);
+  assert.equal(debugSignal('failing test first, then make it pass — TDD'), null);
+  assert.equal(debugSignal('pytest collected 3 items\nE   ImportError: cannot import name Foo'), null);
+});
+test('isTddContext detects TDD narration and test-runner output', () => {
+  assert.ok(isTddContext('red-to-green cycle'));
+  assert.ok(isTddContext('this is the red state'));
+  assert.ok(isTddContext('collected 12 items'));
+  assert.equal(isTddContext('the app is still broken in production'), false);
+});
+test('debugSignal STILL fires on a genuine in-app failure (no TDD framing)', () => {
+  assert.ok(debugSignal("it didn't work, routed to sonnet"));
+  assert.ok(debugSignal('still calls claude, you failed'));
+});
+
+// 2026-07-16 FALSE-BLOCK: writing a brand-new file (a fresh TDD test that never ran) opened the gate —
+// a file that has never existed has no failing path to instrument.
+test('decideEdit does NOT block creating a brand-new file (fileExists=false)', () => {
+  assert.equal(decideEdit({ gateActive: true, instrumented: false, filePath: 'src/newthing.py', editText: 'def f(): ...', fileExists: false }).block, false);
+});
+test('decideEdit STILL blocks a blind fix to an EXISTING source file (fileExists=true)', () => {
+  assert.equal(decideEdit({ gateActive: true, instrumented: false, filePath: 'lib/chatRouter.js', editText: 'tier.model = "x";', fileExists: true }).block, true);
+});
+// A pytest test file (test_*.py) is a TEST, not source logic — the gate must not block writing it.
+test('isSourceLogicFile is false for pytest test_*.py and Go *_test.go files', () => {
+  assert.equal(isSourceLogicFile('tests/test_enact_loop.py'), false);
+  assert.equal(isSourceLogicFile('pkg/foo_test.go'), false);
+  assert.ok(isSourceLogicFile('src/enact_loop.py')); // the implementation is still logic
 });
 
 test('isInstrumentationEdit recognizes added logging', () => {

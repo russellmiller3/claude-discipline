@@ -50,6 +50,20 @@ test('isLaunchCommand: malformed / empty input fails safe (not a launch)', () =>
   assert.equal(isLaunchCommand(null), false);
   assert.equal(isLaunchCommand(undefined), false);
 });
+// 2026-07-17 FALSE-BLOCK (marcus exp151): a READ-ONLY command that merely NAMES a launch-named file —
+// a py_compile syntax check, a grep — was blocked as an experiment launch (the old detector keyed on
+// the word "launch" in a filename). The precise detector fires on EXECUTION intent (runpod_*.py launch /
+// modal run / modal_*.py), so naming a launch_*.py file in a syntax check or grep is not a launch.
+test('isLaunchCommand: a py_compile syntax check of a launch-named file is NOT a launch', () => {
+  assert.equal(isLaunchCommand('py -3 -m py_compile launch_exp151_qwen.py run_exp151_qwen_remote.py'), false);
+  assert.equal(isLaunchCommand('cd scripts && py -3 -m py_compile launch_exp151_qwen.py && grep -nE foo x.py'), false);
+});
+test('isLaunchCommand: grepping a run_exp*-named file is NOT a launch', () => {
+  assert.equal(isLaunchCommand('grep -n xyz run_exp151_qwen_remote.py'), false);
+});
+test('isTrainingLaunch: a py_compile of a launch-named file is NOT a training launch', () => {
+  assert.equal(isTrainingLaunch('py -3 -m py_compile launch_exp151_qwen.py'), false);
+});
 
 // ── PreToolUse: DENY a launch with no prior Monitor ──────────────────────────
 test('PreToolUse: DENY launch when no Monitor exists yet', () => {

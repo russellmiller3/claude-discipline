@@ -94,6 +94,15 @@ export function isSmokeScript(filePath) {
 	return SMOKE_NAME.test(fileName) && CODE_EXTENSION.test(fileName);
 }
 
+// A pytest unit-test file (basename `test_*.py`) is bounded by pytest's own collection and is typically a
+// static-assert test with no training loop to bound — it tripped the guard only because a module it tests
+// carries "smoke" in its name (`test_exp147b_mask_smoke.py`). Pytest owns these; step aside. A real smoke
+// TRAINING script is named `*_smoke.py` / `smoke_*.py`, never `test_*.py`, so the guard keeps its teeth on
+// those. (2026-07-19)
+export function isPytestUnitTest(filePath) {
+	return /^test_.*\.py$/i.test(basename(String(filePath || '')));
+}
+
 function main() {
 	if (process.env.SMOKE_BOUNDS_GUARD_OVERRIDE === '1') process.exit(0);
 	let event;
@@ -103,6 +112,8 @@ function main() {
 
 	const filePath = event.tool_input?.file_path || '';
 	if (!isSmokeScript(filePath)) process.exit(0);
+	// A pytest test file has no smoke *script* semantics — pytest bounds it. Step aside.
+	if (isPytestUnitTest(filePath)) process.exit(0);
 
 	const scriptContent = event.tool_input?.content || '';
 	// A plain DOM/browser/unit test named like "smoke" has no bound to prove — step aside (unless it

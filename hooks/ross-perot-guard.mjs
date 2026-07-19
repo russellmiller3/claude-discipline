@@ -26,8 +26,18 @@ import { join } from 'node:path';
 const ALTERNATIVE_PATTERNS = [
   // "Option A" / "Option B" framing
   /\boption\s+[a-d1-4]\b/i,
-  // "either X or Y"
-  /\beither\s+\S+.{0,40}\s+or\s+\S+/i,
+  // "either X or Y" — ONLY when framed as a CHOICE OFFERED to Russell, not outcome narration.
+  // (2026-07-04 FP: "the clone run will either catch it red-handed or eliminate it." — two possible
+  // RESULTS of an experiment, nobody was handed a pick — blocked because the old matcher fired on ANY
+  // bare either..or.) A choice-OFFER carries a frame the narration lacks; require one of:
+  //   (a) a you/we choice verb right before the either — "you could either A or B", "we can either…";
+  /\b(?:you|we)(?:['’]d|\s+(?:could|can|should|might|may|want(?:\s+to)?|prefer(?:\s+to)?|need\s+to|get\s+to))\b[^.!?]{0,40}?\beither\s+\S+[^.!?]{0,40}\bor\s+\S+/i,
+  //   (b) an imperative pick/choose — "pick either the fix or the rewrite";
+  /\b(?:pick|choose)\s+(?:between\s+)?either\b/i,
+  //   (c) an explicit choice NOUN — "either option/approach/path works";
+  /\beither\s+(?:option|choice|approach|path|way|route|direction|one)s?\b/i,
+  //   (d) the either..or inside a question (same-sentence "?").
+  /\beither\s+\S+[^.!?]{0,40}\bor\s+[^.!?]{0,40}\?/i,
   // "your call" / "your pick" / "you decide" / "up to you" — explicit abdication.
   // "your pick"/"your choice" added 2026-06-23: Russell got "Two ways forward, your pick: ...".
   /\b(your call|your pick|your choice|you decide|you choose|up to you|leave it to you|whichever you prefer|you pick)\b/i,
@@ -184,17 +194,73 @@ function solicitsInput(prose) {
 
 // 2026-06-25 (Russell): HANDOFF.md IS the priority queue — keep executing it, don't stop to ask "what next".
 // Only an explicit stop from Russell (or, for a genuinely blocked queue, the override token) ends the run.
+// 2026-07-12: RELEASE signals TIGHTENED (the third leak of the overnight failure): bare "call it" matched
+// ANY "call it …" sentence (the day/night group was optional), and bare "handoff" matched Russell saying
+// "update the handoff and keep going" — both falsely released the queue gate. Releases must be NARROW;
+// the catching side (wind-down closers below) is where broad belongs.
 const STOP_SIGNAL_PATTERNS = [
   /\bstop\b/i, /\bhalt\b/i, /\bpause\b/i, /\bhold (on|up)\b/i,
   /\bwrap (it |things )?up\b/i, /\bthat'?s enough\b/i, /\benough for now\b/i,
-  /\bdone for now\b/i, /\bwe'?re done\b/i, /\bstand down\b/i, /\bcall it (a )?(day|night|here)?\b/i,
-  /\btake a break\b/i, /\bsave context\b/i, /\bhandoff\b/i, /\bthat'?s all\b/i,
+  /\bdone for now\b/i, /\bwe'?re done\b/i, /\bstand down\b/i, /\bcall it( a)? (day|night|here|quits)\b/i,
+  /\btake a break\b/i, /\bsave context\b/i, /\bthat'?s all\b/i,
+  /\b(do|write|prep(?:are)?)\s+(a\s+|the\s+)?handoff\b/i, /\bhandoff\s+(and|then)\s+(pause|stop|sleep)\b/i,
 ];
+
+// 2026-07-12 — AFK GRANT (the overnight failure, Russell: "any idea why you did so little work"). When
+// Russell's LAST real message grants autonomous time ("going to bed", "work on other stuff", "keep going",
+// "afk"), the run is UNRELEASABLE except by an explicit stop signal: his question-mark release is void
+// (he's gone — a pre-bed question is not engagement), and wind-down language has no override. His NEXT
+// real message naturally ends the grant (it becomes the new last message), so presence == normal rules.
+const AFK_GRANT_PATTERNS = [
+  /\bgoing to (bed|sleep)\b/i, /\bgood\s*night\b/i, /\bafk\b/i,
+  // "overnight" only as an ACTION grant ("run/work overnight"), not a topic ("what did you get done overnight?")
+  /\b(?:run|work|going|keep (?:going|working))\b[^.!?]{0,20}\bovernight\b/i,
+  /\bwhile i['’]?m (out|away|asleep|gone|afk)\b/i, /\bback (in a (bit|few|while)|later|tomorrow|in the morning)\b/i,
+  /\bkeep (going|working|at it|grinding)\b/i, /\bwork on other (stuff|things)\b/i,
+  /\bdon['’]?t stop\b/i, /\bautonomy grant\b/i, /\brun autonomous(ly)?\b/i,
+];
+function afkGrantActive(userText, userSaidStop) {
+  if (userSaidStop) return false;                       // an explicit stop beats a grant in the same message
+  return AFK_GRANT_PATTERNS.some((re) => re.test(userText || ''));
+}
+
+// 2026-07-12 — WIND-DOWN closers (the FIRST leak): the overnight run ended with "standing by", "the rest
+// needs you", "nothing else mid-flight", "sleep well" — none in HANDOFF_CLOSERS, so the solicits-input
+// check waved them through. This class catches DISENGAGEMENT language in the message TAIL while the board
+// still has work (or an AFK grant is live). Ending a run is Russell's move, not a sign-off phrase.
+const WIND_DOWN_CLOSERS = [
+  /\bstand(?:ing)?\s+by\b/i,
+  /\bawait(?:ing)?\s+(?:your|further|instructions)\b/i,
+  /\bi['’]?ll\s+(?:hold|wait)\b/i, /\bholding\s+(?:here|off|there|for now)\b/i,
+  /\bnothing\s+(?:else\s+|more\s+)?(?:left|remaining|mid-?flight|in[- ]flight|to\s+(?:do|start|launch))\b/i,
+  /\b(?:rest|sleep)\s+well\b/i, /\bgood\s*night\b/i, /\bsigning\s+off\b/i,
+  /\bwhen\s+you(?:['’]re| are| get)?\s*(?:back|ready|up|wake)\b/i,
+  /\b(?:over|back)\s+to\s+you\b/i, /\ball\s+yours\b/i,
+  /\bthat['’]?s\s+(?:it|all)\s+(?:for\s+now|from\s+me)\b/i,
+  /\bstopping\s+(?:here|the\s+autonomous)\b/i, /\bclean\s+stopping\s+point\b/i,
+  /\bneeds?\s+(?:you\b|your\s+(?:eyes|steering|input|call|decision|framing|go|sign-?off))/i,
+  /\b(?:queue|board|backlog)\s+is\s+(?:genuinely\s+)?(?:empty|clear|worked\s+out|done)\b/i,
+  /\bpick\s+(?:it|this|that)\s+up\s+(?:next\s+session|tomorrow|when\b)/i,
+];
+// A closer that ECHOES Russell's own last message is him deferring that item, not the assistant dodging
+// (e.g. HE says "pick this up next session" → the reply may confirm it without tripping the guard).
+function windDownReason(prose, userText) {
+  const tail = String(prose || '').slice(-250);
+  const closer = WIND_DOWN_CLOSERS.find((re) => re.test(tail) && !re.test(userText || ''));
+  return closer ? `your closing lines disengage (matched ${closer})` : null;
+}
 
 // Queue markers Russell uses in HANDOFF.md — deliberate ALL-CAPS section tags (not prose), plus unchecked
 // markdown checkboxes. Their presence means the priority queue still has open work to execute.
-const HANDOFF_QUEUE_MARKERS = /\b(OWED|QUEUED|STILL QUEUED|NOT STARTED|NOT DONE|TODO)\b/;
+// 2026-07-12 BROADENED (the SECOND leak): the assistant WRITES the queue file it is judged against, and the
+// overnight failure reworded open work into "TOP OPEN ITEMS (need YOU)" / "REMAINING OPEN" — headings the old
+// marker set didn't know. Open-work vocabulary now counts however it's phrased; the ONLY sanctioned release
+// is genuinely pruning finished items out of HANDOFF.md (auditable in git), never re-labeling them.
+const HANDOFF_QUEUE_MARKERS = /\b(OWED|QUEUED|STILL QUEUED|NOT STARTED|NOT DONE|TODO|OPEN ITEMS?|REMAINING OPEN|PICK UP NEXT|NEEDS? YOU)\b/;
+const HANDOFF_QUEUE_MARKERS_PROSE = /\bopen (items?|follow-?ups?|questions?|work)\b|\bnext session\b|\bneed(?:s)? (?:you|russell)\b/i;
 const HANDOFF_UNCHECKED_BOX = /^\s*[-*]\s*\[ \]\s+\S/m;
+// Active work is often encoded by the handoff's structure, not status words.
+const HANDOFF_ACTIVE_HEADING = /^\s*#{1,6}\s+(?:next|up next|resume)\b/im;
 
 function handoffHasOpenQueue(projectDir) {
   if (!projectDir) return false;
@@ -202,7 +268,14 @@ function handoffHasOpenQueue(projectDir) {
   if (!existsSync(handoffPath)) return false;
   let handoffContent;
   try { handoffContent = readFileSync(handoffPath, 'utf8'); } catch { return false; }
-  return HANDOFF_UNCHECKED_BOX.test(handoffContent) || HANDOFF_QUEUE_MARKERS.test(handoffContent);
+  // Struck-through lines (~~…~~) and ✅-DONE lines are finished work legitimately left as history —
+  // don't let a completed item's leftover "OWED" keep the gate armed forever.
+  const liveContent = handoffContent.split('\n')
+    .filter((line) => !/~~.*~~/.test(line) && !/✅/.test(line)).join('\n');
+  return HANDOFF_UNCHECKED_BOX.test(liveContent)
+    || HANDOFF_ACTIVE_HEADING.test(liveContent)
+    || HANDOFF_QUEUE_MARKERS.test(liveContent)
+    || HANDOFF_QUEUE_MARKERS_PROSE.test(liveContent);
 }
 
 // Count background agents STILL IN FLIGHT: run_in_background:true Agent spawns whose tool-use id has not been
@@ -218,6 +291,21 @@ function activeBackgroundAgentCount(transcriptPath) {
   const liveSpawnIds = new Set();
   const agentRe = /"id"\s*:\s*"(toolu_[A-Za-z0-9_]+)"[\s\S]{0,200}?"name"\s*:\s*"Agent"[\s\S]{0,3000}?"run_in_background"\s*:\s*true/g;
   for (const spawnMatch of content.matchAll(agentRe)) liveSpawnIds.add(spawnMatch[1]);
+  if (liveSpawnIds.size === 0) return 0;
+  // A spawn the harness DENIED (a PreToolUse hook blocked it) never started an agent — its paired
+  // tool_result is an error. Drop those ids: a blocked spawn is not in flight. (2026-07-16, after
+  // agent-sidebar-only blocked 3 read-only spawns and the Stop gate reported "3 in flight" with zero
+  // real agents.) Parse JSONL so is_error is bound to the RIGHT tool_use_id, not a nearby one.
+  for (const line of content.split('\n')) {
+    let entry; try { entry = JSON.parse(line); } catch { continue; }
+    const blocks = entry?.message?.content;
+    if (!Array.isArray(blocks)) continue;
+    for (const block of blocks) {
+      if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue;
+      const resultText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '');
+      if (block.is_error === true || /spawn\s+BLOCKED|denied/i.test(resultText)) liveSpawnIds.delete(block.tool_use_id);
+    }
+  }
   if (liveSpawnIds.size === 0) return 0;
   const notificationRe = /<task-notification>([\s\S]*?)<\/task-notification>/g;
   for (const notification of content.matchAll(notificationRe)) {
@@ -283,33 +371,9 @@ async function main() {
   const userInSurveyMode = USER_PAUSE_PATTERNS.some(p => p.test(userText));
   if (userInSurveyMode) { process.exit(0); return; }
 
-  // SOLICITS-INPUT check — the structural replacement for the old asking-permission phrase museum. Fires on
-  // its own (no option-list required): block if the final message ends by handing Russell the next decision
-  // (a trailing "?" OR a no-"?" hand-off closer). Survey mode already early-exited above; the override token
-  // is the only extra escape — a genuine question belongs in the AskUserQuestion tool, not a prose "?".
-  const askProse = text.split(/\*\*Files touched:\*\*/i)[0];
-  const solicitation = solicitsInput(askProse);
-  if (solicitation && !ROSS_PEROT_OVERRIDE.test(text)) {
-    process.stdout.write(JSON.stringify({
-      decision: 'block',
-      reason: `STOP-BLOCKED — soliciting Russell's input instead of leading (Ross Perot Rule).
-
-${solicitation[0].toUpperCase() + solicitation.slice(1)}.
-
-Russell's Ross Perot Rule: never wait for permission. Work out what he's trying to accomplish and just do
-the most complete version. Ending on a question / "your call" / "say the word" hands him a decision he
-shouldn't have to make — it costs him energy (Mito + ADHD), and a trailing question is an OCD trigger.
-
-End on a DECISION and act in the same turn:
-  - "Doing X now." / "I'd do X unless you object — going with it."
-  - Obvious next step → just do it; don't ask, don't announce.
-  - A genuine fork or a real blocker (money / destructive / hardware / missing info you truly can't get):
-    use the AskUserQuestion TOOL (not a prose "?"), or STATE it — "the one call I can't make for you is X" —
-    then add  ross-perot-override: <why this genuinely needs Russell>.`,
-    }));
-    process.exit(0);
-    return;
-  }
+  // Shared release/grant state (2026-07-12): computed once, used by wind-down + the queue gate.
+  const userSaidStop = STOP_SIGNAL_PATTERNS.some(p => p.test(userText));
+  const afkActive = afkGrantActive(userText, userSaidStop);
 
   // LIST-AND-DEFER check (2026-06-25) — enumerated divergences DISMISSED instead of fixed. Fires regardless of
   // builder mode: even after fixing one item, waving off the rest as "intentional / cosmetic / not a break" is
@@ -401,8 +465,10 @@ Either do it now (the default — keep working in this turn), or justify honestl
   // call to make — keep finding doable work (prep, docs, the next phase, reviewing in-flight output) until Russell
   // says stop or the queue is empty. (The override still works on the phrasing checks above, where a real fork
   // legitimately needs Russell — it just can't end the QUEUE run.)
-  const userSaidStop = STOP_SIGNAL_PATTERNS.some(p => p.test(userText));
-  const userAskedQuestion = /\?\s*$/.test((userText || '').trim());
+  // userSaidStop/afkActive hoisted above (shared with the wind-down check). 2026-07-12: a trailing "?"
+  // from Russell releases this gate ONLY when no AFK grant is live — overnight, a pre-bed question is
+  // not engagement, and "answer it, then quit" was the exact leak.
+  const userAskedQuestion = /\?\s*$/.test((userText || '').trim()) && !afkActive;
   const liveAgents = activeBackgroundAgentCount(payload.transcript_path);
   if (!userSaidStop && !userAskedQuestion && handoffHasOpenQueue(payload.cwd)) {
     // Tailor the directive to whether work is already in flight. Russell's intent (2026-06-28): agents running is
@@ -423,6 +489,67 @@ This run ends ONLY when:
   - the queue is genuinely EMPTY (no OWED / QUEUED / NOT DONE / unchecked items left in HANDOFF.md).
 
 There is NO self-override on this gate. "Holding", "waiting for it to land", "monitoring", or "I'll integrate when it finishes" are NOT acceptable turn-enders while independent work remains — review HANDOFF + the roadmap and launch it.`,
+    }));
+    process.exit(0);
+    return;
+  }
+
+  // WIND-DOWN check (2026-07-12 — the overnight failure): the reply DISENGAGES ("standing by",
+  // "needs your eyes", "nothing else mid-flight", "sleep well") while the board still has work or an
+  // AFK grant is live. Fires REGARDLESS of a trailing "?" in Russell's message — answering a pre-bed
+  // question is not a release. Escapes: Russell's explicit stop; the override token ONLY when no AFK
+  // grant is active (overnight, self-certified "blocked/done" is exactly the abuse this closes).
+  if (!userSaidStop && (afkActive || handoffHasOpenQueue(payload.cwd))) {
+    const windDown = windDownReason(text, userText);
+    const overrideAllowed = !afkActive && ROSS_PEROT_OVERRIDE.test(text);
+    if (windDown && !overrideAllowed) {
+      process.stdout.write(JSON.stringify({
+        decision: 'block',
+        reason: `STOP-BLOCKED — winding down while the board still has work (Ross Perot Rule).
+
+${windDown[0].toUpperCase() + windDown.slice(1)}.
+
+This is the 2026-07-12 overnight failure: "standing by" / "the rest needs you" / "nothing left" ended an
+AFK run while HANDOFF.md still listed open work — Russell woke up to a short shift. Ending the run is
+RUSSELL's move, never a sign-off phrase. ${afkActive ? 'An AFK grant is ACTIVE — there is NO self-override overnight.' : ''}
+
+Instead of disengaging:
+  - Take the next open HANDOFF item and DO it (or fan out agents for every independent unit).
+  - Out of listed work? GENERATE more: a Kintsugi round, a bench retrofit, doc backfill — the generator
+    role never runs dry.
+  - If an item truly needs Russell live, leave it on the board and work a DIFFERENT one — "needs you"
+    is a property of one item, never a reason to end the run.
+  - If the queue is GENUINELY empty, prune the finished items OUT of HANDOFF.md (auditable in git) so
+    the gate reads empty — do not re-label open work as "needs you" / "next session".${afkActive ? '' : '\n  - Real fork with Russell PRESENT: ross-perot-override: <why stopping is right>.'}`,
+      }));
+      process.exit(0);
+      return;
+    }
+  }
+
+  // SOLICITS-INPUT check — the structural replacement for the old asking-permission phrase museum. Fires on
+  // its own (no option-list required): block if the final message ends by handing Russell the next decision
+  // (a trailing "?" OR a no-"?" hand-off closer). Survey mode already early-exited above; the override token
+  // is the only extra escape — a genuine question belongs in the AskUserQuestion tool, not a prose "?".
+  const askProse = text.split(/\*\*Files touched:\*\*/i)[0];
+  const solicitation = solicitsInput(askProse);
+  if (solicitation && !ROSS_PEROT_OVERRIDE.test(text)) {
+    process.stdout.write(JSON.stringify({
+      decision: 'block',
+      reason: `STOP-BLOCKED — soliciting Russell's input instead of leading (Ross Perot Rule).
+
+${solicitation[0].toUpperCase() + solicitation.slice(1)}.
+
+Russell's Ross Perot Rule: never wait for permission. Work out what he's trying to accomplish and just do
+the most complete version. Ending on a question / "your call" / "say the word" hands him a decision he
+shouldn't have to make — it costs him energy (Mito + ADHD), and a trailing question is an OCD trigger.
+
+End on a DECISION and act in the same turn:
+  - "Doing X now." / "I'd do X unless you object — going with it."
+  - Obvious next step → just do it; don't ask, don't announce.
+  - A genuine fork or a real blocker (money / destructive / hardware / missing info you truly can't get):
+    use the AskUserQuestion TOOL (not a prose "?"), or STATE it — "the one call I can't make for you is X" —
+    then add  ross-perot-override: <why this genuinely needs Russell>.`,
     }));
     process.exit(0);
     return;

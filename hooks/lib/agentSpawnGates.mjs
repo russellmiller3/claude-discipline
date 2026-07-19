@@ -125,6 +125,36 @@ function isReadOnlyMention(prompt, index, normalizedPath) {
   return READ_CUE.test(clause);
 }
 
+function escapeForRegExp(rawText) {
+  return String(rawText).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// A brief can self-declare a sibling as read-only: `SIBLING_READ_ONLY: <repo path or name>`. It asserts
+// the agent will run no git-write commands nor file writes in that sibling, so the shared-working-tree
+// hazard the gate protects against can't occur (a read-only sys.path shim, reading reference lines).
+// Returns the set of declared tokens — both the full normalized path and its last segment (sibling name).
+// (2026-07-16)
+function declaredReadOnlySiblings(prompt) {
+  const declared = new Set();
+  for (const marker of prompt.matchAll(/SIBLING_READ_ONLY\s*:\s*([^\s`'"<>|]+)/gi)) {
+    const token = normalizePath(marker[1].replace(/[.,;:)\]]+$/, ''));
+    if (!token) continue;
+    declared.add(token);
+    declared.add(token.split('/').pop());
+  }
+  return declared;
+}
+
+// Write-shaped git commands that mutate a repo's HEAD/branches — the exact hazard under a shared working
+// tree. Read forms (log/show/diff/status/rev-parse) are safe and never counted.
+const WRITE_GIT_VERB = 'checkout|branch|commit|merge|reset|rebase|switch|push|worktree\\s+add|cherry-pick|stash|clean|apply|am';
+function hasWriteGitTargetingSibling(prompt, siblingName) {
+  const name = escapeForRegExp(siblingName);
+  const cForm = new RegExp(`\\bgit\\s+-C\\s+\\S*${name}\\S*\\s+(?:${WRITE_GIT_VERB})\\b`, 'i');
+  const cdForm = new RegExp(`\\bcd\\s+\\S*${name}\\S*[^\\n]*?&&\\s*git\\s+(?:${WRITE_GIT_VERB})\\b`, 'i');
+  return cForm.test(prompt) || cdForm.test(prompt);
+}
+
 export function gateCrossRepo(input, context) {
   const prompt = input.prompt || '';
   if (/\bworktree\s+add\b/i.test(prompt)) return null;
@@ -144,9 +174,20 @@ export function gateCrossRepo(input, context) {
     siblingMentions.push({ targetPath, index, siblingName });
   }
   if (!siblingMentions.length) return null;
-  if (siblingMentions.every(({ index, targetPath }) => isReadOnlyMention(prompt, index, targetPath))) return null;
 
-  const siblingName = siblingMentions[0].siblingName;
+  // A mention is safe if its clause reads read-only, OR the brief self-declared the sibling READ-ONLY
+  // and no write-shaped git command actually targets it. What's left is a genuine shared-tree hazard.
+  const declaredReadOnly = declaredReadOnlySiblings(prompt);
+  const hazardMentions = siblingMentions.filter(({ index, targetPath, siblingName }) => {
+    if (isReadOnlyMention(prompt, index, targetPath)) return false;
+    const isDeclared = declaredReadOnly.has(siblingName) || declaredReadOnly.has(targetPath)
+      || [...declaredReadOnly].some((token) => targetPath === token || targetPath.startsWith(token + '/'));
+    if (isDeclared && !hasWriteGitTargetingSibling(prompt, siblingName)) return false;
+    return true;
+  });
+  if (!hazardMentions.length) return null;
+
+  const siblingName = hazardMentions[0].siblingName;
   return `"${input.description || '(unnamed)'}" works in a SIBLING repo (${siblingName}) by absolute path but never sets up its own git worktree there.
 
 Russell's rule (2026-06-29): isolation:"worktree" isolates the SESSION repo, NOT a sibling repo driven by absolute path — so every such agent shares the sibling's one working tree and their \`git checkout -b\` calls reset HEAD under each other.

@@ -19,15 +19,19 @@ const HOOK = join(here, 'ross-perot-guard.mjs');
 // Build a transcript (user prompt + one assistant entry). withEdit adds an Edit tool_use block so the
 // turn counts as "builder mode". Returns the path. The hook reads transcript_path from its payload.
 let seq = 0;
-function transcript(userText, assistantText, { withEdit = false, agentInFlight = false } = {}) {
+function transcript(userText, assistantText, { withEdit = false, agentInFlight = false, agentBlocked = false } = {}) {
   const assistantBlocks = [];
   if (withEdit) assistantBlocks.push({ type: 'tool_use', name: 'Edit', input: {} });
   // A run_in_background Agent spawn with NO completing task-notification = an agent still in flight.
   if (agentInFlight) assistantBlocks.push({ type: 'tool_use', id: 'toolu_inflight1', name: 'Agent', input: { run_in_background: true, prompt: 'do work' } });
+  // A spawn the harness DENIED (PreToolUse hook blocked it) — the paired tool_result is an error, so no
+  // agent ever started; it must NOT be counted as in flight.
+  if (agentBlocked) assistantBlocks.push({ type: 'tool_use', id: 'toolu_blocked1', name: 'Agent', input: { run_in_background: true, prompt: 'research' } });
   assistantBlocks.push({ type: 'text', text: assistantText });
   const lines = [
     { type: 'user', message: { role: 'user', content: [{ type: 'text', text: userText }] } },
     { type: 'assistant', message: { role: 'assistant', content: assistantBlocks } },
+    ...(agentBlocked ? [{ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_blocked1', is_error: true, content: 'Agent spawn BLOCKED — read-only research denied' }] } }] : []),
   ].map((e) => JSON.stringify(e)).join('\n');
   const path = join(tmpdir(), `recommend-test-${process.pid}-${seq++}.jsonl`);
   writeFileSync(path, lines);
@@ -168,6 +172,15 @@ check('queue-aware: blocks idling/"holding" while a background agent is in fligh
 check('queue-aware: still blocks idling with NO agents in flight (do the next item yourself)',
   isBlockedInProject(transcript('keep going', 'Holding here for now.'), projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
 
+// 2026-07-16 FALSE-POSITIVE: a spawn DENIED by a PreToolUse hook (errored tool_result) was counted as
+// "in flight" — the Stop gate reported "3 agents IN FLIGHT" on a conversational turn with ZERO real
+// agents. A blocked spawn never started an agent, so the in-flight directive must NOT fire.
+{
+  const reason = blockReasonInProject(transcript('keep going', 'Holding here for now.', { agentBlocked: true }), projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE));
+  check('blocked spawn (errored tool_result) is NOT counted as an agent in flight',
+    !/IN FLIGHT/i.test(reason));
+}
+
 // NEW (2026-06-25): LIST-AND-DEFER — enumerating divergences then dismissing them as "intentional/cosmetic"
 // instead of fixing must BLOCK. The exact miss: "do all of them in parallel. why didn't you go onto them?"
 const LIST_AND_DEFER = [
@@ -221,6 +234,113 @@ check('does NOT block a trailing "?" in survey/think mode',
   !isBlocked(transcript('what do you think — just brainstorm', 'Two angles here. Which feels closer to your intent?')));
 check('still passes a clean enumerated summary that ends on a statement',
   !isBlocked(transcript('what changed?', '- Added the tool\n- Wrote tests\n- Rebuilt the bundle\nAll shipped and green.')));
+
+// NEW (2026-07-04): EITHER/OR false positive — outcome NARRATION is not a choice-offer. The old matcher
+// /\beither\s+\S+.{0,40}\s+or\s+\S+/i blocked "the clone run will either catch it red-handed or eliminate
+// it." — a description of an experiment's two possible RESULTS; nobody was handed a pick. Now either..or
+// only counts as an alternatives-offer when a CHOICE FRAME is present: a you/we choice verb ("you could
+// either", "we can either"), an imperative pick/choose, an explicit choice noun ("either option/way/…"),
+// or the either..or sitting inside a question.
+check('allows outcome narration: "the clone run will either catch it red-handed or eliminate it."',
+  !isBlocked(transcript('root-cause it', 'Launched. The clone run will either catch it red-handed or eliminate it.')));
+check('allows either/or narration of a diagnostic fork',
+  !isBlocked(transcript('debug it', 'The probe will either reproduce the crash or rule out the cache.')));
+check('still blocks choice-framed either/or: "we could either do A or B - which do you prefer?"',
+  isBlocked(transcript('which approach?', 'We could either do A or B - which do you prefer?')));
+check('still blocks a you/we-framed either/or even without a question mark',
+  isBlocked(transcript('which approach?', 'You could either patch the parser or rewrite the tokenizer here.')));
+check('still blocks "either option works, your call"',
+  isBlocked(transcript('which approach?', 'Either option works, your call.')));
+check('still blocks imperative "pick either A or B"',
+  isBlocked(transcript('which approach?', 'Pick either the parser fix or the tokenizer rewrite.')));
+// Addenda regressions: the guard's real catches must survive the narrowing.
+check('still blocks "say the word" closer (either/or-fix regression)',
+  isBlocked(transcript('keep going', 'Done and verified. Say the word.')));
+check('still blocks "your call" closer (either/or-fix regression)',
+  isBlocked(transcript('keep going', 'Both fixes are staged. Your call.')));
+check('still blocks "want me to A or B?" (either/or-fix regression)',
+  isBlocked(transcript('keep going', 'Want me to refactor the parser or patch the call site?')));
+
+// ══ 2026-07-12 — WIND-DOWN + AFK hardening (the overnight failure: "standing by" / "needs your eyes" /
+// "nothing left" ended an AFK run while the board had work; Russell: "make it as broad as possible"). ══
+
+// Wind-down closers block while the queue has open work (Russell present, no stop signal).
+check('wind-down: "standing by" blocked while queue open',
+  isBlockedInProject(transcript('thanks', 'All committed and green. Standing by.'),
+    projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
+check('wind-down: "the rest needs your eyes" blocked while queue open',
+  isBlockedInProject(transcript('thanks', 'Summary above — the rest needs your eyes.'),
+    projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
+check('wind-down: "nothing else mid-flight" blocked while queue open',
+  isBlockedInProject(transcript('thanks', 'Everything is committed. Nothing else mid-flight.'),
+    projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
+
+// AFK grant: wind-down blocked even with NO handoff file at all (the grant alone arms the guard).
+check('afk: "sleep well" sign-off blocked under a going-to-bed grant (no HANDOFF needed)',
+  isBlocked(transcript('yes do that and then work on other stuff. going to bed',
+    'It is all committed and green. Sleep well.')));
+// AFK voids the question-mark release: a pre-bed question is not engagement.
+check('afk: pre-bed question does NOT release the queue gate',
+  isBlockedInProject(transcript('going to bed — anything else you need?', 'All done, summary above.'),
+    projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
+// Without a grant, Russell's question still releases the queue gate (conversation must breathe).
+check('no-afk: a plain question + clean answer still passes',
+  !isBlockedInProject(transcript('what did you get done overnight?', 'Here is the summary: exp134 landed, gate green.'),
+    projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
+
+// Override rules: allowed when Russell is present (on a question-released turn — with an unreleased
+// open queue the QUEUE gate blocks regardless, by its own no-self-override design); DEAD under AFK.
+check('wind-down: override token works when Russell is present (question-released turn)',
+  !isBlockedInProject(transcript('did the branch land?', 'Yes, landed and green. Standing by. ross-perot-override: Russell told me to hold this branch for review.'),
+    projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
+check('afk: override token is DEAD under a grant',
+  isBlocked(transcript('keep working, going to bed',
+    'Standing by. ross-perot-override: everything is genuinely blocked.')));
+
+// Echo exemption: Russell HIMSELF deferring an item is not the assistant dodging.
+check('echo: confirming Russell\'s own "pick this up next session" passes',
+  !isBlockedInProject(transcript('let\'s pick this up next session, ok?', 'Flagged — we will pick it up next session.'),
+    projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
+
+// Broadened queue markers: the reworded-handoff dodge ("OPEN ITEMS (need YOU)") still arms the gate,
+// and the question-release leak is covered by wind-down firing anyway.
+check('markers: "TOP OPEN ITEMS (need YOU)" arms the gate; wind-down fires past a "?" release',
+  isBlockedInProject(transcript('status?', 'All quiet. Holding here for now.'),
+    projectWithHandoff('# HANDOFF\n\n**TOP OPEN ITEMS (need YOU):** review the explainer.\n')));
+// Struck-through / ✅-DONE leftovers do NOT arm the gate (sanctioned release = pruning finished work).
+check('markers: struck-through OWED and ✅ lines do not arm the gate',
+  !isBlockedInProject(transcript('thanks', 'All wrapped and verified.'),
+    projectWithHandoff('# HANDOFF\n\n~~OWED: old thing~~\n✅ DONE (was OWED): shipped it\n')));
+
+// Release tightening: bare "call it …" and "update the handoff" are NOT stop signals any more.
+check('release: "call it what you want" is not a stop signal',
+  isBlockedInProject(transcript('call it what you want, that name is fine.', 'Holding here for now.'),
+    projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
+check('release: "update the handoff and continue" is not a stop signal',
+  isBlockedInProject(transcript('update the handoff and continue', 'Holding here for now.'),
+    projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
+check('release: "write a handoff and pause" IS a stop signal — wind-down allowed',
+  !isBlockedInProject(transcript('write a handoff and pause', 'Handoff written. Standing by.'),
+    projectWithHandoff(HANDOFF_WITH_OPEN_QUEUE)));
+
+// A short side request must not erase the active project task. The real Lej
+// handoff used a plain "## Next - exp148 only" heading, which carried active
+// work without any of the old queue-marker words.
+check('interrupted-task return: plain Next heading keeps the active queue armed',
+  isBlockedInProject(
+    transcript(
+      'add a global Git Bash rule',
+      'Added globally: every shell command now uses Git Bash.',
+      { withEdit: true },
+    ),
+    projectWithHandoff([
+      '# Handoff',
+      '',
+      '## Next - exp148 only',
+      '',
+      'Build the fresh two-hop ruler and record the result.',
+    ].join('\n')),
+  ));
 
 if (failures.length) { console.error(`\n${failures.length} check(s) failed.`); process.exit(1); }
 console.log('\nAll ross-perot-guard checks passed.');

@@ -44,7 +44,7 @@
 // Fails OPEN on any error (a buggy guard must never block all work).
 // =============================================================================
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -80,7 +80,22 @@ const INSTRUMENTATION = [
 const OVERRIDE = /\b(instrumented|instrument-override)\s*:/i;
 
 const SOURCE_LOGIC = /\.(js|mjs|cjs|jsx|ts|tsx|svelte|py|go|rs|rb|java)$/i;
-const NOT_LOGIC = /(\.test\.|\.spec\.|\.d\.ts$|\.md$|\.json$|\.css$|\.html$)/i;
+// A test file is not source logic. Covers JS/TS `.test.`/`.spec.`, pytest `test_*.py` (prefix, not a
+// `.test.` infix), and Go `*_test.go` — writing/editing a test in a red phase must never trip the gate.
+const NOT_LOGIC = /(\.test\.|\.spec\.|\.d\.ts$|\.md$|\.json$|\.css$|\.html$|(?:^|[\\/])test_[^\\/]*\.py$|_test\.(?:py|go)$)/i;
+
+// A red→green (test-driven) cycle is NOT in-app debugging: a freshly-written FAILING test is the
+// designed RED state the next edit turns green, not a running-app failure to instrument. Anchor on
+// test-driven NARRATION or TEST-RUNNER output — never on a bare error token (an ImportError can appear
+// in a real runtime trace that MUST still open the gate). (2026-07-16)
+const RED_GREEN_MARKERS = [
+  /\bexpect(?:ing)?\s+(?:a\s+)?red\b/i,
+  /\bred[\s-]*(?:→|->|to)[\s-]*green\b/i,
+  /\bred\s+(?:state|phase)\b/i,
+  /\bfailing\s+test\s+first\b/i,
+  /\bTDD\b/,
+  /\bcollected\s+\d+\s+items?\b/i,   // pytest session header
+];
 
 // A path-or-basename-looking token in the triggering message, e.g. "chatRouter.js" or
 // "extension/lib/chatRouter.js" or "the tierRouter module". Loose on purpose — this only
@@ -144,9 +159,19 @@ export function lastHumanPromptIndex(entries) {
   return -1;
 }
 
+/** Is the message a red→green (test-driven) cycle rather than in-app debugging? Pure. Exported as
+ *  isTddContext for the test suite's naming; anchored on narration/test-runner output, not error tokens. */
+export function isRedGreenCycle(messageText) {
+  const haystack = String(messageText || '');
+  return RED_GREEN_MARKERS.some((pattern) => pattern.test(haystack));
+}
+export { isRedGreenCycle as isTddContext };
+
 /** Does the message carry a debugging-an-in-app-failure signal? Pure. Returns the matched reason or null. */
 export function debugSignal(messageText) {
   const haystack = String(messageText || '');
+  // A red→green cycle (a freshly-written failing test) is not an in-app failure — never open the gate.
+  if (isRedGreenCycle(haystack)) return null;
   for (const pattern of DEBUG_SIGNAL) {
     const match = haystack.match(pattern);
     if (match) return match[0].slice(0, 60);
@@ -175,10 +200,11 @@ export function isSourceLogicFile(filePath) {
  * on that axis" so callers that don't track them (or old gate files written before this fix) keep the
  * prior behavior instead of silently disarming.
  */
-export function decideEdit({ gateActive, instrumented, filePath, editText, turnsSinceOpen, mentionedBasenames }) {
+export function decideEdit({ gateActive, instrumented, filePath, editText, turnsSinceOpen, mentionedBasenames, fileExists }) {
   if (!gateActive || instrumented) return { block: false, clears: false };
   if (isTurnStale(turnsSinceOpen)) return { block: false, clears: false };             // signal went cold — let it lapse
   if (OVERRIDE.test(String(editText || ''))) return { block: false, clears: true };   // explicitly handled
+  if (fileExists === false) return { block: false, clears: false };                    // brand-new file — no failing path to instrument
   if (!isSourceLogicFile(filePath)) return { block: false, clears: false };            // test/doc/etc — fine
   if (isInstrumentationEdit(editText)) return { block: false, clears: true };           // you're instrumenting
   if (!isTargetInScope(filePath, mentionedBasenames)) return { block: false, clears: false }; // unrelated file — fine
@@ -262,6 +288,8 @@ function main() {
 
   const entries = readTranscript(event.transcript_path);
   const turnsSinceOpen = humanTurnsSince(entries, gate.openedAtIndex);
+  // A file that doesn't exist yet has no failing path to instrument — creating it is never a blind fix.
+  const fileExists = (() => { try { return existsSync(filePath); } catch { return true; } })();
 
   const verdict = decideEdit({
     gateActive: true,
@@ -270,6 +298,7 @@ function main() {
     editText,
     turnsSinceOpen,
     mentionedBasenames: gate.mentionedBasenames,
+    fileExists,
   });
   if (verdict.clears) { writeGate({ ...gate, instrumented: true }); process.exit(0); return; } // instrumented/overridden
   if (!verdict.block) { process.exit(0); return; }

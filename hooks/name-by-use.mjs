@@ -72,6 +72,12 @@ const TECH_ACRONYM_ALLOWLIST = new Set([
 
 const VOWELS = /[aeiouy]/;
 
+// A model-size designator — 7b, 1.5b, 15b, 70b — is a parameter-count suffix that is part of the
+// upstream model's LITERAL product name (Qwen2.5-Coder-7B-Instruct, Llama-3-70B), not a cryptic
+// abbreviation. Spelling it out ("SEVEN_BILLION") makes identifiers worse and breaks the convention
+// every ML repo uses, so it's allowed exactly like `csv`/`url`/`id`. (2026-07-16, marcus exp154)
+const MODEL_SIZE_DESIGNATOR = /^\d+(?:_\d+)?b$/i;
+
 /** Is `name` a cryptic vowelless abbreviation (not a standard tech acronym)?
  *  Returns the offending segment to name in the error, or null when it's fine.
  *  Checks the whole token AND each snake_case segment (so hours_hhmm is caught). */
@@ -80,6 +86,7 @@ function crypticAbbreviation(name) {
   for (const segment of [lower, ...lower.split('_')]) {
     if (segment.length < 2) continue;            // single letters handled elsewhere
     if (TECH_ACRONYM_ALLOWLIST.has(segment)) continue;
+    if (MODEL_SIZE_DESIGNATOR.test(segment)) continue; // 7b/15b/70b — a model's literal name, not cryptic
     if (!VOWELS.test(segment)) return segment;   // no vowel + not a known acronym = cryptic
   }
   return null;

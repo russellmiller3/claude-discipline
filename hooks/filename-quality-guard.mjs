@@ -100,6 +100,14 @@ const COMMON_WORDS = new Set([
   // "audit" sits one edit from "audio" (OSA distance 1) and was false-blocked as a likely typo
   // ("delete-audit-guard.mjs", 2026-07-03) — a real, common word, not a misspelling.
   'audit', 'audits', 'auditing', 'auditor',
+  // "cause" sits one edit (single insertion) from "clause" (OSA distance 1) and was false-blocked
+  // as a likely typo of "clause" — a real, common word, and the exact stem the ROOT-CAUSE-FIRST
+  // hook requires ("root-cause-analysis.md", "root-cause.md" false-blocked, 2026-07-13).
+  'cause', 'causes', 'caused', 'causal', 'causing',
+  // Engineering vocabulary that sits one edit from a listed word but is itself a real, standard term:
+  // "drain" (a log drain — Heroku/Fly/Papertrail) is NOT a typo of "brain". Listing = known-good.
+  // (2026-07-17, "test_telemetry_drain.py" false-blocked.)
+  'drain', 'drains', 'sink', 'sinks', 'pump', 'pumps', 'spool', 'stub', 'stubs', 'fake', 'fakes',
 ]);
 
 // Optimal String Alignment distance (Levenshtein + adjacent transposition counted as one edit). Bounded
@@ -128,6 +136,19 @@ function osaDistance(left, right) {
 
 function hasVowel(word) {
   return /[aeiouy]/.test(word);
+}
+
+// A token is "known" if it's listed directly OR is a standard English plural (word+s / word+es) of a
+// listed word. Without this, a correct plural sits one OSA edit from its singular and gets flagged as
+// a typo ("checks" was blocked as a misspelling of "check" in skip-phone-width-checks.md, 2026-07-12).
+// Real typos keep blocking: the exemption needs the SINGULAR to be a known word ("findigns" → "findign"
+// is not one, so it still hits the near-miss check and blocks on "findings").
+function isKnownWord(token) {
+  const listed = (word) => COMMON_WORDS.has(word) || ALLOWED_STEMS.has(word) || KNOWN_ACRONYMS.has(word);
+  if (listed(token)) return true;
+  if (token.endsWith('es') && listed(token.slice(0, -2))) return true;
+  if (token.endsWith('s') && listed(token.slice(0, -1))) return true;
+  return false;
 }
 
 // Split a stem into alphabetic word tokens: break on -, _, ., space, digits, and camelCase boundaries.
@@ -194,7 +215,7 @@ export function assessFilename(filePath) {
     if (token.length >= 5 && !hasVowel(token) && !KNOWN_ACRONYMS.has(token)) {
       return { ok: false, reason: `"${base}" has a vowelless token "${token}" — looks like a dropped-vowel abbreviation or typo.`, suggestion: 'Spell the word out in full.' };
     }
-    if (token.length >= 5 && !COMMON_WORDS.has(token) && !ALLOWED_STEMS.has(token) && !KNOWN_ACRONYMS.has(token)) {
+    if (token.length >= 5 && !isKnownWord(token)) {
       // Near-miss typo: one edit from a known word but not itself a known word.
       for (const knownWord of COMMON_WORDS) {
         if (Math.abs(knownWord.length - token.length) > 1) continue;

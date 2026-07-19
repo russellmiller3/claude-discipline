@@ -148,6 +148,9 @@ export function looksLikeBenchmark(command) {
   if (/\b(pytest|vitest|playwright|svelte-check|eslint|prettier)\b/.test(loweredCommand)) return false;
   // `node --check X` is a SYNTAX parse, not a run — never a benchmark, even on a bench/suite file.
   if (/\bnode\s+--check\b/.test(loweredCommand)) return false;
+  // `py_compile` / `compileall` compile source to bytecode — a syntax check (<2s), never a benchmark,
+  // even when a changed file's NAME contains a bench/sweep keyword. (2026-07-17, Servo build-time check)
+  if (/\bpy_compile\b/.test(loweredCommand) || /\b-m\s+compileall\b/.test(loweredCommand)) return false;
   // A unit/spec test file run directly is not a benchmark either (its name may contain a bench keyword).
   if (/\.(test|spec)\.[mc]?[jt]s\b/.test(loweredCommand)) return false;
 

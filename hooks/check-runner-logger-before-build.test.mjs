@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { evaluate, evaluateEdit, reachableSharedLibs, looksLikeExperiment } from './check-runner-logger-before-build.mjs';
+import { evaluate, evaluateEdit, reachableSharedLibs, looksLikeExperiment, codeOnly } from './check-runner-logger-before-build.mjs';
 
 let passed = 0;
 function test(name, runCase) { runCase(); passed++; console.log(`  ✓ ${name}`); }
@@ -13,8 +13,10 @@ test('blocks a hand-rolled concurrency launcher (strong: ThreadPoolExecutor)', (
   assert.equal(evaluate({ toolName: 'Write', filePath: pyPath, content, hasSiblingLib: true }).block, true);
 });
 
-test('blocks a hand-rolled pod launcher (strong: runpod + teardown)', () => {
-  const content = 'def launch():\n    create_runpod_pod()\n    # ... teardown the pod when done\n';
+test('blocks a hand-rolled pod launcher (strong: runpod + teardown in CODE)', () => {
+  // teardown() is a real code call, not a comment — the 2026-07-19 comment-scan fix means a bare
+  // `# teardown` comment no longer fires; genuine hand-rolled teardown in code still must.
+  const content = 'def launch():\n    runpod.create_pod()\n    teardown()\n';
   assert.equal(evaluate({ toolName: 'Write', filePath: pyPath, content, hasSiblingLib: true }).block, true);
 });
 
@@ -229,6 +231,44 @@ test('reachableSharedLibs finds programming/runner walking up', () => {
 test('reachableSharedLibs returns null when neither lib exists', () => {
   const found = reachableSharedLibs('C:/somewhere/else/deep', () => false);
   assert.equal(found, null);
+});
+
+// 2026-07-19 FALSE-BLOCK: a science worker whose ONLY strong/medium hits were inside a DISCLAIMING
+// docstring ("this hand-rolls no retry/resume/teardown/telemetry") had its honest token voided and
+// got blocked. A trigger word in a comment/docstring is documentation, not plumbing.
+test('token + trigger words ONLY in a docstring/comment -> allowed (comment-scan false positive)', () => {
+  const filePath = 'C:/Users/rmill/Desktop/programming/marcus/scripts/exp155_v2_spawn_check.py';
+  const content = [
+    '# runner-logger-checked',
+    '"""exp155 v2 spawn check.',
+    'The durable multi-seed sweep runs through the shared Runner in a separate file;',
+    'this hand-rolls no retry/resume/teardown/telemetry/log format."""',
+    'import torch',
+    'def check_mask(size):',
+    '    return torch.zeros(size, size)  # a static assert, no teardown of any pod',
+  ].join('\n');
+  assert.equal(evaluate({ toolName: 'Write', filePath, content, hasSiblingLib: true }).block, false);
+});
+
+// REGRESSION: real hand-rolled plumbing in CODE (not a comment) still voids the token and blocks.
+test('token + REAL ProcessPoolExecutor plumbing in code -> still blocks (token voided)', () => {
+  const filePath = 'C:/Users/rmill/Desktop/programming/marcus/scripts/exp155_real_pool.py';
+  const content = [
+    '# runner-logger-checked',
+    'from concurrent.futures import ProcessPoolExecutor',
+    'def teardown(pod):',
+    '    pod.stop()',
+    'with ProcessPoolExecutor(max_workers=4) as pool:',
+    '    pool.map(run, seeds)',
+  ].join('\n');
+  assert.equal(evaluate({ toolName: 'Write', filePath, content, hasSiblingLib: true }).block, true);
+});
+
+// codeOnly unit: strips a python docstring's trigger words but keeps a real call.
+test('codeOnly strips docstring/comment trigger words but keeps code', () => {
+  const stripped = codeOnly('x.py', '"""mentions teardown and retry"""\nteardown()  # retry here\n');
+  assert.equal(/teardown|retry/.test(stripped.replace(/teardown\(\)/, 'CALL')), false, 'doc words gone');
+  assert.ok(/CALL/.test(stripped.replace(/teardown\(\)/, 'CALL')), 'the real call survives');
 });
 
 console.log(`\n${passed} tests passed`);

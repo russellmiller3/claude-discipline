@@ -25,6 +25,20 @@ function hookDenies(fileName, sourceCode) {
   return /"permissionDecision"\s*:\s*"deny"/.test(hookRun.stdout || '');
 }
 
+// --- ALLOW: model-size designators (7B/1.5B/15B/70B) are part of the model's literal product name
+// (Qwen2.5-Coder-7B), NOT cryptic vowelless abbreviations. Spelling them out would make names worse. ---
+test('allows a model-config assignment whose name ends in 7B (parameter-count suffix)', () => {
+  assert.equal(hookDenies('exp154_model_config.py', 'QWEN25_CODER_7B = ModelConfig(revision="main")'), false);
+});
+test('allows a 15B / 1_5B model-size designator', () => {
+  assert.equal(hookDenies('exp154_model_config.py', 'QWEN25_CODER_15B = ModelConfig(revision="main")'), false);
+  assert.equal(hookDenies('exp154_model_config.py', 'LLAMA_1_5B = ModelConfig(revision="main")'), false);
+});
+// REGRESSION: a genuinely cryptic vowelless name must still be flagged.
+test('still blocks a real cryptic abbreviation (btn_txt)', () => {
+  assert.equal(hookDenies('ui.py', 'btn_txt = 1'), true);
+});
+
 // --- ALLOW: the triggering incident — multi-line call with stdlib kwargs on their own lines ---
 test('allows kwargs on continuation lines of a multi-line subprocess.run call', () => {
   const incidentSnippet = [

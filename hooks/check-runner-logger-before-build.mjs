@@ -174,6 +174,22 @@ export function reachableSharedLibs(startDir, existsFn = existsSync) {
 // PURE core — no filesystem. `hasSiblingLib` says whether runner/Logger is
 // reachable from the file's location (main() computes it). Returns
 // { block, matched } so the test can assert on the exact reason.
+// Strip comments and string/docstring literals so signal scanning sees only executable CODE. A
+// `#`-comment or `"""`-docstring naming `teardown`/`retry`/`telemetry` is documentation, not plumbing.
+export function codeOnly(filePath, content) {
+  let code = String(content || '');
+  if (/\.py$/i.test(filePath)) {
+    code = code.replace(/'''[\s\S]*?'''|"""[\s\S]*?"""/g, ' '); // triple-quoted docstrings/strings first
+    code = code.replace(/#[^\n]*/g, ' ');                        // line comments
+    code = code.replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g, ' '); // single/double string literals
+  } else {
+    code = code.replace(/\/\*[\s\S]*?\*\//g, ' ');               // block comments
+    code = code.replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');           // line comments (avoid `http://`)
+    code = code.replace(/`(?:\\.|[^`\\])*`|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g, ' '); // strings/templates
+  }
+  return code;
+}
+
 export function evaluate({ toolName, filePath, content, hasSiblingLib }) {
   if (toolName !== 'Write') return { block: false };
   if (!filePath || !SOURCE_EXT.test(filePath)) return { block: false };
@@ -185,8 +201,13 @@ export function evaluate({ toolName, filePath, content, hasSiblingLib }) {
   // Genuine reuse always passes — importing the lib IS proof you found it.
   if (REUSE_REFS.some((re) => re.test(content))) return { block: false };
 
-  const strong = STRONG_SIGNALS.filter((re) => re.test(content));
-  const medium = MEDIUM_SIGNALS.filter((re) => re.test(content));
+  // Signal scanning runs on CODE ONLY — a trigger word inside a comment or docstring is not
+  // hand-rolled plumbing. A file that DISCLAIMS the plumbing ("this hand-rolls no retry/teardown")
+  // must not trip the strong-signal token-void. (2026-07-19) Token detection stays on full content
+  // (the `runner-logger-checked` token is deliberately placed in a comment/docstring).
+  const scannableCode = codeOnly(filePath, content);
+  const strong = STRONG_SIGNALS.filter((re) => re.test(scannableCode));
+  const medium = MEDIUM_SIGNALS.filter((re) => re.test(scannableCode));
   const isExperiment = looksLikeExperiment(filePath, content);
 
   // Self-cert token — but EARNED, not asserted. Before 2026-07-19 the token was a

@@ -11,6 +11,19 @@ test('blocks the motivating typo: findigns -> findings', () => {
   assert.match(verdict.reason, /findings/);
 });
 
+// 2026-07-17 FALSE-BLOCK (marcus): `test_telemetry_drain.py` was blocked as a misspelling of "brain".
+// "drain" is a standard engineering term (Heroku/Fly/Papertrail all call it a "log drain"). A real word
+// one edit from a listed word must not be flagged as a typo of it.
+test('ALLOWS "drain" and other real engineering terms one edit from a listed word', () => {
+  for (const good of ['test_telemetry_drain.py', 'log-sink.ts', 'work-pump.mjs', 'thread-spool.py']) {
+    assert.equal(assessFilename(good).ok, true, `expected ALLOW for ${good}`);
+  }
+});
+// REGRESSION: a genuine typo (not itself a real word) must STILL block.
+test('still BLOCKS a genuine typo (findigns) after the drain allowlist', () => {
+  assert.equal(assessFilename('findigns.md').ok, false);
+});
+
 test('blocks common misspellings (near-miss, one edit away)', () => {
   for (const bad of ['recieve.js', 'lenght.ts', 'benchmrk.mjs', 'summery-report.md', 'transcrpit.txt']) {
     assert.equal(assessFilename(bad).ok, false, `expected BLOCK for ${bad}`);
@@ -112,10 +125,40 @@ test('ALLOWS a new file whose stem matches an EXISTING sibling (X.test.mjs besid
   assert.equal(assessFilename(join(hooksDirectory, 'no-write-to-main.test.mjs')).ok, true);
 });
 
+test('ALLOWS standard English plurals of known words ("checks" false-fire, 2026-07-12)', () => {
+  // 'skip-phone-width-checks.md' was blocked: "checks" flagged as a misspelling of "check".
+  // A standard plural (word+s / word+es) of a known word is itself a known word — never a typo.
+  for (const good of [
+    'skip-phone-width-checks.md',   // the motivating false-fire
+    'checks.md', 'guards.md', 'trains.py',          // word+s of known singulars
+    'watches.mjs', 'batches.json', 'fixes.md',      // word+es (and fixes: plain plausible word)
+    'results.md', 'notes.md',                       // already-listed plurals stay allowed
+  ]) {
+    assert.equal(assessFilename(good).ok, true, `expected ALLOW for ${good} (got: ${JSON.stringify(assessFilename(good))})`);
+  }
+  // No exemption for a trailing-s token whose SINGULAR is not a known word: real typos still block.
+  assert.equal(assessFilename('findigns.md').ok, false, 'findigns must still BLOCK');
+  assert.equal(assessFilename('resutls.md').ok, false, 'resutls (transposed typo of "results", itself s-final) must still BLOCK');
+});
+
 test('ALLOWS "audit" (real word wrongly flagged as a typo of "audio", 2026-07-03 false-fire)', () => {
   // "audit" is one OSA edit from "audio" — it was false-blocked as a likely misspelling even
   // though it's a common, correctly-spelled word in its own right.
   for (const good of ['delete-audit-guard.mjs', 'audit.mjs', 'auditor-report.md', 'auditing-rules.mjs']) {
     assert.equal(assessFilename(good).ok, true, `expected ALLOW for ${good} (got: ${JSON.stringify(assessFilename(good))})`);
+  }
+});
+
+test('ALLOWS "cause"/"root-cause" (real word wrongly flagged as a typo of "clause", 2026-07-13 false-fire)', () => {
+  // "cause" is one OSA edit (single insertion of "l") from "clause" — it was false-blocked as a
+  // likely misspelling. This is the exact stem the ROOT-CAUSE-FIRST hook requires agents to
+  // create ("root-cause-analysis.md") before editing code on fix/debug branches, so the false
+  // positive actively blocked normal workflow.
+  for (const good of ['root-cause-analysis.md', 'root-cause.md', 'cause.md', 'causal-chain.md', 'because-of-cause.md']) {
+    assert.equal(assessFilename(good).ok, true, `expected ALLOW for ${good} (got: ${JSON.stringify(assessFilename(good))})`);
+  }
+  // The real-typo and lazy-name detectors must still fire — this fix must not weaken them.
+  for (const bad of ['findigns.md', 'tmp.md']) {
+    assert.equal(assessFilename(bad).ok, false, `expected BLOCK for ${bad} (regression: fix must not weaken real detection)`);
   }
 });
