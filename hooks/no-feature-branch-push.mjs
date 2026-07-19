@@ -33,6 +33,33 @@
 import { readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 
+// The push target — the first non-flag token after `git push` (a remote NAME or a literal path).
+function remoteNameFrom(normalizedCommand) {
+  const pushMatch = String(normalizedCommand || '').match(/\bgit\s+push\s+((?:-\S+\s+)*)(\S+)/);
+  const candidate = pushMatch && pushMatch[2];
+  if (!candidate || candidate.startsWith('-')) return null;
+  return candidate.replace(/^["']|["']$/g, '');
+}
+
+function looksLikeLocalPath(url) {
+  const remoteUrl = String(url || '');
+  return /^[A-Za-z]:[\\/]/.test(remoteUrl) || remoteUrl.startsWith('file://') || remoteUrl.startsWith('/')
+    || remoteUrl.startsWith('./') || remoteUrl.startsWith('../') || remoteUrl.startsWith('\\\\');
+}
+
+// A push target that resolves to a local filesystem path (a bare backup mirror). Either the target token
+// IS a path, or a configured remote NAME whose `git remote get-url` is a local path.
+function isLocalRemote(remoteName) {
+  if (!remoteName) return false;
+  if (looksLikeLocalPath(remoteName)) return true;
+  try {
+    const resolvedUrl = execSync(`git remote get-url ${remoteName}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    return resolvedUrl ? looksLikeLocalPath(resolvedUrl) : false;
+  } catch {
+    return false;
+  }
+}
+
 function main() {
   if (process.env.PUSH_BRANCH_OVERRIDE === '1') process.exit(0);
 
@@ -98,8 +125,16 @@ function main() {
     process.exit(0);
   }
 
+  // A LOCAL-filesystem backup mirror (D:/GitBackups/X.git, file://, an absolute/relative path) is a
+  // BACKUP, not remote clutter — the "local backup after every commit" rule mandates pushing a feature
+  // branch there. Only NETWORK remotes (GitHub etc.) clutter and re-run pre-push hooks. Resolve the push
+  // target's URL; if it's a local path, allow the feature-branch push. (2026-07-18, Russell "do all")
+  if (isLocalRemote(remoteNameFrom(c))) {
+    process.exit(0);
+  }
+
   // At this point: command is `git push` and we're on a non-main branch
-  // (or the refspec explicitly targets a non-main branch). Block.
+  // (or the refspec explicitly targets a non-main branch) to a NETWORK remote. Block.
   const reason =
     `🚫 Push blocked — pushing a non-main branch.\n\n` +
     `Russell's rule (2026-05-04, ~/.claude/CLAUDE.md "Don't Push Branches Until Work Is Done"):\n` +

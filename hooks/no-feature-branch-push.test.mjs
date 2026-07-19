@@ -30,7 +30,11 @@ function makeFeatureRepo() {
   git(['commit', '-q', '--allow-empty', '-m', 'init']);
   git(['branch', '-M', 'main']);
   git(['checkout', '-q', '-b', 'feature/some-work']);
-  git(['remote', 'add', 'origin', 'https://example.com/x.git']);
+  git(['remote', 'add', 'origin', 'https://example.com/x.git']);       // a NETWORK remote (should block)
+  git(['remote', 'add', 'upstream', 'git@github.com:me/x.git']);        // another network remote (should block)
+  const mirror = mkdtempSync(path.join(tmpdir(), 'push-mirror-')) + '/backup.git';
+  spawnSync('git', ['init', '--bare', '-q', mirror]);
+  git(['remote', 'add', 'seagate', mirror]);                            // a LOCAL bare backup mirror (should ALLOW)
   return repoRoot;
 }
 
@@ -156,11 +160,18 @@ test('still blocks pushing a named feature branch to origin (the actual rule)', 
   assert.equal(isBlocked(child.stdout), true);
 });
 
-test('still blocks pushing a named feature branch to a non-origin remote', (t) => {
-  if (!nonMainWorktree) {
-    t.skip('no non-main feature worktree found on this machine to exercise the block path');
-    return;
+// 2026-07-18 fix #2: a LOCAL-filesystem backup mirror is a backup, not remote clutter — the
+// "backup after every commit" rule mandates it. Pushing a feature branch to a local-path remote (a
+// resolved local `git remote get-url`, or a literal path) is ALLOWED; a NETWORK remote still blocks.
+test('ALLOWS a feature-branch push to a local backup-mirror remote (seagate -> local bare)', () => {
+  const repoRoot = makeFeatureRepo();
+  try {
+    assert.equal(isBlocked(runHook('git push seagate feature/some-work', { cwd: repoRoot }).stdout), false, 'local mirror is a backup, allowed');
+    // A literal local path as the push target is also allowed.
+    assert.equal(isBlocked(runHook('git push /some/local/repo feature/some-work', { cwd: repoRoot }).stdout), false, 'a literal local path is a backup, allowed');
+    // But a NETWORK non-origin remote still blocks.
+    assert.equal(isBlocked(runHook('git push upstream feature/some-work', { cwd: repoRoot }).stdout), true, 'a network remote still clutters — blocked');
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
   }
-  const child = runHook('git push /some/local/repo feature/some-work', { cwd: nonMainWorktree });
-  assert.equal(isBlocked(child.stdout), true);
 });
