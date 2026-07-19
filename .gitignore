@@ -6,3 +6,4 @@ node_modules/
 *.bak
 *.bak.*
 *.bak_*
+.claude-worktrees/
