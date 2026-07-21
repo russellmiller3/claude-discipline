@@ -22,6 +22,10 @@ const stream = () => bash('python scripts/exp153_live_refresher.py --pull runs/e
 const liveness = () => bash('ssh root@1.2.3.4 "pgrep -f train_exp154 && tail -3 /workspace/jobs/seed-7/nohup.out"');
 // the ml-experiment skill referenced this session (Russell 2026-07-21: required before ANY launch)
 const skillRef = () => ({ role: 'assistant', content: [{ type: 'tool_use', name: 'Skill', input: { skill: 'ml-experiment' } }] });
+// a launch run via the PowerShell tool, not Bash (Russell 2026-07-21: the hook missed this class —
+// registered under a Bash-only settings.json matcher, so a `detached_run.ps1` PowerShell launch
+// never triggered PreToolUse at all)
+const POWERSHELL_LAUNCH = 'powershell -File C:/Users/rmill/Desktop/programming/runner/detached_run.ps1 -RunCommand "py -3 scripts/exp167d_spawn_judgment_arms.py --arm notebook --seed 1 --steps 1000 --out runs/exp167d/n1.json" -LogPath "runs/exp167d/n1.log"';
 
 // ── isLaunchCommand: precise detection, no false positives ───────────────────
 test('isLaunchCommand: runpod launch is a launch', () => {
@@ -268,6 +272,26 @@ test('PreToolUse: DENY a POD launch without the skill reference (before the moni
 test('referencedExperimentSkill: fails safe on malformed input', () => {
   assert.equal(referencedExperimentSkill(null), false);
   assert.equal(referencedExperimentSkill([{}]), false);
+});
+
+// ── PowerShell-tool launches (Russell, 2026-07-21: the real gap that shipped) ─
+// evaluate()'s command-content matching is tool-agnostic, but the gap that actually
+// bit was settings.json registering this hook ONLY under a Bash-matcher PreToolUse
+// block -- a PowerShell tool_use never reached PreToolUse at all, so no launch
+// command string was ever evaluated. These pin the CONTENT-LEVEL detection so a
+// regression there is caught; the registration itself is pinned in
+// experiment-monitor-required.settings.test.mjs (reads the real settings.json).
+test('isLocalExperimentRun: detects a local exp run embedded inside a PowerShell -RunCommand string', () => {
+  assert.equal(isLocalExperimentRun(POWERSHELL_LAUNCH), true);
+});
+test('PreToolUse: DENY a PowerShell-tool exp launch with no skill reference (content-level)', () => {
+  const verdict = evaluate({ event: 'PreToolUse', command: POWERSHELL_LAUNCH, entries: [] });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /ml-experiment/);
+});
+test('PreToolUse: ALLOW a PowerShell-tool exp launch once the skill was referenced', () => {
+  const verdict = evaluate({ event: 'PreToolUse', command: POWERSHELL_LAUNCH, entries: [skillRef()] });
+  assert.equal(verdict.block, false);
 });
 test('Stop: BLOCK a training launch that ran with no checkpoint setup', () => {
   const verdict = evaluate({ event: 'Stop', entries: [bash(TRAIN), monitor(), stream(), liveness(), say(LINK)] });

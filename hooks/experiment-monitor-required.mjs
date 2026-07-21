@@ -122,7 +122,13 @@ export function isLaunchCommand(command) {
 // A LOCAL experiment run: the interpreter as a command token running a scripts/exp*.py
 // worker (Russell's cross-repo convention). pytest/py_compile/reads never match; the
 // NOT_A_LAUNCH escapes (--smoke/--dry-run/--check/--list/--help/finalize) apply.
-const LOCAL_EXPERIMENT_RE = /(?:^|\s)(?:python[0-9.]*|py)\s+(?:-3\s+)?\S*scripts[\/\\]exp\w+\.py\b/;
+// \b (not "start-of-string or whitespace") so a launch embedded inside a QUOTED argument
+// still matches -- e.g. `-RunCommand "py -3 scripts/exp167d_....py ..."` has "py" preceded
+// by a quote character, not whitespace. This is exactly the shape detached_run.ps1's
+// -RunCommand string produces (Russell, 2026-07-21: a real PowerShell-tool launch missed
+// detection here). \b matches at ANY word/non-word transition (quote, paren, whitespace,
+// start-of-string), matching the more robust pattern already used by PYTHON_MODAL above.
+const LOCAL_EXPERIMENT_RE = /\b(?:python[0-9.]*|py)\b\s+(?:-3\s+)?\S*scripts[\/\\]exp\w+\.py\b/;
 
 /**
  * True when a command runs a LOCAL experiment worker (scripts/exp*.py). These are
