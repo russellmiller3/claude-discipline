@@ -50,7 +50,8 @@ function stopRun(replyText, editedPaths, markerPath) {
   return run({ hook_event_name: 'Stop', transcript_path: transcriptPath }, markerPath);
 }
 const isBlocked = (hookOutput) => /"decision"\s*:\s*"block"/.test(hookOutput);
-const writeMarker = (markerPath, repeat) => writeFileSync(markerPath, JSON.stringify({ repeat, correction: 'x', ts: 1 }));
+// ts must be FRESH: with the 24h staleness TTL a ts of 1 is ancient and would be (rightly) discarded.
+const writeMarker = (markerPath, repeat) => writeFileSync(markerPath, JSON.stringify({ repeat, correction: 'x', ts: Date.now() }));
 
 const failures = [];
 function check(label, condition) {
@@ -195,7 +196,7 @@ const assistantSays = (replyText) => ({ type: 'assistant', message: { role: 'ass
 {
   const marker = nextMarker();
   const armedAtEntryIndex = 0;
-  writeFileSync(marker, JSON.stringify({ repeat: true, correction: 'you keep doing that', ts: 1, armedAtEntryIndex }));
+  writeFileSync(marker, JSON.stringify({ repeat: true, correction: 'you keep doing that', ts: Date.now(), armedAtEntryIndex }));
   const resolvedTranscriptPath = multiTurnTranscript([
     userText('you keep doing that — same mistake again'),
     assistantAsk('Should I build a hook for this?'),
@@ -230,7 +231,7 @@ const assistantSays = (replyText) => ({ type: 'assistant', message: { role: 'ass
   // A pre-armed GETTY-WORTHY marker (self-caught), scanning from entry 0 so this turn's edit counts.
   const gettyWorthyMarker = () => {
     const marker = join(tmpdir(), `getty-worthy-${process.pid}-${seq++}.json`);
-    writeFileSync(marker, JSON.stringify({ repeat: false, gettyWorthy: true, correction: 'my own bug killed a pod', ts: 1, armedAtEntryIndex: 0 }));
+    writeFileSync(marker, JSON.stringify({ repeat: false, gettyWorthy: true, correction: 'my own bug killed a pod', ts: Date.now(), armedAtEntryIndex: 0 }));
     return marker;
   };
   // (b) a learnings.md edit alone does NOT clear a Getty-worthy marker.
@@ -248,7 +249,7 @@ const assistantSays = (replyText) => ({ type: 'assistant', message: { role: 'ass
 {
   // (d) a plain first-time (non-costly) correction still clears with a learning — no regression.
   const firstTime = join(tmpdir(), `getty-firsttime-${process.pid}-${seq++}.json`);
-  writeFileSync(firstTime, JSON.stringify({ repeat: false, correction: 'you forgot to gloss a term', ts: 1, armedAtEntryIndex: 0 }));
+  writeFileSync(firstTime, JSON.stringify({ repeat: false, correction: 'you forgot to gloss a term', ts: Date.now(), armedAtEntryIndex: 0 }));
   check('first-time correction still clears with a learnings.md edit', !isBlocked(stopRun('captured the lesson', ['C:/Users/rmill/Desktop/programming/Macher/learnings.md'], firstTime)) && !existsSync(firstTime));
 }
 {
@@ -256,6 +257,71 @@ const assistantSays = (replyText) => ({ type: 'assistant', message: { role: 'ass
   const marker = join(tmpdir(), `getty-malformed-${process.pid}-${seq++}.json`);
   const proc = spawnSync('node', [HOOK], { input: 'not json', encoding: 'utf8', env: { ...process.env, GETTY_MARKER_PATH: marker } });
   check('fail-open on malformed input', proc.status === 0 && (proc.stdout || '').trim() === '');
+}
+
+// --- 2026-07-21 fix: STALE cross-session/cross-project markers must never block. The live bug: a
+// marker armed in a Macher session survived in the global state file, then a marcus session's Stop
+// read it and blocked quoting Russell's Macher message. Markers are now stamped with the project
+// root + session id at arm time and discarded on read when either mismatches, or after 24h.
+// (`cwd`/`session_id` below are the harness's literal payload field names, not our naming.)
+const MACHER_PROJECT_ROOT = 'C:/Users/rmill/Desktop/programming/Macher';
+const MARCUS_PROJECT_ROOT = 'C:/Users/rmill/Desktop/programming/marcus';
+function stopRunIn(replyText, editedPaths, markerPath, projectRoot, sessionId) {
+  const transcriptPath = transcript(replyText, editedPaths);
+  return run({ hook_event_name: 'Stop', transcript_path: transcriptPath, cwd: projectRoot, session_id: sessionId }, markerPath);
+}
+const staleMarker = (markerPath, fields) => writeFileSync(markerPath, JSON.stringify({ repeat: true, correction: 'Macher Phase 1.3 stuff', ts: Date.now(), armedAtEntryIndex: 0, ...fields }));
+
+// (a) arm-side: UserPromptSubmit stamps the marker with the project root + session id.
+{
+  const marker = nextMarker();
+  run({ hook_event_name: 'UserPromptSubmit', prompt: 'you keep doing that again', cwd: MACHER_PROJECT_ROOT, session_id: 'session-A' }, marker);
+  const armedRecord = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : {};
+  check('arm stamps marker with project root + sessionId', armedRecord.cwd === MACHER_PROJECT_ROOT && armedRecord.sessionId === 'session-A');
+  if (existsSync(marker)) rmSync(marker);
+}
+// (b) the live bug: marker armed in Macher, Stop fires in marcus → allowed, marker discarded.
+{
+  const marker = nextMarker();
+  staleMarker(marker, { cwd: MACHER_PROJECT_ROOT, sessionId: 'session-A' });
+  const crossProjectOutput = stopRunIn('all done', [], marker, MARCUS_PROJECT_ROOT, 'session-B');
+  check('cross-PROJECT stale marker → allowed + discarded', !isBlocked(crossProjectOutput) && !existsSync(marker));
+}
+// (c) same project, different session (e.g. a marker from yesterday's session) → allowed, discarded.
+{
+  const marker = nextMarker();
+  staleMarker(marker, { cwd: MARCUS_PROJECT_ROOT, sessionId: 'session-A' });
+  const crossSessionOutput = stopRunIn('all done', [], marker, MARCUS_PROJECT_ROOT, 'session-B');
+  check('cross-SESSION stale marker (same project) → allowed + discarded', !isBlocked(crossSessionOutput) && !existsSync(marker));
+}
+// (d) TTL: a marker older than 24h ages out even with matching identity.
+{
+  const marker = nextMarker();
+  staleMarker(marker, { cwd: MARCUS_PROJECT_ROOT, sessionId: 'session-A', ts: Date.now() - 25 * 60 * 60 * 1000 });
+  const expiredOutput = stopRunIn('all done', [], marker, MARCUS_PROJECT_ROOT, 'session-A');
+  check('marker older than 24h TTL → allowed + discarded', !isBlocked(expiredOutput) && !existsSync(marker));
+}
+// (e) legacy record (no identity fields — written by the pre-fix hook) while the harness DOES supply
+// a session id: unattributable to this session → discarded, never enforced.
+{
+  const marker = nextMarker();
+  writeFileSync(marker, JSON.stringify({ repeat: true, correction: 'x', ts: Date.now(), armedAtEntryIndex: 0 }));
+  const legacyOutput = stopRunIn('all done', [], marker, MARCUS_PROJECT_ROOT, 'session-B');
+  check('legacy identity-less marker + session-aware Stop → allowed + discarded', !isBlocked(legacyOutput) && !existsSync(marker));
+}
+// (f) TRUE POSITIVE preserved: matching project + session + fresh ts, nothing done → still blocks.
+{
+  const marker = nextMarker();
+  staleMarker(marker, { cwd: MARCUS_PROJECT_ROOT, sessionId: 'session-A' });
+  check('same-project same-session fresh marker still blocks', isBlocked(stopRunIn('noted, moving on', [], marker, MARCUS_PROJECT_ROOT, 'session-A')));
+  if (existsSync(marker)) rmSync(marker);
+}
+// (g) path-separator robustness: the same project root written with backslashes still MATCHES.
+{
+  const marker = nextMarker();
+  staleMarker(marker, { cwd: 'C:\\Users\\rmill\\Desktop\\programming\\marcus', sessionId: 'session-A' });
+  check('backslash vs forward-slash project root still matches (blocks)', isBlocked(stopRunIn('noted, moving on', [], marker, MARCUS_PROJECT_ROOT, 'session-A')));
+  if (existsSync(marker)) rmSync(marker);
 }
 
 if (failures.length) { console.error(`\n${failures.length} check(s) failed.`); process.exit(1); }

@@ -23,6 +23,27 @@ import { join, dirname } from 'node:path';
 
 const MARKER_PATH = process.env.GETTY_MARKER_PATH || join(homedir(), '.claude', 'state', 'getty-pending.json');
 
+// STALE-MARKER GUARD (2026-07-21): the marker file is global, so a marker armed in one project's
+// session used to survive and block a DIFFERENT project's Stop, quoting Russell's message from the
+// other session (Macher marker fired in a marcus session). Markers are now stamped with the project
+// root + session id at arm time and discarded on read when either mismatches — or after 24h.
+const MARKER_TTL_MS = 24 * 60 * 60 * 1000;
+const normalizedRoot = (projectRoot) => String(projectRoot || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+// The identity every armed marker carries — who (project root + session) created the obligation.
+const armIdentityOf = (payload) => ({ cwd: payload.cwd || '', sessionId: payload.session_id || payload.sessionId || '' });
+
+function markerIsStale(marker, payload) {
+  if (marker.ts && Date.now() - marker.ts > MARKER_TTL_MS) return true;
+  const currentProjectRoot = payload.cwd || '';
+  if (currentProjectRoot && marker.cwd && normalizedRoot(marker.cwd) !== normalizedRoot(currentProjectRoot)) return true;
+  const currentSessionId = payload.session_id || payload.sessionId || '';
+  if (currentSessionId && marker.sessionId && marker.sessionId !== currentSessionId) return true;
+  // Legacy record with no session identity while the harness DOES supply one: unattributable to this
+  // session — discard rather than enforce someone else's leftover.
+  if (currentSessionId && !marker.sessionId) return true;
+  return false;
+}
+
 // REPEAT signals — Russell's wording that says "you've done this before" → escalate to "build a hook".
 // Robust: built as a set of phrasings, apostrophes straight (') or curly (’), case-insensitive.
 const REPEAT_PATTERNS = [
@@ -241,7 +262,11 @@ async function main() {
     const armedAtEntryIndex = readTranscript(payload.transcript_path).length;
     try {
       mkdirSync(dirname(MARKER_PATH), { recursive: true });
-      writeFileSync(MARKER_PATH, JSON.stringify({ repeat, correction: message.slice(0, 300), ts: Date.now(), armedAtEntryIndex }));
+      // Stamp WHO armed it — project root + session id — so a later Stop in a different
+      // project/session discards this record instead of enforcing it (2026-07-21 stale-marker fix).
+      writeFileSync(MARKER_PATH, JSON.stringify({
+        repeat, correction: message.slice(0, 300), ts: Date.now(), armedAtEntryIndex, ...armIdentityOf(payload),
+      }));
     } catch { /* fail open */ }
 
     const checklist = repeat
@@ -274,15 +299,21 @@ Clear by adding a learning. Override: "getty-override: <why no rule is needed>".
   let marker;
   if (existsSync(MARKER_PATH)) {
     try { marker = JSON.parse(readFileSync(MARKER_PATH, 'utf8')); } catch { clearMarker(); return; }
-  } else if (isSelfCaughtAdmission(reply)) {
+    // Stale-marker guard (2026-07-21): a marker armed by another project/session — or older than the
+    // TTL — is a leftover, not a live obligation. Discard it and fall through, so a genuine
+    // self-caught admission in THIS reply can still arm fresh.
+    if (markerIsStale(marker, payload)) { clearMarker(); marker = undefined; }
+  }
+  if (!marker) {
+    if (!isSelfCaughtAdmission(reply)) return; // nothing pending and nothing self-caught
     // Fix A: a self-caught, cost-naming admission in MY OWN reply arms a GETTY-WORTHY marker even
     // though Russell never corrected me. Scope satisfaction to the CURRENT turn's edits forward, so a
     // hook built THIS turn (the ideal — catch + permanently fix in one) clears it with no nag.
     const armedAtEntryIndex = lastUserEntryIndex(allEntries);
-    marker = { repeat: false, gettyWorthy: true, correction: reply.slice(0, 300), ts: Date.now(), armedAtEntryIndex };
+    marker = {
+      repeat: false, gettyWorthy: true, correction: reply.slice(0, 300), ts: Date.now(), armedAtEntryIndex, ...armIdentityOf(payload),
+    };
     try { mkdirSync(dirname(MARKER_PATH), { recursive: true }); writeFileSync(MARKER_PATH, JSON.stringify(marker)); } catch { /* fail open */ }
-  } else {
-    return; // nothing pending and nothing self-caught
   }
 
   const sessionEntries = entriesSinceMarkerArmed(payload.transcript_path, marker.armedAtEntryIndex);
