@@ -38,6 +38,17 @@
 // never false-positive. Escape: EXPERIMENT_MONITOR_REQUIRED_OK=1 in env, or the
 // literal token EXPERIMENT_MONITOR_REQUIRED_OK in the reply/command. Respects
 // stop_hook_active (never loops). FAILS OPEN on any error. basename entry-guard.
+//
+// EXTENSION (Russell, 2026-07-21, verbatim: "add hook that you cant launch an
+// experiment without referencing the skill"): the FIRST prerequisite on any
+// launch — runpod/modal/training AND local `scripts/exp*.py` runs — is that the
+// ml-experiment skill was actually REFERENCED this session (a Skill tool-use of
+// `ml-experiment`, or its SKILL.md read). Rule 1.6: this gates on the verifiable
+// STATE (the skill's content entered context), never a self-asserted token.
+// Local exp*.py runs are gated on the skill reference ONLY — the pod-grade
+// monitor/stream/checkpoint cascade stays scoped to paid/remote launches (the
+// skill itself owns the monitor-default-on rule for local runs, with Russell's
+// opt-out).
 // =============================================================================
 
 import { readFileSync } from 'node:fs';
@@ -108,6 +119,34 @@ export function isLaunchCommand(command) {
   return RUNPOD_LAUNCH.test(command) || MODAL_RUN.test(command) || PYTHON_MODAL.test(command);
 }
 
+// A LOCAL experiment run: the interpreter as a command token running a scripts/exp*.py
+// worker (Russell's cross-repo convention). pytest/py_compile/reads never match; the
+// NOT_A_LAUNCH escapes (--smoke/--dry-run/--check/--list/--help/finalize) apply.
+const LOCAL_EXPERIMENT_RE = /(?:^|\s)(?:python[0-9.]*|py)\s+(?:-3\s+)?\S*scripts[\/\\]exp\w+\.py\b/;
+
+/**
+ * True when a command runs a LOCAL experiment worker (scripts/exp*.py). These are
+ * gated on the ml-experiment skill reference only — not the pod monitor cascade.
+ */
+export function isLocalExperimentRun(command) {
+  if (!command || typeof command !== 'string') return false;
+  if (NOT_A_LAUNCH.test(command)) return false;
+  if (PYTEST_RE.test(command)) return false;
+  if (/py_compile/.test(command)) return false;
+  return LOCAL_EXPERIMENT_RE.test(command);
+}
+
+// The ml-experiment skill was actually REFERENCED this session: a Skill tool-use of
+// `ml-experiment`, a Read of its SKILL.md, or a shell read of the skill path. This is
+// the verifiable STATE (content entered context) — never a self-asserted token.
+const SKILL_PATH_RE = /skills[\/\\]ml-experiment/i;
+export function referencedExperimentSkill(toolUses) {
+  return (toolUses || []).some((toolUse) =>
+    (toolUse?.name === 'Skill' && /^ml-experiment$/i.test(toolUse?.skill || ''))
+    || SKILL_PATH_RE.test(toolUse?.filePath || '')
+    || SKILL_PATH_RE.test(toolUse?.command || ''));
+}
+
 /**
  * True when a command STARTS a real model-TRAINING run — the thing that must be wired
  * for step-level checkpointing. Excludes race/eval launches (nothing to checkpoint), a
@@ -131,7 +170,12 @@ function toolUsesInOrder(entries) {
   const toolUses = [];
   for (const entry of entries || []) {
     for (const block of toolUsesOf(entry)) {
-      toolUses.push({ name: block?.name || '', command: block?.input?.command || '' });
+      toolUses.push({
+        name: block?.name || '',
+        command: block?.input?.command || '',
+        skill: block?.input?.skill || '',
+        filePath: block?.input?.file_path || '',
+      });
     }
   }
   return toolUses;
@@ -244,6 +288,18 @@ Then pass the checkpoint knobs on the launch (e.g. --checkpoint-every-steps N) s
 
 Escape (a genuinely un-checkpointable run, or a short bounded run): ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
 
+const NO_SKILL_REFERENCE_REASON = `EXPERIMENT LAUNCH BLOCKED — the ml-experiment skill was not referenced this session.
+
+Russell's rule (2026-07-21): no experiment launches until the ml-experiment skill's contract is
+in context — it owns the durability checklist (retry/resume/concurrency/pulses), the LIVE
+interim-streaming requirement, and the HTML-monitor-DEFAULT-ON rule. Launching without it is how
+runs end up unwatched, unresumable, or lost to an app restart.
+
+Fix (one step): invoke the skill — Skill tool, name "ml-experiment" — or Read
+~/.claude/skills/ml-experiment/SKILL.md. Then relaunch this exact command.
+
+Escape (rare — Russell explicitly waived it): ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
+
 // Shared: does any run this session stream interim trial data home? (a refresher/feeder that
 // pulls or writes the live/think JSONL the dashboard reads). Russell's rule, 2026-07-17.
 function streamsInterimData(toolUses) {
@@ -277,8 +333,16 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
   const toolUses = toolUsesInOrder(entries);
 
   if (event === 'PreToolUse') {
-    // Any launch OR a training-script run — a full-seed trainer isn't a runpod/modal launch
-    // but still needs a monitor, an interim stream, and checkpoint setup.
+    // FIRST prerequisite (Russell, 2026-07-21): ANY experiment launch — pod, modal,
+    // training, or a LOCAL scripts/exp*.py run — requires the ml-experiment skill
+    // referenced this session. The skill teaches everything the later denials demand.
+    const isAnyExperimentLaunch = isLaunchCommand(command) || isTrainingLaunch(command)
+      || isLocalExperimentRun(command);
+    if (isAnyExperimentLaunch && !referencedExperimentSkill(toolUses)) {
+      return { block: true, mode: 'deny', reason: NO_SKILL_REFERENCE_REASON };
+    }
+    // Local exp*.py runs are gated on the skill reference only — the pod-grade
+    // monitor cascade below stays scoped to paid/remote/training launches.
     if (!isLaunchCommand(command) && !isTrainingLaunch(command)) return { block: false };
     const hasMonitor = toolUses.some((toolUse) => toolUse.name === MONITOR_TOOL);
     if (!hasMonitor) return { block: true, mode: 'deny', reason: DENY_REASON };
