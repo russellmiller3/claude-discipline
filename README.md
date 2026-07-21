@@ -269,6 +269,15 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-21** — New `learnings-check-before-diagnosis`: blocks a fresh root-cause claim landing
+  in a verdict doc (`*METHODS*.md`, `*-Truth.md`, `*findings*.md`, `learnings.md` itself) unless
+  `learnings.md` was actually Read/Grepped this session — the exact repeat-mistake class where a
+  diagnosis gets re-derived as "new" when the same pattern was already logged. 30 tests. Also:
+  `long-running-script-guard` and `phantom-delete-commit-guard` each had two independently-evolved
+  fixes (a long-standing main line + an older unmerged branch) hand-merged and re-verified green
+  (81/81, 65/65) — `phantom-delete-commit-guard` now combines its historical-match/novel-content
+  redesign with a worktree-resident tell (a session working in a linked worktree is no longer
+  false-blocked by a stale primary checkout's cwd).
 - **2026-07-18** — New `entry-point-guard`: blocks a `.mjs` self-execution check that is always-false on
   Windows (`import.meta.url === process.argv[1]` / a `file://`-concat) — the file silently never runs when
   executed directly (bit a daemon + two hooks). Deny message hands over the basename fix; the working forms
