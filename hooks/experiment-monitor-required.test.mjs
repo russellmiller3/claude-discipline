@@ -235,6 +235,14 @@ test('isLocalExperimentRun: py -3 scripts/exp*.py is a local experiment run', ()
   assert.equal(isLocalExperimentRun('py -3 scripts/exp167d_spawn_judgment_arms.py --arm regular --seed 1 --steps 1000 --out runs/exp167d/r.json'), true);
   assert.equal(isLocalExperimentRun('python scripts/exp147a_inception_toy.py --seed 0'), true);
 });
+test('isLocalExperimentRun: a live-refresher/feeder/monitor support script is NOT a new launch', () => {
+  // Regression pin (2026-07-21): this exact string previously matched LOCAL_EXPERIMENT_RE,
+  // which corrupted Stop's launch-index tracking -- calling the refresher mid-run looked
+  // like a SECOND local launch and made an already-monitored run appear stale/unmonitored.
+  assert.equal(isLocalExperimentRun('python scripts/exp153_live_refresher.py --pull runs/exp153_live.jsonl'), false);
+  assert.equal(isLocalExperimentRun('py -3 scripts/exp150_live_feeder.py'), false);
+  assert.equal(isLocalExperimentRun('python scripts/exp167d_monitor.py --watch'), false);
+});
 test('isLocalExperimentRun: pytest / py_compile / reads / smoke are NOT gated', () => {
   assert.equal(isLocalExperimentRun('py -3 -m pytest scripts/test_exp167d_spawn_judgment_arms.py -q'), false);
   assert.equal(isLocalExperimentRun('py -3 -m py_compile scripts/exp167d_spawn_judgment_arms.py'), false);
@@ -251,20 +259,28 @@ test('PreToolUse: DENY a LOCAL exp run when the skill was never referenced', () 
   assert.equal(verdict.mode, 'deny');
   assert.match(verdict.reason, /ml-experiment/);
 });
-test('PreToolUse: ALLOW a LOCAL exp run once the Skill tool referenced ml-experiment', () => {
+test('PreToolUse: skill reference alone is NOT enough for a local run — still needs Monitor+interim (2026-07-21 fix)', () => {
   const verdict = evaluate({
     event: 'PreToolUse',
     command: 'py -3 scripts/exp167d_spawn_judgment_arms.py --arm notebook --seed 2 --steps 1000 --out runs/exp167d/n2.json',
     entries: [skillRef()],
   });
-  assert.equal(verdict.block, false); // local run: skill ref only, no pod cascade
+  assert.equal(verdict.block, true, 'local runs must ALSO have a Monitor — skill reference alone used to wrongly pass');
 });
-test('PreToolUse: a Read of the SKILL.md also counts as referencing the skill', () => {
+test('PreToolUse: ALLOW a LOCAL exp run once skill + Monitor + interim stream are ALL present', () => {
+  const verdict = evaluate({
+    event: 'PreToolUse',
+    command: 'py -3 scripts/exp167d_spawn_judgment_arms.py --arm notebook --seed 2 --steps 1000 --out runs/exp167d/n2.json',
+    entries: [skillRef(), monitor(), stream()],
+  });
+  assert.equal(verdict.block, false);
+});
+test('PreToolUse: a Read of the SKILL.md also counts as referencing the skill, but Monitor+interim are still required', () => {
   const readSkill = { role: 'assistant', content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'C:/Users/rmill/.claude/skills/ml-experiment/SKILL.md' } }] };
   const verdict = evaluate({
     event: 'PreToolUse',
     command: 'py -3 scripts/exp167d_spawn_judgment_arms.py --arm regular --seed 1 --out runs/exp167d/r1.json',
-    entries: [readSkill],
+    entries: [readSkill, monitor(), stream()],
   });
   assert.equal(verdict.block, false);
 });
@@ -358,8 +374,12 @@ test('PreToolUse: DENY a PowerShell-tool exp launch with no skill reference (con
   assert.equal(verdict.block, true);
   assert.match(verdict.reason, /ml-experiment/);
 });
-test('PreToolUse: ALLOW a PowerShell-tool exp launch once the skill was referenced', () => {
+test('PreToolUse: a PowerShell-tool exp launch with ONLY the skill referenced still needs Monitor+interim', () => {
   const verdict = evaluate({ event: 'PreToolUse', command: POWERSHELL_LAUNCH, entries: [skillRef()] });
+  assert.equal(verdict.block, true);
+});
+test('PreToolUse: ALLOW a PowerShell-tool exp launch once skill + Monitor + interim are ALL present', () => {
+  const verdict = evaluate({ event: 'PreToolUse', command: POWERSHELL_LAUNCH, entries: [skillRef(), monitor(), stream()] });
   assert.equal(verdict.block, false);
 });
 test('Stop: BLOCK a training launch that ran with no checkpoint setup', () => {

@@ -61,8 +61,9 @@
 // ml-experiment skill was actually REFERENCED this session (a Skill tool-use of
 // `ml-experiment`, or its SKILL.md read). Rule 1.6: this gates on the verifiable
 // STATE (the skill's content entered context), never a self-asserted token.
-// Local exp*.py runs are gated on the skill reference ONLY — the pod-grade
-// monitor/stream/checkpoint cascade stays scoped to paid/remote launches (the
+// Local exp*.py runs are ALSO required to pass the Monitor + interim-stream
+// cascade below (fixed 2026-07-21 — see the "FIX" comment on that branch);
+// only job-liveness and checkpoint-setup stay scoped to paid/remote launches (the
 // skill itself owns the monitor-default-on rule for local runs, with Russell's
 // opt-out).
 // =============================================================================
@@ -145,6 +146,13 @@ export function isLaunchCommand(command) {
 // detection here). \b matches at ANY word/non-word transition (quote, paren, whitespace,
 // start-of-string), matching the more robust pattern already used by PYTHON_MODAL above.
 const LOCAL_EXPERIMENT_RE = /\b(?:python[0-9.]*|py)\b\s+(?:-3\s+)?\S*scripts[\/\\]exp\w+\.py\b/;
+// A SUPPORT script for an already-running experiment (refresher/feeder/monitor/watch/
+// helper) is NOT a new launch, even though it's conventionally named exp<N>_*.py too
+// (e.g. exp153_live_refresher.py). Bug found 2026-07-21: without this exclusion, a
+// refresher's own command matched LOCAL_EXPERIMENT_RE, so calling it mid-run looked
+// like ANOTHER local launch and corrupted the Stop-side launch-index tracking (a
+// stale-monitor false block fired even though the run was correctly monitored).
+const SUPPORT_SCRIPT_RE = /_(?:live_)?refresher\.py\b|_(?:live_)?feeder\.py\b|_monitor\.py\b|_watch(?:er)?\.py\b|_helper\.py\b/i;
 
 /**
  * True when a command runs a LOCAL experiment worker (scripts/exp*.py). These are
@@ -155,6 +163,7 @@ export function isLocalExperimentRun(command) {
   if (NOT_A_LAUNCH.test(command)) return false;
   if (PYTEST_RE.test(command)) return false;
   if (/py_compile/.test(command)) return false;
+  if (SUPPORT_SCRIPT_RE.test(command)) return false;
   return LOCAL_EXPERIMENT_RE.test(command);
 }
 
@@ -410,9 +419,18 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
     if (isAnyExperimentLaunch && !referencedExperimentSkill(toolUses)) {
       return { block: true, mode: 'deny', reason: NO_SKILL_REFERENCE_REASON };
     }
-    // Local exp*.py runs are gated on the skill reference only — the pod-grade
-    // monitor cascade below stays scoped to paid/remote/training launches.
-    if (!isLaunchCommand(command) && !isTrainingLaunch(command)) return { block: false };
+    // FIX (Russell, 2026-07-21, the SAME evening he caught the PowerShell blind
+    // spot — "the hook should have caught you when you relaunched"): the
+    // ml-experiment skill's own text requires Monitor + live-interim-streaming
+    // for LOCAL runs too, not just pod/remote/training launches. This branch
+    // used to skip local exp*.py runs entirely once the skill-reference check
+    // passed (below), so relaunching a local worker with NO Monitor and NO
+    // interim feed sailed straight through -- exactly what happened. Reuses
+    // isAnyExperimentLaunch (same set of launch types) instead of
+    // recomputing it — only job-liveness (SSH-probing a remote pod --
+    // meaningless locally) and checkpoint-setup (surviving pod preemption --
+    // pod-specific) stay scoped to real pod/training launches below.
+    if (!isAnyExperimentLaunch) return { block: false };
     const hasMonitor = toolUses.some((toolUse) => toolUse.name === MONITOR_TOOL);
     if (!hasMonitor) return { block: true, mode: 'deny', reason: DENY_REASON };
     // Monitor exists — but does interim trial data actually stream? (Russell 2026-07-17)
@@ -429,12 +447,16 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
   if (event === 'Stop') {
     if (stopHookActive) return { block: false };
     let lastLaunchIndex = -1;
+    let lastPodOrTrainingLaunchIndex = -1;
     let lastMonitorIndex = -1;
     toolUses.forEach((toolUse, index) => {
       if (toolUse.name === MONITOR_TOOL) lastMonitorIndex = index;
-      if (toolUse.name === 'Bash' && (isLaunchCommand(toolUse.command) || isTrainingLaunch(toolUse.command))) {
-        lastLaunchIndex = index;
-      }
+      if (toolUse.name !== 'Bash' && toolUse.name !== 'PowerShell') return;
+      const podOrTraining = isLaunchCommand(toolUse.command) || isTrainingLaunch(toolUse.command);
+      // FIX (2026-07-21): local exp*.py runs now count as a launch for the
+      // Monitor+interim-stream backstop too — see the matching PreToolUse fix.
+      if (podOrTraining || isLocalExperimentRun(toolUse.command)) lastLaunchIndex = index;
+      if (podOrTraining) lastPodOrTrainingLaunchIndex = index;
     });
     if (lastLaunchIndex < 0) return { block: false };
     if (lastMonitorIndex < lastLaunchIndex) {
@@ -446,12 +468,15 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
     }
     // And does interim trial data actually stream home? (Russell 2026-07-17)
     if (!streamsInterimData(toolUses)) return { block: true, mode: 'stop', reason: NO_INTERIM_REASON };
-    // And does anything probe JOB liveness (not just pod status)? (Russell 2026-07-17, the $13 bleed)
-    if (!probesJobLiveness(toolUses)) return { block: true, mode: 'stop', reason: NO_JOB_LIVENESS_REASON };
-    // And if the launch was a TRAINING run, was step-level checkpointing wired? (Russell 2026-07-17)
-    const lastLaunchCommand = toolUses[lastLaunchIndex]?.command || '';
-    if (isTrainingLaunch(lastLaunchCommand) && !hasCheckpointSetup(toolUses, lastLaunchCommand, allAssistantText(entries))) {
-      return { block: true, mode: 'stop', reason: NO_CHECKPOINT_REASON };
+    // Job-liveness and checkpoint-setup stay scoped to real pod/training
+    // launches (SSH-probing / checkpoint-cadence are meaningless for a local
+    // CPU toy run) — only check them if a POD/TRAINING launch actually ran.
+    if (lastPodOrTrainingLaunchIndex >= 0) {
+      if (!probesJobLiveness(toolUses)) return { block: true, mode: 'stop', reason: NO_JOB_LIVENESS_REASON };
+      const lastLaunchCommand = toolUses[lastPodOrTrainingLaunchIndex]?.command || '';
+      if (isTrainingLaunch(lastLaunchCommand) && !hasCheckpointSetup(toolUses, lastLaunchCommand, allAssistantText(entries))) {
+        return { block: true, mode: 'stop', reason: NO_CHECKPOINT_REASON };
+      }
     }
     return { block: false };
   }
