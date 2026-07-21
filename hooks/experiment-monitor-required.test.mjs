@@ -8,7 +8,11 @@ import assert from 'node:assert/strict';
 import {
   isLaunchCommand, isTrainingLaunch, isLocalExperimentRun,
   referencedExperimentSkill, evaluate,
+  isMonitorLiveFilePath, looksLikeStandardTemplate, templateFingerprintCheck,
 } from './experiment-monitor-required.mjs';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 // ── transcript builders ──────────────────────────────────────────────────────
 const bash = (command) => ({ role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: { command } }] });
@@ -272,6 +276,71 @@ test('PreToolUse: DENY a POD launch without the skill reference (before the moni
 test('referencedExperimentSkill: fails safe on malformed input', () => {
   assert.equal(referencedExperimentSkill(null), false);
   assert.equal(referencedExperimentSkill([{}]), false);
+});
+
+// ── TEMPLATE-FIRST enforcement (Russell, 2026-07-21, his 6th correction) ─────
+// A hand-rolled *-live.html monitor previously satisfied every check in this file
+// (Monitor tool-use + a watch link) with zero content verification -- exactly the
+// gap that let a bespoke page ship 6 times. These pin the NEW Write-time check.
+
+test('isMonitorLiveFilePath: matches any *-live.html regardless of directory', () => {
+  assert.equal(isMonitorLiveFilePath('docs/exp167d-durability-live.html'), true);
+  assert.equal(isMonitorLiveFilePath('C:/repo/docs/exp150-live.html'), true);
+  assert.equal(isMonitorLiveFilePath('docs/some-report.html'), false);
+  assert.equal(isMonitorLiveFilePath('scripts/exp167d_worker.py'), false);
+});
+
+test('looksLikeStandardTemplate: the REAL template file passes', () => {
+  const templatePath = join(homedir(), '.claude', 'skills', 'live-watch', 'watch-template.html');
+  const templateContent = readFileSync(templatePath, 'utf8');
+  assert.equal(looksLikeStandardTemplate(templateContent), true);
+});
+
+test('looksLikeStandardTemplate: a hand-rolled page (no CONFIG marker) fails', () => {
+  const handRolled = '<!doctype html><html><body><script>const ARMS=["a"];function refresh(){}</script></body></html>';
+  assert.equal(looksLikeStandardTemplate(handRolled), false);
+});
+
+test('looksLikeStandardTemplate: mentioning "CONFIG" without the real marker still fails', () => {
+  const fakeout = '<script>// CONFIG for my page\nconst CONFIG = {};</script>';
+  assert.equal(looksLikeStandardTemplate(fakeout), false);
+});
+
+test('templateFingerprintCheck: DENY writing a new *-live.html with no template fingerprint', () => {
+  const verdict = templateFingerprintCheck({
+    filePath: 'docs/exp167d-durability-live.html',
+    content: '<!doctype html><body>hand-rolled</body></html>',
+  });
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.mode, 'deny');
+  assert.match(verdict.reason, /standard template/i);
+});
+
+test('templateFingerprintCheck: ALLOW writing a *-live.html that IS the template', () => {
+  const templatePath = join(homedir(), '.claude', 'skills', 'live-watch', 'watch-template.html');
+  const templateContent = readFileSync(templatePath, 'utf8');
+  const verdict = templateFingerprintCheck({
+    filePath: 'docs/exp999-live.html',
+    content: templateContent,
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('templateFingerprintCheck: does NOT fire on a non-live.html file', () => {
+  const verdict = templateFingerprintCheck({
+    filePath: 'docs/exp167d-METHODS.md',
+    content: 'anything at all',
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('templateFingerprintCheck: escape token in reply clears the block', () => {
+  const verdict = templateFingerprintCheck({
+    filePath: 'docs/exp167d-durability-live.html',
+    content: '<!doctype html><body>hand-rolled</body></html>',
+    replyText: 'building a quick one-off, EXPERIMENT_MONITOR_REQUIRED_OK',
+  });
+  assert.equal(verdict.block, false);
 });
 
 // ── PowerShell-tool launches (Russell, 2026-07-21: the real gap that shipped) ─

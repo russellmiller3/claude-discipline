@@ -45,3 +45,13 @@ test('experiment-monitor-required.mjs is not double-registered under a redundant
   assert.equal(bashOnly.length, 0,
     'a standalone "Bash"-only registration is redundant once a Bash|PowerShell block covers it');
 });
+
+// 2026-07-21, Russell's 6th correction: the template-fingerprint check (Write-time
+// TEETH) only fires if it's actually WIRED into settings.json's Write matcher --
+// pin the registration itself, the same way the Bash/PowerShell wiring is pinned above.
+test('experiment-monitor-required.mjs is ALSO registered under a matcher covering Write', () => {
+  const matchers = preToolUseMatchersRegisteringHook('experiment-monitor-required.mjs');
+  const coversWrite = matchers.some((matcher) => matcher.includes('Write'));
+  assert.ok(coversWrite,
+    `expected a PreToolUse matcher covering Write (for the template-fingerprint check); found: ${JSON.stringify(matchers)}`);
+});

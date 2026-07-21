@@ -39,6 +39,22 @@
 // literal token EXPERIMENT_MONITOR_REQUIRED_OK in the reply/command. Respects
 // stop_hook_active (never loops). FAILS OPEN on any error. basename entry-guard.
 //
+// EXTENSION (Russell, 2026-07-21, verbatim: "why doesnt hook and skill FORCE you
+// to use monitor template. what is this shite you built" -- his 6th correction on
+// this exact repeat mistake): every prior version of this hook only told the
+// assistant, in the DENY/NO-LINK message TEXT, to build the monitor from
+// Russell's standard template -- but NOTHING checked that the resulting file
+// actually WAS the template. Pure Rule 1.6 violation: advice with teeth
+// missing. A hand-rolled *-live.html satisfied the "give Russell a link" Stop
+// check just as well as a real template-derived one, so the assistant kept
+// building bespoke pages and the hook never caught it. NEW PreToolUse[Write]
+// TEETH: writing a NEW file matching *-live.html is DENIED unless its content
+// contains the standard template's fingerprint (the CONFIG-block marker
+// comment + `const CONFIG = {`) -- see isMonitorLiveFilePath/
+// looksLikeStandardTemplate/templateFingerprintCheck below. This is a STATE
+// check (the file's actual bytes), not a claim -- the only way to satisfy it
+// is to genuinely start from ~/.claude/skills/live-watch/watch-template.html.
+//
 // EXTENSION (Russell, 2026-07-21, verbatim: "add hook that you cant launch an
 // experiment without referencing the skill"): the FIRST prerequisite on any
 // launch — runpod/modal/training AND local `scripts/exp*.py` runs — is that the
@@ -151,6 +167,53 @@ export function referencedExperimentSkill(toolUses) {
     (toolUse?.name === 'Skill' && /^ml-experiment$/i.test(toolUse?.skill || ''))
     || SKILL_PATH_RE.test(toolUse?.filePath || '')
     || SKILL_PATH_RE.test(toolUse?.command || ''));
+}
+
+// ---- TEMPLATE-FIRST enforcement (Write-time TEETH, Russell's 6th correction) ----
+
+// A monitor page: any NEW file matching *-live.html. Scoped to filename, not
+// directory, so it catches docs/<exp>-live.html regardless of project layout.
+const MONITOR_LIVE_FILE_RE = /[^\/\\]*-live\.html$/i;
+export function isMonitorLiveFilePath(filePath) {
+  return typeof filePath === 'string' && MONITOR_LIVE_FILE_RE.test(filePath);
+}
+
+// The standard template's fingerprint: the CONFIG-block marker comment AND the
+// CONFIG object declaration. Both must be present — a file that merely mentions
+// "CONFIG" in passing (a bespoke page renamed to look compliant) still needs the
+// literal marker comment, which only exists in the real template.
+const TEMPLATE_MARKER_RE = /CONFIG\s*[—-]\s*the ONLY block you edit per experiment/i;
+const TEMPLATE_CONFIG_OBJECT_RE = /const\s+CONFIG\s*=\s*\{/;
+export function looksLikeStandardTemplate(fileContent) {
+  const content = String(fileContent || '');
+  return TEMPLATE_MARKER_RE.test(content) && TEMPLATE_CONFIG_OBJECT_RE.test(content);
+}
+
+const NOT_TEMPLATE_REASON = `MONITOR PAGE IS NOT DERIVED FROM RUSSELL'S STANDARD TEMPLATE — blocked.
+
+Russell's rule (2026-07-16, re-stated furiously 2026-07-21 after 6 repeat violations): "never a
+hand-rolled page" for a live monitor. This hook's OWN deny/no-link messages have said that for
+weeks — but nothing ever checked the file's actual content, so a hand-rolled *-live.html always
+slipped through. That gap is now closed: this file does not contain the template's fingerprint
+(the CONFIG-block marker comment + \`const CONFIG = {\`).
+
+Fix, in order:
+  1. Copy the template AS-IS: cp ~/.claude/skills/live-watch/watch-template.html <this path>
+  2. Edit ONLY the CONFIG block (exp name, title, feeds, arms, seeds, metric) for this experiment.
+  3. If the worker has no per-step JSONL feed yet, that is the worker's gap to fix (wire the
+     live/think JSONL per the ml-experiment skill's interim-streaming HARD RULE) — it is NOT a
+     reason to abandon the template for a bespoke page.
+
+Escape (genuinely not a monitor page — e.g. a one-off report, not a live-watch dashboard):
+EXPERIMENT_MONITOR_REQUIRED_OK=1 in env, or the token EXPERIMENT_MONITOR_REQUIRED_OK in the reply.`;
+
+/** PreToolUse(Write) check: a NEW *-live.html file must be template-derived. */
+export function templateFingerprintCheck({ filePath, content, envOk = false, replyText = '' } = {}) {
+  if (envOk) return { block: false };
+  if (ESCAPE_TOKEN.test(replyText || '')) return { block: false };
+  if (!isMonitorLiveFilePath(filePath)) return { block: false };
+  if (looksLikeStandardTemplate(content)) return { block: false };
+  return { block: true, mode: 'deny', reason: NOT_TEMPLATE_REASON };
 }
 
 /**
@@ -410,7 +473,26 @@ function main() {
     const replyText = lastAssistantText(entries);
 
     if (event === 'PreToolUse') {
+      const toolName = payload.tool_name || payload.toolName || '';
       const input = payload.tool_input || {};
+
+      if (toolName === 'Write') {
+        const templateVerdict = templateFingerprintCheck({
+          filePath: input.file_path || '',
+          content: input.content || '',
+          replyText,
+        });
+        if (!templateVerdict.block) process.exit(0);
+        process.stdout.write(JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: templateVerdict.reason,
+          },
+        }));
+        process.exit(0);
+      }
+
       const command = input.command || '';
       const verdict = evaluate({ event, command, entries, replyText });
       if (!verdict.block) process.exit(0);
