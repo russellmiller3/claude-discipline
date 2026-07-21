@@ -8,13 +8,13 @@
 //
 // Mechanism (same shape as require-learnings-ack):
 //   PostToolUse:Bash — when a test command runs, scan its output. Any failure →
-//     drop a marker recording the failing test names. A FULL-suite green run
-//     (npm test / test:all) clears the marker. Partial green runs do NOT clear
-//     it (they might not have exercised the failing test).
+//     drop a marker recording the failing command and test names. A green run
+//     clears the marker when its normalized file/directory scope covers the red
+//     scope (or when it runs the full suite).
 //   Stop — if the marker exists, BLOCK. Can't stop with red tests, ever.
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { join as joinPath, dirname } from 'node:path';
+import { join as joinPath, dirname, resolve as resolvePath, relative as relativePath, isAbsolute, extname, sep } from 'node:path';
 
 const ROOT_MARKERS = ['.git', 'CLAUDE.md', 'AGENTS.md', 'package.json'];
 const MARKER_RELATIVE = joinPath('.claude', 'state', 'tests-failing.json');
@@ -22,23 +22,136 @@ const MARKER_RELATIVE = joinPath('.claude', 'state', 'tests-failing.json');
 // Commands that run tests. Includes pytest (`pytest` / `py -m pytest`) and `node --test` so a
 // pytest / node-test repo's runs are seen at all — without this the hook returned early on them,
 // leaving a marker set by a TDD RED impossible to clear. (2026-07-16)
-const TEST_COMMAND_RE = /\b(npm\s+(run\s+)?test|test:all|test:stores|test:clear|vitest|playwright\s+test|vite-node\s+\S*\.test|node\s+\S*\.test|\.spec\.|pytest|node\s+(?:--[a-z-]+\s+)*--test)/i;
-// A full-suite run — only these may CLEAR the marker. `npm test`/`test:all`, OR a direct vitest run that
-// is NOT scoped to specific test files (no `.test.`/`.spec.` path on the line) — i.e. the whole suite.
-// Needed because npm.cmd is often unavailable here, so the suite is run as
-// `node node_modules/vitest/vitest.mjs run --passWithNoTests`; a green one of those must clear the marker,
-// while a file-scoped run (`... run lib/foo.test.js`) must NOT (it didn't exercise every test).
-const FULL_SUITE_RE = /\bnpm\s+test\b|test:all|\bvitest(?:\.mjs)?\s+run\b(?![^\n]*\.(?:test|spec)\.)/i;
+const TEST_COMMAND_RE = /\b(npm\s+(run\s+)?test|test:all|test:stores|test:clear|vitest|jest|playwright\s+test|vite-node\s+\S*\.test|node\s+\S*\.test|\.spec\.|pytest|node\s+(?:--[a-z-]+\s+)*--test)/i;
+const FULL_NPM_SUITE_RE = /\bnpm\s+test\b|test:all/i;
+const TEST_FILE_RE = /(?:\.py|\.(?:test|spec)\.[cm]?[jt]sx?)$/i;
+const SHELL_CONTROL_TOKENS = new Set(['&&', '||', '|', ';']);
+const RUNNER_WORDS = new Set(['run', 'watch']);
+const OPTIONS_WITH_VALUES = new Set([
+	'-k', '-m', '-t', '--config', '--root', '--rootdir', '--confcutdir', '--basetemp',
+	'--tb', '--maxfail', '--durations', '--junitxml', '--testnamepattern', '--test-name-pattern',
+	'--testpathpatterns', '--project', '--pool', '--environment',
+]);
+const NARROWING_OPTIONS = new Set([
+	'-k', '-m', '-t', '--testnamepattern', '--test-name-pattern', '--testpathpatterns',
+	'--lf', '--last-failed', '--ff', '--failed-first', '--changed', '--onlychanged', '--findrelatedtests',
+]);
 
-// A WHOLE-SUITE run trusted to clear the marker. Beyond FULL_SUITE_RE: an UNSCOPED pytest run (no `::`
-// selector and no specific `*.py` file target — `pytest` / `py -m pytest` / `pytest tests/` runs every
-// test), and `node --test` (discovers and runs the whole suite). A file-scoped run (`pytest foo.py`,
-// `pytest foo.py::bar`, `node foo.test.mjs`) must NOT clear — it didn't exercise every test. (2026-07-16)
-function isFullSuiteRun(command) {
-	if (FULL_SUITE_RE.test(command)) return true;
-	if (/\bpytest\b/i.test(command) && !/::/.test(command) && !/\bpytest\b[^\n|&;]*\S+\.py\b/i.test(command)) return true;
-	if (/\bnode\s+(?:--[a-z-]+\s+)*--test\b/i.test(command)) return true;
-	return false;
+function shellTokens(command) {
+	return [...String(command || '').matchAll(/"([^"]*)"|'([^']*)'|([^\s]+)/g)]
+		.map((match) => match[1] ?? match[2] ?? match[3]);
+}
+
+function executableName(token) {
+	return String(token || '').replace(/\\/g, '/').split('/').pop().toLowerCase();
+}
+
+function runnerTargetStart(tokens) {
+	for (let index = 0; index < tokens.length; index++) {
+		const executable = executableName(tokens[index]);
+		if (/^(?:pytest(?:\.exe)?|vitest(?:\.mjs)?|jest(?:\.(?:mjs|cjs|js))?)$/.test(executable)) {
+			return index + 1;
+		}
+		if (executable !== 'node' && executable !== 'node.exe') continue;
+		for (let next = index + 1; next < tokens.length && !SHELL_CONTROL_TOKENS.has(tokens[next]); next++) {
+			if (tokens[next] === '--test') return next + 1;
+			if (TEST_FILE_RE.test(tokens[next])) return next;
+			if (!tokens[next].startsWith('-')) break;
+		}
+	}
+	return -1;
+}
+
+function comparablePath(pathText) {
+	const resolved = resolvePath(pathText);
+	return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function normalizedTarget(rawTarget, workingDirectory) {
+	const selectorParts = String(rawTarget).split('::');
+	const pathText = selectorParts.shift();
+	if (!pathText) return null;
+	const pathWithNativeSeparators = pathText.replace(/[\\/]+/g, sep);
+	return {
+		path: comparablePath(resolvePath(workingDirectory, pathWithNativeSeparators)),
+		isDirectory: /[\\/]$/.test(pathText) || extname(pathText) === '',
+		selector: selectorParts.join('::'),
+	};
+}
+
+function testScope(command, workingDirectory) {
+	const tokens = shellTokens(command);
+	const targetStart = runnerTargetStart(tokens);
+	if (targetStart < 0) return { recognized: false, isFullSuite: FULL_NPM_SUITE_RE.test(command), targets: [] };
+
+	const targets = [];
+	let narrowedWithoutPath = false;
+	let skipOptionValue = false;
+	for (let index = targetStart; index < tokens.length; index++) {
+		const token = tokens[index];
+		if (SHELL_CONTROL_TOKENS.has(token)) break;
+		if (skipOptionValue) {
+			skipOptionValue = false;
+			continue;
+		}
+		const lowerToken = token.toLowerCase();
+		if (RUNNER_WORDS.has(lowerToken)) continue;
+		const optionName = lowerToken.split('=')[0];
+		if (NARROWING_OPTIONS.has(optionName)) narrowedWithoutPath = true;
+		if (lowerToken.startsWith('-')) {
+			if (!lowerToken.includes('=') && OPTIONS_WITH_VALUES.has(optionName)) skipOptionValue = true;
+			continue;
+		}
+		const target = normalizedTarget(token, workingDirectory);
+		if (target) targets.push(target);
+	}
+
+	return { recognized: true, isFullSuite: targets.length === 0 && !narrowedWithoutPath, targets };
+}
+
+function targetCovers(coveringTarget, requiredTarget) {
+	if (coveringTarget.path === requiredTarget.path) {
+		if (!coveringTarget.selector) return true;
+		if (!requiredTarget.selector) return false;
+		return requiredTarget.selector === coveringTarget.selector
+			|| requiredTarget.selector.startsWith(`${coveringTarget.selector}::`);
+	}
+	if (!coveringTarget.isDirectory) return false;
+	const relative = relativePath(coveringTarget.path, requiredTarget.path);
+	return Boolean(relative) && !relative.startsWith('..') && !isAbsolute(relative);
+}
+
+function scopeCovers(greenScope, requiredTargets) {
+	return requiredTargets.length > 0
+		&& requiredTargets.every((requiredTarget) => greenScope.targets.some((greenTarget) => targetCovers(greenTarget, requiredTarget)));
+}
+
+function failureNameTargets(names, workingDirectory) {
+	if (!Array.isArray(names) || names.length === 0) return null;
+	const targets = [];
+	for (const name of names) {
+		const pathMatch = String(name).match(/((?:[A-Za-z]:)?[^\s"'()[\]]+?(?:\.py|\.(?:test|spec)\.[cm]?[jt]sx?)(?:::[^\s]+)?)/i);
+		if (!pathMatch) return null;
+		const target = normalizedTarget(pathMatch[1], workingDirectory);
+		if (!target) return null;
+		targets.push(target);
+	}
+	return targets;
+}
+
+function greenRunCoversMarker(command, commandDirectory, marker, projectRoot) {
+	const markerDirectory = marker.cwd || commandCwd(marker.command, projectRoot);
+	const greenScope = testScope(command, commandDirectory);
+	if (greenScope.isFullSuite) return true;
+	if (shellTokens(command).join('\0') === shellTokens(marker.command).join('\0')
+		&& comparablePath(commandDirectory) === comparablePath(markerDirectory)) return true;
+	if (greenScope.targets.length === 0) return false;
+
+	const namedTargets = failureNameTargets(marker.names, markerDirectory);
+	if (namedTargets) return scopeCovers(greenScope, namedTargets);
+
+	const redScope = testScope(marker.command, markerDirectory);
+	return !redScope.isFullSuite && scopeCovers(greenScope, redScope.targets);
 }
 
 // The directory the command actually runs in: a leading `cd <path> && …` (single/double-quoted or bare)
@@ -110,7 +223,8 @@ function onPostToolUse(hookEvent) {
 		.filter(Boolean).join('\n');
 	if (!outputText) return;
 
-	const projectRoot = markerRoot(commandCwd(command, hookEvent.cwd || process.cwd()));
+	const commandDirectory = commandCwd(command, hookEvent.cwd || process.cwd());
+	const projectRoot = markerRoot(commandDirectory);
 	if (!projectRoot) return;
 	const markerPath = joinPath(projectRoot, MARKER_RELATIVE);
 
@@ -118,11 +232,14 @@ function onPostToolUse(hookEvent) {
 	if (failing) {
 		try {
 			mkdirSync(joinPath(projectRoot, '.claude', 'state'), { recursive: true });
-			writeFileSync(markerPath, JSON.stringify({ ts: Date.now(), command, names: failingNames }, null, 2));
+			writeFileSync(markerPath, JSON.stringify({ ts: Date.now(), command, cwd: commandDirectory, names: failingNames }, null, 2));
 		} catch { /* best-effort */ }
-	} else if (isFullSuiteRun(command)) {
-		// Only a full-suite green run is trusted to clear the marker.
-		try { rmSync(markerPath, { force: true }); } catch { /* best-effort */ }
+	} else if (existsSync(markerPath)) {
+		let marker = {};
+		try { marker = JSON.parse(readFileSync(markerPath, 'utf8')); } catch { /* malformed markers still need a full suite */ }
+		if (greenRunCoversMarker(command, commandDirectory, marker, projectRoot)) {
+			try { rmSync(markerPath, { force: true }); } catch { /* best-effort */ }
+		}
 	}
 }
 
@@ -146,8 +263,8 @@ function onStop(hookEvent) {
 		'',
 		'To clear this gate:',
 		'  1. FIX every failing test (or, if a test is genuinely obsolete, delete it deliberately).',
-		'  2. Re-run the FULL suite: `npm test` (and `npm run test:all` if relevant).',
-		'  3. A full-suite run with zero failures clears this marker automatically.',
+		'  2. Re-run the recorded failing scope or a broader scope that contains it.',
+		'  3. A covering run with zero failures clears this marker automatically.',
 	].join('\n');
 
 	process.stdout.write(JSON.stringify({ decision: 'block', reason }));

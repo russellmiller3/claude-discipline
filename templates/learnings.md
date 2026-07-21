@@ -36,3 +36,4 @@ The **bold claim** is what a tired reader skims. The rest is for when they need 
 ## Debugging Method
 
 - **Probe state before shipping a fix; never guess at a cause.** Add logging / measure the actual values, reproduce, read the output, then fix. A 30-second probe beats an hour debugging a wrong fix that already landed. *(Seed example — replace with your own.)*
+- **A release gate must accept proof at least as broad as the evidence that armed it.** A file-scoped TDD red cannot require a full-suite green to disarm; persist the red command and working directory, then compare normalized scopes so the same file, a covering directory, named-failure files, or the full suite can release it without allowing an unrelated green run through. *(tests-must-pass scope fix, 2026-07-21.)*

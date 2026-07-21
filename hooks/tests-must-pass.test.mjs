@@ -116,3 +116,77 @@ test('a green run from a NESTED package dir clears the git-root marker (nested-r
 	postBash(nestedDir, fullSuiteCommand, greenOutput); // green run from the nested package dir
 	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), false, 'a green run from a subdir must clear the git-root marker');
 });
+
+// 2026-07-21 BUG 3: a file-scoped TDD RED could only be released by a full-suite green run,
+// even after the exact recorded command passed. A green scope may clear the marker when it covers
+// every path that armed it, but a sibling scope must leave the marker armed.
+const judgmentFile = 'scripts/test_exp167d_spawn_judgment_arms.py';
+const siblingFile = 'scripts/test_exp167e_other.py';
+
+test('a GREEN pytest run of the SAME file clears its file-scoped marker', () => {
+	const repoRoot = makeRepo();
+	const command = `cd "${repoRoot}" && py -3 -m pytest ${judgmentFile} -q`;
+	postBash(repoRoot, command, pytestRed);
+	postBash(repoRoot, command, pytestGreen);
+	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), false, 'the exact recorded pytest scope passed');
+});
+
+test('a GREEN rerun of the exact selector-only command clears its marker', () => {
+	const repoRoot = makeRepo();
+	const command = 'py -3 -m pytest -m judgment -q';
+	postBash(repoRoot, command, pytestRed);
+	postBash(repoRoot, command, pytestGreen);
+	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), false, 'the identical selected scope passed');
+});
+
+test('a GREEN pytest run of a DIFFERENT file does not clear the marker', () => {
+	const repoRoot = makeRepo();
+	postBash(repoRoot, `py -3 -m pytest ${judgmentFile} -q`, pytestRed);
+	postBash(repoRoot, `py -3 -m pytest ${siblingFile} -q`, pytestGreen);
+	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), true, 'a sibling file did not cover the red scope');
+});
+
+test('a GREEN parent-directory pytest run clears a child-file marker', () => {
+	const repoRoot = makeRepo();
+	postBash(repoRoot, `py -3 -m pytest .\\${judgmentFile} -q`, pytestRed);
+	postBash(repoRoot, 'py -3 -m pytest scripts/ -q', pytestGreen);
+	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), false, 'the directory run covered the red file');
+});
+
+test('a GREEN single-file pytest run does not clear a directory-scoped marker', () => {
+	const repoRoot = makeRepo();
+	postBash(repoRoot, 'py -3 -m pytest scripts/ -q', pytestRed);
+	postBash(repoRoot, `py -3 -m pytest ${judgmentFile} -q`, pytestGreen);
+	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), true, 'one file is narrower than the red directory');
+});
+
+test('a GREEN unrelated-directory pytest run does not clear the marker', () => {
+	const repoRoot = makeRepo();
+	postBash(repoRoot, `py -3 -m pytest ${judgmentFile} -q`, pytestRed);
+	postBash(repoRoot, 'py -3 -m pytest tests/ -q', pytestGreen);
+	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), true, 'an unrelated directory did not cover the red file');
+});
+
+test('a GREEN vitest run of the SAME file clears its file-scoped marker', () => {
+	const repoRoot = makeRepo();
+	postBash(repoRoot, scopedCommand, redOutput);
+	postBash(repoRoot, scopedCommand, greenOutput);
+	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), false, 'the exact recorded vitest scope passed');
+});
+
+test('a GREEN jest run of the SAME file clears its file-scoped marker', () => {
+	const repoRoot = makeRepo();
+	const command = 'npx jest lib/contractCheck.test.js --runInBand';
+	postBash(repoRoot, command, redOutput);
+	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), true, 'jest red must arm the gate');
+	postBash(repoRoot, command, greenOutput);
+	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), false, 'the exact recorded jest scope passed');
+});
+
+test('named failures from a full red run can be cleared by a green run covering their files', () => {
+	const repoRoot = makeRepo();
+	const namedRedOutput = `❌ ${judgmentFile}::test_judgment_arm\n${pytestRed}`;
+	postBash(repoRoot, 'py -3 -m pytest', namedRedOutput);
+	postBash(repoRoot, `py -3 -m pytest ${judgmentFile} -q`, pytestGreen);
+	assert.equal(existsSync(join(repoRoot, MARKER_RELATIVE)), false, 'the green file covered every named failure');
+});
