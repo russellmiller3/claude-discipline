@@ -10,7 +10,7 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { stripHeredocBodies, hasBackgroundJobFanOut, isUnitTestInvocation, isReadOnlyDiagnostic, isHookOrTempDiagnostic, isSanctionedInstantTool, looksLikeFanOutWork } from './long-running-script-guard.mjs';
+import { stripHeredocBodies, stripPowerShellHereStrings, hasBackgroundJobFanOut, isUnitTestInvocation, isReadOnlyDiagnostic, isHookOrTempDiagnostic, isSanctionedInstantTool, looksLikeFanOutWork, isInstantInvocation } from './long-running-script-guard.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const GUARD = join(here, 'long-running-script-guard.mjs');
@@ -246,6 +246,66 @@ check('still blocks a real sweep file that is not a test_ file (proj47_sweep.py)
   // Integration: the single-pod launch no longer demands parallel evidence.
   check('allows the single-pod launch (no fan-out, so no parallel requirement)',
     !isDenied('py -3 runpod_exp151.py launch --artifact-root ../runs/exp151-smoke --seed 9151 --chain-length 2 --scale qwen2.5-coder-1.5b --steps 2 --batch-size 2 --task-count 4'));
+}
+
+// 2026-07-15 FALSE-BLOCKS: sub-second read-only commands were denied because the keyword scan read
+// the WHOLE command string — commit-message text and data arguments included — as if it were the
+// executable job. Three documented cases from today, plus the here-string shape that actually fired:
+// a commit message written as a PowerShell here-string (@'...'@) containing an apostrophe broke the
+// quote-pairing blanker, exposing the message body (with a `py -3 ... bench.py` mention) to the scan.
+// (a) a git commit whose -m STRING contains a bench filename — the message is DATA, not the job.
+check('allows git commit -m with a bench filename inside the message (2026-07-15 case a)',
+  !isDenied('git commit -m "feat(bench): add scripts/codeservo_session_bench.py --turns 24 runner"'));
+// (a, actual firing shape) here-string commit message with an apostrophe + runner text in the body.
+check('allows a here-string commit message with an apostrophe and a py-runner mention (the 2026-07-15 block)',
+  !isDenied("git commit -m @'\nfeat(bench): plan152 warm bench\n- don't rerun; verified via py -3 scripts/codeservo_session_bench.py --turns 24\n'@"));
+check('allows the same here-string commit via the PowerShell tool',
+  !isDenied("git commit -m @'\nfeat(bench): plan152 warm bench\n- don't rerun; verified via py -3 scripts/codeservo_session_bench.py --turns 24\n'@", 'PowerShell'));
+// (b) a cp of a bench-named script is a sub-second copy, never a run.
+check('allows cp of a bench-named script (2026-07-15 case b)',
+  !isDenied('cp scripts/codeservo_session_bench.py /tmp/neutral.py'));
+// (c) a --help invocation prints usage and exits — instant regardless of the script name.
+check('allows py -3 <bench-named>.py --help (2026-07-15 case c)',
+  !isDenied('py -3 script_with_bench_in_name.py --help'));
+check('allows python <bench script> --help variant',
+  !isDenied('python scripts/codeservo_session_bench.py --help'));
+// git log / git diff are read-only regardless of bench keywords in paths.
+check('allows git log over a bench path', !isDenied('git log --oneline -5 -- scripts/codeservo_session_bench.py'));
+check('allows git diff of a bench file', !isDenied('git diff scripts/codeservo_session_bench.py'));
+// REGRESSION: a bare bench run with NO resume/concurrency evidence must STILL block.
+check('still blocks bare python codeservo_session_bench.py --turns 24 (true positive, 2026-07-15)',
+  isDenied('python codeservo_session_bench.py --turns 24'));
+// REGRESSION: --help on one segment must not mask a real bench run chained after it.
+check('still blocks a real bench run chained after a --help segment',
+  isDenied('py -3 x.py --help && python codeservo_session_bench.py --turns 24'));
+// REGRESSION: a cp segment must not mask a real bench run chained after it.
+check('still blocks a real bench run chained after a cp',
+  isDenied('cp a.txt b.txt && python codeservo_session_bench.py --turns 24'));
+
+// Unit-test the two new classifiers directly.
+{
+  const strippedHereString = stripPowerShellHereStrings("git commit -m @'\ndon't rerun py -3 bench.py\n'@");
+  check('stripPowerShellHereStrings removes the here-string body', !/bench|don't|py -3/.test(strippedHereString));
+  check('stripPowerShellHereStrings keeps the surrounding command', /git commit -m @''@/.test(strippedHereString));
+  check('stripPowerShellHereStrings leaves a plain command untouched',
+    stripPowerShellHereStrings('python train.py --steps 4000') === 'python train.py --steps 4000');
+
+  check('isInstantInvocation: true for a git commit with a bench message',
+    isInstantInvocation('git commit -m "feat(bench): codeservo_session_bench.py"'));
+  check('isInstantInvocation: true for git -C <path> commit (flag before subcommand)',
+    isInstantInvocation('git -C C:/repo commit -m "bench evidence"'));
+  check('isInstantInvocation: true for a cp of a bench script',
+    isInstantInvocation('cp scripts/codeservo_session_bench.py /tmp/neutral.py'));
+  check('isInstantInvocation: true for a --help invocation',
+    isInstantInvocation('py -3 script_with_bench_in_name.py --help'));
+  check('isInstantInvocation: false for git push (not an instant subcommand)',
+    !isInstantInvocation('git push origin main'));
+  check('isInstantInvocation: false for a bare bench run',
+    !isInstantInvocation('python codeservo_session_bench.py --turns 24'));
+  check('isInstantInvocation: false when a real run chains after a --help segment',
+    !isInstantInvocation('py -3 x.py --help && python codeservo_session_bench.py --turns 24'));
+  check('isInstantInvocation: false for --help hidden inside a quoted string',
+    !isInstantInvocation('python codeservo_session_bench.py --turns 24 --note "see --help for docs"'));
 }
 
 if (failures.length) { console.error(`\n${failures.length} check(s) failed.`); process.exit(1); }

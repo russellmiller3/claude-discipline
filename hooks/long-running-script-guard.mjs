@@ -38,6 +38,9 @@ function main() {
 	if (isReadOnlyDiagnostic(command)) process.exit(0);
 	if (isHookOrTempDiagnostic(command)) process.exit(0);
 	if (isSanctionedInstantTool(command)) process.exit(0);
+	// 2026-07-15: exempt commands whose every segment runs an instant verb (git commit/log/diff, cp)
+	// or is a --help invocation — sub-second by definition, whatever keywords live in their arguments.
+	if (isInstantInvocation(command)) process.exit(0);
 
 	const cwd = hookEvent.cwd || process.cwd();
 	const chunked = hasChunkOrResumeEvidence(command, cwd);
@@ -106,10 +109,21 @@ export function executableText(command) {
 	// nature — the false-block that hit a short `cat > probe.py <<'PY' import … PY; py probe.py` write.
 	// Keep the `<<TAG` redirection token, drop everything up to the closing delimiter line. (2026-07-02)
 	scannableCommand = stripHeredocBodies(scannableCommand);
+	scannableCommand = stripPowerShellHereStrings(scannableCommand);
 	scannableCommand = scannableCommand.replace(/(\s-(?:c|e|p)\b|\s--?command\b)\s*(["'])(?:\\.|(?!\2).)*\2/gi, '$1 ""');
 	scannableCommand = scannableCommand.replace(/(\s-(?:c|e|p)\b|\s--?command\b)\s+[^\s"'|&;]+/gi, '$1 ');
 	scannableCommand = scannableCommand.replace(/"(?:\\.|[^"\\])*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''");
 	return scannableCommand;
+}
+
+// Blank the body of every PowerShell here-string (@'...'@ / @"..."@), keeping the empty delimiters.
+// Same family as stripHeredocBodies: a here-string is DATA (typically a git commit -m message), never
+// the shell's executable structure. The plain quote-pairing blanker below cannot handle it — an
+// apostrophe inside the body (e.g. "don't") breaks the pairing and EXPOSES the rest of the message
+// (including any `py -3 ... bench.py` command quoted in it) to the keyword scan. That was the
+// 2026-07-15 false-block: a sub-second `git commit -m @'...'@` denied as a long bench run.
+export function stripPowerShellHereStrings(command) {
+	return String(command).replace(/@(['"])[\s\S]*?\1@/g, '@$1$1@');
 }
 
 // Blank the body of every heredoc, keeping only the `<<DELIM` redirection token. Matches `<<DELIM`,
@@ -344,6 +358,52 @@ export function isSanctionedInstantTool(command) {
 
 // name-by-use-override: `cwd` in scriptSourceMatches below is this file's established parameter name
 // (current working dir), used by every detector — pre-existing, not introduced by this edit.
+
+// 2026-07-15: an INSTANT command finishes in under a second no matter what its arguments say — a
+// `git commit` (the -m message is data), a `cp` (moves bytes, runs nothing), or any `--help`
+// invocation (prints usage and exits). These were false-blocked when a bench filename lived in a
+// commit message or a copied path. Same all-segments discipline as isReadOnlyDiagnostic: EVERY
+// segment must be instant, so a real long run chained after a cp or a --help is still gated.
+const INSTANT_PROGRAMS = new Set(['cp']);
+const GIT_INSTANT_SUBCOMMANDS = new Set(['commit', 'log', 'diff']);
+export function isInstantInvocation(command) {
+	const scannableCommand = executableText(String(command));
+	const commandSegments = scannableCommand
+		.split(/(?:\|\||&&|[;\n|&])/g)
+		.map((segment) => segment.trim())
+		.filter(Boolean);
+	if (commandSegments.length === 0) return false;
+	for (const segment of commandSegments) {
+		if (!isInstantSegment(segment)) return false;
+	}
+	return true;
+}
+
+function isInstantSegment(segment) {
+	// A --help invocation is instant regardless of the program: it prints usage and exits.
+	if (/(?:^|\s)--help(?:\s|$)/i.test(segment)) return true;
+	const segmentTokens = segment.split(/\s+/).filter(Boolean);
+	const leadingToken = segmentTokens[0] || '';
+	const program = leadingToken.replace(/^.*[\/\\]/, '').replace(/\.exe$/i, '').toLowerCase();
+	if (READ_ONLY_PROGRAMS.has(program) || INSTANT_PROGRAMS.has(program)) return true;
+	if (program === 'git') return GIT_INSTANT_SUBCOMMANDS.has(gitSubcommand(segmentTokens));
+	return false;
+}
+
+// The git SUBCOMMAND is the first token after `git` that is not a flag and not a blanked-quote
+// artifact. Flag VALUES need no explicit skip: executableText has already blanked them (`-C <path>`
+// / `-c <key=val>` values become empty or `""`/`''` tokens before this runs), so skipping flags and
+// quote artifacts is enough — and a value that DID survive returns as a non-subcommand, which fails
+// the GIT_INSTANT_SUBCOMMANDS lookup and falls through to the normal gate (conservative, never lax).
+function gitSubcommand(segmentTokens) {
+	for (const token of segmentTokens.slice(1)) {
+		if (token === '""' || token === "''") continue;
+		if (token.startsWith('-')) continue;
+		return token.toLowerCase();
+	}
+	return '';
+}
+
 function scriptSourceMatches(command, cwd, sourcePatterns) {
 	for (const scriptPath of extractScriptPaths(command)) {
 		const resolvedScript = isAbsolute(scriptPath) ? scriptPath : resolve(cwd, scriptPath);

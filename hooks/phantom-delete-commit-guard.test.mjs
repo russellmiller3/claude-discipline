@@ -934,6 +934,112 @@ test('session explicitly `rm`-deletes a file via Bash -> counts as touched, not 
   assert.equal(isBlocked(combinedOutput), false, 'expected allow: an explicit rm via Bash is this session\'s own intentional deletion');
 });
 
+// ── 2026-07-04 false-positive fix: judge the commit by the COMMITTING checkout's own HEAD/index ──
+// The ledger incident (2026-07-03 ~22:40): an agent living in a LINKED worktree (clean tree, own
+// branch) ran `git checkout main -- <file> && git commit --no-verify` and got blocked with ~29
+// phantom paths. The guard had probed the hook-event cwd — the STALE PRIMARY — instead of the
+// checkout the commit actually targets, and it counted changes a plain commit would never bake in.
+// These tests lock the three repairs: (1) a `cd` before the commit retargets the probe, (2) unstaged
+// deletions only count when the commit sweeps them in (-a/--all or a sweeping `git add` in the same
+// chain), (3) when the directory is ambiguous (fallback cwd) and every file the session touched
+// inside the repo lives under a linked worktree, the primary's staleness is not this commit's.
+
+// Builds the EXACT incident shape: a primary checkout on main whose ref was advanced by a sibling
+// landing WITHOUT touching its index/tree (fetch --update-head-ok = porcelain update-ref), so the
+// landed files read as STAGED phantom deletion/modification there — plus a CLEAN linked worktree
+// on its own branch where the session actually works.
+function makeStalePrimaryWithCleanWorktree() {
+  const primaryDirectory = join(sandboxDirectory, `repo-${repoCounter++}`);
+  mkdirSync(primaryDirectory, { recursive: true });
+  git(primaryDirectory, 'init', '-q', '-b', 'main');
+  writeFileSync(join(primaryDirectory, 'notes.md'), 'baseline notes\n', 'utf8');
+  git(primaryDirectory, 'add', '-A');
+  git(primaryDirectory, 'commit', '-q', '-m', 'baseline');
+  const worktreeDirectory = join(primaryDirectory, '.claude', 'worktrees', 'agent-session');
+  git(primaryDirectory, 'worktree', 'add', '-q', worktreeDirectory, '-b', 'agent-branch');
+  const landingDirectory = join(primaryDirectory, '.claude', 'worktrees', 'sibling-landing');
+  git(primaryDirectory, 'worktree', 'add', '-q', landingDirectory, '-b', 'landing');
+  writeFileSync(join(landingDirectory, 'landed-by-sibling.md'), 'landed content\n', 'utf8');
+  writeFileSync(join(landingDirectory, 'notes.md'), 'landed rewrite of notes\n', 'utf8');
+  git(landingDirectory, 'add', '-A');
+  git(landingDirectory, 'commit', '-q', '-m', 'sibling landing');
+  git(primaryDirectory, 'fetch', '-q', '--update-head-ok', '.', 'landing:main');
+  return { primaryDirectory, worktreeDirectory };
+}
+
+test('worktree-resident session + stale primary as cwd + explicit-path commit -> passes (the 2026-07-03 ledger FP)', () => {
+  const { primaryDirectory, worktreeDirectory } = makeStalePrimaryWithCleanWorktree();
+  const transcriptPath = makeTranscript([join(worktreeDirectory, 'AGENT-HANDOFF.md')]);
+  const { combinedOutput } = runHook(
+    'git checkout main -- notes.md && git commit --no-verify -m "restore notes"',
+    { transcriptPath, workingDirectory: primaryDirectory },
+  );
+  assert.equal(isBlocked(combinedOutput), false,
+    'expected allow: every file this session touched lives in a linked worktree — the primary\'s staleness is not this commit');
+});
+
+test('session touched files in BOTH primary and worktree -> still blocks (primary work is genuinely in play)', () => {
+  const { primaryDirectory, worktreeDirectory } = makeStalePrimaryWithCleanWorktree();
+  const transcriptPath = makeTranscript([
+    join(worktreeDirectory, 'AGENT-HANDOFF.md'),
+    join(primaryDirectory, 'my-primary-note.md'),
+  ]);
+  const { combinedOutput } = runHook('git commit -m "wip"', { transcriptPath, workingDirectory: primaryDirectory });
+  assert.equal(isBlocked(combinedOutput), true, 'expected deny: the session works in the primary too, and its index is stale');
+  // notes.md is the named phantom (its content historically-matches the pre-landing baseline commit).
+  // landed-by-sibling.md is a co-occurring deletion that the corroboration check (pathAbsentAt) explains
+  // via the SAME stale sync-point, so it doesn't need its own separate mention — one smoking gun is
+  // enough to block, and the block itself (asserted above) is the safety property this test guards.
+  assert.match(combinedOutput, /notes\.md/);
+});
+
+test('unstaged phantom deletion with plain git commit (no -a, no sweeping add) -> passes (deletion never enters the commit)', () => {
+  const repoDirectory = makeRepoWithPhantomDeletions(['quietly-missing.md']);
+  const transcriptPath = makeTranscript([]);
+  const { combinedOutput } = runHook('git commit --allow-empty -m "unrelated"', { transcriptPath, workingDirectory: repoDirectory });
+  assert.equal(isBlocked(combinedOutput), false, 'expected allow: a plain commit bakes the index only, not an unstaged deletion');
+});
+
+test('git add -A && git commit with unstaged phantom deletion -> blocks (sweeping add stages it at commit time)', () => {
+  const repoDirectory = makeRepoWithPhantomDeletions(['swept-away.md']);
+  const transcriptPath = makeTranscript([]);
+  const { combinedOutput } = runHook('git add -A && git commit -m "wip"', { transcriptPath, workingDirectory: repoDirectory });
+  assert.equal(isBlocked(combinedOutput), true, 'expected deny: git add -A will stage the phantom deletion before the commit');
+  assert.match(combinedOutput, /swept-away\.md/);
+  const dotAdd = runHook('git add . ; git commit -m "wip"', { transcriptPath, workingDirectory: repoDirectory });
+  assert.equal(isBlocked(dotAdd.combinedOutput), true, 'expected deny: git add . sweeps deletions in too');
+});
+
+test('cd <linked worktree> && git commit -am with cwd on the stale primary -> passes (cd retargets the commit)', () => {
+  const { primaryDirectory, worktreeDirectory } = makeStalePrimaryWithCleanWorktree();
+  const transcriptPath = makeTranscript([]);
+  const { combinedOutput } = runHook(`cd "${worktreeDirectory}" && git commit -am "wip"`, { transcriptPath, workingDirectory: primaryDirectory });
+  assert.equal(isBlocked(combinedOutput), false, 'expected allow: the commit runs in the linked worktree, not the stale primary');
+});
+
+test('cd <stale repo> && git commit -am from a neutral directory -> blocks (cd retargets INTO the stale checkout)', () => {
+  const repoDirectory = makeRepoWithPhantomDeletions(['cd-target-phantom.md']);
+  const neutralDirectory = join(sandboxDirectory, 'neutral-cd');
+  mkdirSync(neutralDirectory, { recursive: true });
+  const transcriptPath = makeTranscript([]);
+  const { combinedOutput } = runHook(`cd "${repoDirectory}" && git commit -am "wip"`, {
+    transcriptPath,
+    workingDirectory: neutralDirectory,
+    env: { GIT_CEILING_DIRECTORIES: sandboxDirectory.replace(/\\/g, '/') },
+  });
+  assert.equal(isBlocked(combinedOutput), true, 'expected deny: the cd target is the stale checkout committing the phantom');
+  assert.match(combinedOutput, /cd-target-phantom\.md/);
+});
+
+test('commit.gpgsign in a config flag is NOT a commit; a real commit alongside it still is', () => {
+  const { primaryDirectory } = makeStalePrimaryWithCleanWorktree();
+  const transcriptPath = makeTranscript([]);
+  const statusOnly = runHook('git -c commit.gpgsign=false status', { transcriptPath, workingDirectory: primaryDirectory });
+  assert.equal(isBlocked(statusOnly.combinedOutput), false, 'expected allow: commit.gpgsign=false is a config key, not a commit');
+  const realCommit = runHook('git -c commit.gpgsign=false commit -m "wip"', { transcriptPath, workingDirectory: primaryDirectory });
+  assert.equal(isBlocked(realCommit.combinedOutput), true, 'expected deny: the same flag next to a REAL commit must not hide it');
+});
+
 test.after(() => {
   rmSync(sandboxDirectory, { recursive: true, force: true });
 });

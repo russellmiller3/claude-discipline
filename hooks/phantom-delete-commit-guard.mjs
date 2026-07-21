@@ -56,13 +56,22 @@
  * substring like `phantom-delete-commit-guard.mjs` do NOT count — git must BE the segment's
  * command with `commit` as a bare unquoted word). MSYS `/c/...` cd / -C paths normalize on Windows.
  *
+ * WHICH CHECKOUT (2026-07-03 worktree-resident tell): `git -C <path>` wins; else the LAST `cd
+ * <dir>` before the commit; else the tool call's cwd. When the checkout came from that cwd
+ * FALLBACK (i.e. it's a guess, not an explicit -C/cd), one more tell applies: if every file this
+ * session created/edited inside the repo lives under a LINKED worktree, the session is
+ * worktree-resident — its commit targets that worktree, and the primary's staleness is not its
+ * business (the 2026-07-03 ledger FP: an agent in a clean linked worktree was blocked because the
+ * hook probed the stale PRIMARY the event cwd pointed at instead). Sessions that touched the
+ * primary — or touched nothing — keep the full block.
+ *
  * FAIL-OPEN: malformed stdin, missing git, non-repo directory, or no transcript (no provenance
  * evidence → cannot accuse) → exit 0. Never brick a normal commit.
  */
 
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { resolve, isAbsolute, basename } from 'node:path';
+import { resolve, isAbsolute, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTranscript, roleOf, toolUsesOf } from './lib/transcript.mjs';
 
@@ -118,6 +127,24 @@ export function msysToWindowsPath(rawPath) {
   if (process.platform !== 'win32') return rawPath;
   const msysDriveMatch = /^\/([a-zA-Z])(\/.*)?$/.exec(rawPath || '');
   return msysDriveMatch ? `${msysDriveMatch[1].toUpperCase()}:${msysDriveMatch[2] || '/'}` : rawPath;
+}
+
+/**
+ * The directory the commit actually runs in when the chain cd's first: the LAST `cd <dir>` in any
+ * chain segment (start, `&&`, or `;`) BEFORE the commit segment, or null. A cd after the commit
+ * can't retarget it. Same lesson as no-commit-to-main.mjs (2026-07-03): probing the session cwd
+ * while the command cd's into another checkout judges the WRONG repo. Used only to tell whether
+ * the eventual checkout resolution was EXPLICIT (a named -C/cd) vs a bare-cwd GUESS — the
+ * worktree-resident tell below applies only to the guessed case.
+ */
+export function cdTargetBeforeCommit(command, commitSegment) {
+  if (typeof command !== 'string' || !command || !commitSegment) return null;
+  const commitIndex = command.indexOf(commitSegment);
+  const beforeCommit = commitIndex >= 0 ? command.slice(0, commitIndex) : command;
+  const cdMatches = [...beforeCommit.matchAll(/(?:^|&&|;|\n)\s*cd\s+(?:"([^"]+)"|'([^']+)'|([^\s"';&|]+))/g)];
+  if (!cdMatches.length) return null;
+  const lastCd = cdMatches[cdMatches.length - 1];
+  return lastCd[1] || lastCd[2] || lastCd[3] || null;
 }
 
 /** The repo path named by `git -C <path>` in the commit segment, or null when -C is absent. */
@@ -331,6 +358,28 @@ export function sessionTouchedPaths(sessionEntries) {
   return touchedPaths;
 }
 
+/**
+ * The worktree-resident tell (pure; roots and touched paths pre-normalized to
+ * resolve().toLowerCase()): true when the session created/edited at least one file under a LINKED
+ * worktree of this repo and NONE under the probed primary outside those worktrees — i.e. the
+ * session lives in a linked worktree, so its commit targets THAT checkout and the probed
+ * primary's staleness is someone else's state, not this commit's payload. Conservative on
+ * silence: a session that touched nothing inside the repo proves nothing and keeps the block.
+ */
+export function sessionLivesInLinkedWorktree(touchedPaths, worktreeRoots, primaryRoot) {
+  const isUnder = (candidatePath, rootPath) =>
+    candidatePath === rootPath || candidatePath.startsWith(rootPath + sep);
+  const linkedRoots = (worktreeRoots || []).filter((rootPath) => rootPath && rootPath !== primaryRoot);
+  if (!linkedRoots.length) return false;
+  let touchedInLinkedWorktree = 0;
+  let touchedInPrimaryOnly = 0;
+  for (const touchedPath of touchedPaths || []) {
+    if (linkedRoots.some((rootPath) => isUnder(touchedPath, rootPath))) touchedInLinkedWorktree += 1;
+    else if (isUnder(touchedPath, primaryRoot)) touchedInPrimaryOnly += 1;
+  }
+  return touchedInLinkedWorktree > 0 && touchedInPrimaryOnly === 0;
+}
+
 // ── plumbing ────────────────────────────────────────────────────────────────────────────────────
 
 /** stdout of a git invocation in `repoDirectory`, or null on any failure (missing git, non-repo). */
@@ -462,6 +511,19 @@ export function parseNumstat(numstatText, largeDeletionThreshold) {
   return { purelyAdditive, largeDeletions };
 }
 
+/** All worktree roots of the repo (normalized: resolved + lowercased), [] on any git failure. Feeds
+ *  the worktree-resident tell (sessionLivesInLinkedWorktree, above) when the checkout was guessed. */
+function worktreeRootsOf(repoDirectory) {
+  const worktreeListText = gitOutputOrNull(repoDirectory, 'worktree', 'list', '--porcelain');
+  if (worktreeListText === null) return [];
+  const worktreeRoots = [];
+  for (const listLine of worktreeListText.split('\n')) {
+    if (!listLine.startsWith('worktree ')) continue;
+    try { worktreeRoots.push(resolve(listLine.slice('worktree '.length).trim()).toLowerCase()); } catch { /* skip */ }
+  }
+  return worktreeRoots;
+}
+
 function main() {
   if (process.env.PHANTOM_DELETE_OK === '1') { process.exit(0); return; }
 
@@ -484,8 +546,11 @@ function main() {
   if (!commitSegment) { process.exit(0); return; }
 
   // Repo in play: `git -C <path>` wins; else the last `cd <path>` before the commit; else the
-  // tool call's cwd. A relative -C resolves against wherever the cd chain has landed.
+  // tool call's cwd. A relative -C resolves against wherever the cd chain has landed. Only the cwd
+  // FALLBACK is a guess — track that (directoryIsExplicit), because the worktree-resident tell
+  // further down applies exclusively to the guessed case.
   const workingDirectory = event.cwd || process.cwd();
+  const directoryIsExplicit = Boolean(repoPathOf(commitSegment) || cdTargetBeforeCommit(command, commitSegment));
   let repoDirectory;
   try {
     const effectiveCwd = effectiveCwdOf(command, commitSegment, workingDirectory);
@@ -551,8 +616,9 @@ function main() {
   const largeDeletionPaths = stagedNumstat.largeDeletions;
 
   let phantomPaths;
+  let touchedPaths;
   try {
-    const touchedPaths = sessionTouchedPaths(sessionEntries);
+    touchedPaths = sessionTouchedPaths(sessionEntries);
     const isUntouched = (repoRelativePath) => {
       try {
         return !touchedPaths.has(resolve(repoRoot, repoRelativePath).toLowerCase());
@@ -603,6 +669,18 @@ function main() {
     process.exit(0); return;
   }
   if (!phantomPaths.length) { process.exit(0); return; }
+
+  // Worktree-resident tell — ONLY when the checkout was guessed from the tool call's cwd. A
+  // session whose every touched file sits in a linked worktree commits THERE, whatever the
+  // event cwd says (the 2026-07-03 ledger FP: clean worktree agent, stale primary as cwd).
+  if (!directoryIsExplicit) {
+    try {
+      const normalizedPrimaryRoot = resolve(repoRoot).toLowerCase();
+      if (sessionLivesInLinkedWorktree(touchedPaths, worktreeRootsOf(repoDirectory), normalizedPrimaryRoot)) {
+        process.exit(0); return;
+      }
+    } catch { /* tell unavailable — fall through to the block */ }
+  }
 
   const reason = [
     'BLOCKED — this commit would bake in PHANTOM deletions/modifications: a REVERT to content this',
