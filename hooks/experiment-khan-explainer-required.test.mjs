@@ -127,9 +127,18 @@ test('env override clears the block', () => {
 // ── chat-level explanation satisfies the gate (Russell 2026-07-22: "no full
 // explainer html required. just a few lines in chat") ────────────────────────
 const CHAT_EXPLANATION = { role: 'assistant', content: [{ type: 'text', text:
-  'Think of it as a digital repeater: a fading signal is read, decided, and retransmitted clean. '
+  'exp170 — Test: a digital in-layer repeater. Ablation: no repeater. '
+  + 'The task must remember complex state across 64 layers, which is what makes it hard. '
+  + 'Think of it as a repeater on a phone line: a fading signal is read, decided, retransmitted clean. '
   + 'For example, x holds 3 at layer 8 and drifts to 2.87 by layer 16, where we restore it to exactly 3. '
-  + 'What would falsify this: if the no-restore control does not decay, the task is broken, not the model.' }] };
+  + 'What would falsify this: if the no-repeater control does not decay, the task is broken, not the model.' }] };
+
+// The omission that let a nothing-experiment through: a fluent description of the
+// MECHANISM that never says what is compared against what.
+const CHAT_NO_ABLATION = { role: 'assistant', content: [{ type: 'text', text:
+  'exp170 works like a repeater on a phone line, reading and retransmitting the signal clean. '
+  + 'For example a value of 3 drifts to 2.87 by layer 16 and is snapped back to 3. '
+  + 'This would be falsified if accuracy does not improve.' }] };
 
 test('a few lines in CHAT satisfy the explainer requirement', () => {
   const verdict = evaluate({
@@ -145,5 +154,32 @@ test('chat explanation WITHOUT approval still blocks', () => {
 });
 test('approval WITHOUT any explanation still blocks', () => {
   const verdict = evaluate({ command: LAUNCH, entries: [userSays('launch it')] });
+  assert.equal(verdict.block, true);
+});
+
+// ── the omission that shipped an experiment measuring nothing ─────────────────
+test('an explanation with NO ablation named still BLOCKS', () => {
+  // Russell, 2026-07-22: "this experiment was set up totally wrong, didn't test
+  // depth repair at all. Test: Digital in-layer repeater. Ablation: No repeater."
+  // Every arm came out at chance (0.124 vs a 0.125 floor) because nothing was
+  // actually being compared. A fluent mechanism description must not pass.
+  const verdict = evaluate({
+    command: LAUNCH,
+    entries: [CHAT_NO_ABLATION, userSays('launch it')],
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /ABLATION/i);
+});
+test('an explanation for a DIFFERENT experiment does not license this launch', () => {
+  // The original bug: explainedInChat scanned the WHOLE session, so any earlier
+  // explanation satisfied any later launch.
+  const otherExperiment = { role: 'assistant', content: [{ type: 'text', text:
+    'exp999 — Test: a paged fetch. Ablation: no fetch. It must recall values across many pages. '
+    + 'Think of it as virtual memory. For example page 7431 holds 42. '
+    + 'Falsified if the no-fetch control still answers.' }] };
+  const verdict = evaluate({
+    command: LAUNCH,   // exp170
+    entries: [otherExperiment, userSays('launch it')],
+  });
   assert.equal(verdict.block, true);
 });

@@ -67,7 +67,10 @@ export function isExperimentLaunch(command) {
 
 /** The experiment slug a launch command refers to (exp170, exp147e, …). */
 export function launchSlug(command) {
-  const match = /\bexp(\w+?)\b/i.exec(String(command || '').replace(/runpod_/i, ''));
+  // Capture ONLY the number + optional letter. A greedy \w+ swallowed the rest of
+  // the filename ("exp170_depth_repair"), so the slug never matched the prose and
+  // the recency/naming check silently passed on everything.
+  const match = /\bexp(\d{2,4}[a-z]?)/i.exec(String(command || '').replace(/runpod_/i, ''));
   return match ? `exp${match[1]}`.toLowerCase() : null;
 }
 
@@ -91,27 +94,62 @@ function flattenToolUses(entries) {
   return toolUses;
 }
 
+// The TEST and its ABLATION must BOTH be named (Russell, 2026-07-22: "this
+// experiment was set up totally wrong, didn't test depth repair at all. This
+// should have been the Test: Digital in-layer repeater. Ablation: No repeater.").
+// An explanation that describes a mechanism but never says what is COMPARED
+// AGAINST WHAT is how a design ships measuring nothing.
+const TEST_ARM_RE = /\btest\b\s*[:\-–—]|\btest arm\b|\btreatment\b|\bwe (?:test|measure)\b|\bthe claim\b/i;
+const ABLATION_ARM_RE = /\b(?:ablation|control(?: arm)?|without the|no[- ](?:repeater|refresh|restore|fetch|tool|repair)|compared (?:to|against)|versus|vs\.?)\b/i;
+// What the task actually STRESSES — a design that never says what is hard is a
+// design that can come out at chance and look like a null result.
+const TASK_DIFFICULTY_RE = /\b(?:remember|recall|carry|hold|track|over many|across \d+|complex state|compound|accumulat|degrad|decay)\w*/i;
+
 /**
- * Was the design EXPLAINED IN CHAT this session? (Russell, 2026-07-22: "no full
- * explainer html required. just a few lines in chat.") The bar is the CONTENT —
- * a metaphor, a concrete example, and what would falsify it — not the medium.
- * A few plain sentences in the reply satisfy this; a document is optional.
+ * Was THIS experiment's design explained in chat, RECENTLY? (Russell,
+ * 2026-07-22: "no full explainer html required. just a few lines in chat.")
+ *
+ * THE BUG THIS FIXES (same day, caught by Russell): the first version scanned
+ * EVERY assistant message in the session, so an explanation written for one
+ * experiment silently satisfied the gate for a DIFFERENT, later launch. A
+ * depth-repair run then shipped with hand-added noise, an oracle-computed
+ * answer, and a "restore" that re-encoded from scratch — it tested nothing, and
+ * every arm came out at chance (0.124 vs a 0.125 floor). The gate had passed.
+ *
+ * Now the explanation must (a) sit in one of the LAST `recentWindow` assistant
+ * messages, (b) NAME this experiment, and (c) contain all five marks: metaphor,
+ * worked example, falsification, the TEST arm, and the ABLATION it is compared
+ * against. Naming the ablation is the one that would have caught the bad run.
  */
-export function explainedInChat(entries) {
-  let assistantProse = '';
+export function explainedInChat(entries, slug, recentWindow = 6) {
+  const assistantMessages = [];
   for (const entry of entries || []) {
     const role = entry?.role || entry?.message?.role;
     if (role !== 'assistant') continue;
     const content = entry?.content ?? entry?.message?.content ?? [];
-    if (typeof content === 'string') { assistantProse += ' ' + content; continue; }
-    for (const block of content || []) {
-      if (typeof block === 'string') assistantProse += ' ' + block;
-      else if (block?.type === 'text' && block?.text) assistantProse += ' ' + block.text;
+    let messageProse = '';
+    if (typeof content === 'string') messageProse = content;
+    else {
+      for (const block of content || []) {
+        if (typeof block === 'string') messageProse += ' ' + block;
+        else if (block?.type === 'text' && block?.text) messageProse += ' ' + block.text;
+      }
     }
+    if (messageProse.trim()) assistantMessages.push(messageProse);
   }
-  return METAPHOR_RE.test(assistantProse)
-    && WORKED_EXAMPLE_RE.test(assistantProse)
-    && FALSIFICATION_RE.test(assistantProse);
+  // Only the most recent messages count — a stale explanation of something else
+  // must not license this launch.
+  const recentProse = assistantMessages.slice(-recentWindow).join(' \n ');
+  if (slug) {
+    const slugPattern = new RegExp(slug.replace(/^exp/, '(?:exp)?'), 'i');
+    if (!slugPattern.test(recentProse)) return false;
+  }
+  return METAPHOR_RE.test(recentProse)
+    && WORKED_EXAMPLE_RE.test(recentProse)
+    && FALSIFICATION_RE.test(recentProse)
+    && TEST_ARM_RE.test(recentProse)
+    && ABLATION_ARM_RE.test(recentProse)
+    && TASK_DIFFICULTY_RE.test(recentProse);
 }
 
 /**
@@ -169,11 +207,24 @@ controls present, seeds sufficient, monitor attached. Every mechanical gate pass
 CONCEPTUAL, and only a human reading the design catches that.
 
 A FEW LINES IN CHAT IS ENOUGH (Russell, 2026-07-22: "no full explainer html required. just a few
-lines in chat"). The bar is the CONTENT, not the medium — a written doc is optional:
-  1. ONE concrete metaphor for the mechanism — what is this LIKE?
-  2. A concrete EXAMPLE with real numbers: one step, start to finish.
-  3. What would FALSIFY it — the outcome that means the claim is dead, AND the outcome that would
-     mean the TASK is broken rather than the model.
+lines in chat"). The bar is the CONTENT, not the medium — a written doc is optional. Say ALL of
+this, in the CURRENT message, naming THIS experiment:
+
+  1. TEST: what is the treatment arm, in one line?          e.g. "Digital in-layer repeater"
+  2. ABLATION: what is it compared against?                  e.g. "No repeater"
+  3. THE TASK and WHY IT IS HARD — what must be remembered/tracked, over what depth or length?
+     e.g. "remember very complex state across 64 layers"
+  4. ONE concrete metaphor for the mechanism — what is this LIKE?
+  5. A concrete EXAMPLE with real numbers: one step, start to finish.
+  6. What would FALSIFY it — the outcome that kills the claim, AND the outcome that means the TASK
+     is broken rather than the model.
+
+WHY ITEMS 1-3 EXIST (Russell, 2026-07-22, after a run that measured nothing): a depth-repair
+experiment shipped with hand-added noise, an oracle-computed answer, and a "restore" that
+re-encoded from scratch. Every arm came out at CHANCE — 0.124 against a 0.125 floor — so the
+treatment, the control, and the soft control were indistinguishable. It tested nothing. An
+explanation that names the mechanism but never says WHAT IS COMPARED AGAINST WHAT, or what the
+task actually strains, cannot catch that before the run.
 
 Then WAIT for Russell's explicit go. His words, not your summary of them.
 
@@ -190,7 +241,7 @@ export function evaluate({ command = '', entries = [], replyText = '', envOk = f
   const toolUses = flattenToolUses(entries);
   // A few plain sentences in CHAT satisfy this, or a written explainer — the bar
   // is the content, not the medium (Russell, 2026-07-22).
-  const explainerExists = explainedInChat(entries) || hasKhanExplainer(toolUses, slug);
+  const explainerExists = explainedInChat(entries, slug) || hasKhanExplainer(toolUses, slug);
   const approved = russellApprovedThisSession(entries);
   if (explainerExists && approved) return { block: false };
   return { block: true, mode: 'deny', reason: reasonFor(slug, explainerExists) };
