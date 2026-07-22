@@ -269,6 +269,24 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-22** — **Guards that fought the operator instead of the bug.** One session lost roughly
+  an hour to ~12 block-fix-retry round-trips, and the post-mortem found the fault in the guards, not
+  the work. Two fixes to `experiment-monitor-required` and one new hook:
+  - **Enforce the invariant, not an ordering artifact.** The Stop backstop demanded the last Monitor
+    come *after* the last launch. But arming the Monitor *before* launching is the correct,
+    gap-free pattern — so the guard punished the right behavior, forcing a
+    stop-the-good-Monitor → re-arm-an-identical-one → relaunch cycle every single time. Coverage is
+    now the test (armed after the launch, or within 12 tool-uses before it); stale and absent
+    Monitors still block.
+  - **Report every gap at once.** Both events returned on the first failing check, so one launch
+    became five sequential blocks. `combineReasons()` now emits all unmet requirements together
+    with a counted header. If your guard has N checks, one-at-a-time reporting multiplies the
+    operator's round-trips by N.
+  - New **`experiment-name-gloss`**: blocks a reply naming an experiment by bare number
+    (`exp147e`, `169a`) with no plain-English gloss of what it *does*. The rule already lived in a
+    `CLAUDE.md` and a saved memory, and was ignored for an entire session — which is the whole
+    thesis of this repo restated: advice is advisory, hooks are not. Code paths, URLs, and fenced
+    code are exempt. 85 tests green across both hooks.
 - **2026-07-21** — New `learnings-check-before-diagnosis`: blocks a fresh root-cause claim landing
   in a verdict doc (`*METHODS*.md`, `*-Truth.md`, `*findings*.md`, `learnings.md` itself) unless
   `learnings.md` was actually Read/Grepped this session — the exact repeat-mistake class where a
