@@ -76,18 +76,26 @@ const reasonFor = (mentions) => `BARE EXPERIMENT NUMBER — Russell cannot decod
 
 Unglossed: ${mentions.join(', ')}
 
-Russell's rule (project CLAUDE.md 2026-07-19, re-stated angrily 2026-07-22: "refer to
+Russell's rule (project CLAUDE.md 2026-07-19; re-stated angrily 2026-07-22: "refer to
 experiments by their function not just name. makes me angry."): he does NOT remember what a
-number maps to, and looking it up costs energy he does not have. The number is a SUFFIX; the
-plain-English purpose is the actual NAME.
+number maps to, and looking it up costs energy he does not have.
 
-  WRONG: "exp147e is at step 1950"
-  RIGHT: "the lying-tool control fix (exp147e) is at step 1950"
+**USE THE CLAIM NAME THE LEDGER DOCS USE** (Russell, 2026-07-22: "henceforward you need to refer
+to these by the name they will show up on those 2 docs. eg. Tool is Load Bearing - 147c"). The
+brief, the priority board, and the truth ledger each name a claim; that name IS the experiment's
+name in conversation. The number is a SUFFIX.
+
+  WRONG: "exp147e passed"
+  RIGHT: "Tool is Load Bearing (147e) passed"
 
   WRONG: "169a looks good"
   RIGHT: "the variable-tracking first program — register file vs one-pass control — looks good"
 
-Rewrite each mention above with a few plain words saying what it DOES, then stop.
+If you do not know the claim name, grep it before writing:
+  grep -i "<topic>" Marcus-Truth.md docs/LAB-BRIEF-NDA.html docs/LAB-PRIORITY-BOARD.html
+
+Rewrite each mention above with its claim name (or a few plain words saying what it DOES),
+then stop.
 Escape (genuinely internal, e.g. quoting a filename): ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
 
 /**

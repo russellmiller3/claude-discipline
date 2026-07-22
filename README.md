@@ -269,6 +269,22 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-22 (later)** — **Two hooks for the two ends of an experiment: review the design going in,
+  propagate the record coming out.**
+  - **`experiment-khan-explainer-required`** — an experiment run passed *every* mechanical gate we had:
+    tests green, control arm present, enough seeds, live monitor attached, reproduction manifest
+    written. It still could not support its claim, because the harness held the loop and the memory,
+    so every forward pass saw a constant-size input and the flat accuracy curve was true **by
+    construction** rather than measured. **No mechanical gate can catch that** — the flaw was
+    conceptual. So a launch is now denied unless the design was written up in plain language (checked
+    for a sustained metaphor, a worked example, *and* a falsification statement) and a human approved
+    it in their own words. The assistant cannot self-certify, and a question is not an approval.
+  - **`experiment-propagation-required`** — two finished experiments got their methods docs and
+    nothing else, so the buyer-facing brief kept advertising a weakness that had already been repaired
+    and the roadmap kept prescribing a fix that had already been disproven. The mechanism is worth
+    naming because it generalizes: **writing the doc feels like finishing**, so everything downstream
+    of it becomes next session's debt. A landed result now blocks stop until every record surface
+    moves, and the message names only the ones still missing.
 - **2026-07-22** — **Guards that fought the operator instead of the bug.** One session lost roughly
   an hour to ~12 block-fix-retry round-trips, and the post-mortem found the fault in the guards, not
   the work. Two fixes to `experiment-monitor-required` and one new hook:

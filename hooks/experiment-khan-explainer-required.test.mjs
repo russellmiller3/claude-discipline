@@ -1,0 +1,125 @@
+// Tests for experiment-khan-explainer-required.mjs — an experiment must be
+// EXPLAINED at Khan level, and REVIEWED by Russell, before it runs.
+// Red-first: written before the hook.
+//
+//   node --test hooks/experiment-khan-explainer-required.test.mjs
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  isExperimentLaunch, hasKhanExplainer, russellApprovedThisSession, evaluate,
+} from './experiment-khan-explainer-required.mjs';
+
+const bash = (command) => ({ role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: { command } }] });
+const write = (filePath, content = '') => ({ role: 'assistant', content: [{ type: 'tool_use', name: 'Write', input: { file_path: filePath, content } }] });
+const userSays = (text) => ({ role: 'user', content: [{ type: 'text', text }] });
+
+const LAUNCH = 'py -3 scripts/runpod_exp170.py launch --seed 0 --arm deep';
+const LOCAL_LAUNCH = 'py -3 scripts/exp170_depth_refresh.py --arm marcus --seed 0 --out runs/exp170/a.json';
+
+// A Khan-level explainer: sustained metaphor + worked example + the failure mode.
+const KHAN_BODY = `
+# exp170 — depth refresh
+
+## The metaphor: a digital repeater
+An analog signal degrades over distance. A repeater reads it, decides "this is a
+clean 1", and retransmits at full strength.
+
+## Worked example
+At layer 16 the register holds 7. Without refresh it drifts to 6.6 by layer 32.
+With refresh it is rewritten to exactly 7.
+
+## What would falsify this
+If the control does NOT decay with depth, the task does not need depth and the
+experiment proves nothing.
+`;
+
+// ── launch detection ─────────────────────────────────────────────────────────
+test('a runpod launch is an experiment launch', () => {
+  assert.equal(isExperimentLaunch(LAUNCH), true);
+});
+test('a local exp worker run is an experiment launch', () => {
+  assert.equal(isExperimentLaunch(LOCAL_LAUNCH), true);
+});
+test('a smoke run is NOT gated', () => {
+  assert.equal(isExperimentLaunch(LOCAL_LAUNCH + ' --smoke'), false);
+});
+test('pytest is not a launch', () => {
+  assert.equal(isExperimentLaunch('py -3 -m pytest scripts/test_exp170.py'), false);
+});
+test('reading a file is not a launch', () => {
+  assert.equal(isExperimentLaunch('cat scripts/exp170_depth_refresh.py'), false);
+});
+
+// ── explainer detection ──────────────────────────────────────────────────────
+test('a plan with metaphor + example + falsification counts', () => {
+  assert.equal(hasKhanExplainer([write('plans/170-depth-refresh.md', KHAN_BODY)], 'exp170'), true);
+});
+test('a plan for a DIFFERENT experiment does not count', () => {
+  // Body must be about the OTHER experiment too — a doc whose text discusses
+  // exp170 legitimately counts for exp170 regardless of its filename, so the
+  // fixture has to differ in BOTH the name and the content.
+  const otherBody = `
+# exp169 — variable tracking
+## The metaphor: a register file
+Think of it as a CPU reading one register at a time.
+## Worked example
+Register 3 holds 5; add 2; it holds 7.
+## What would falsify this
+If the control does not decay, the task cannot separate the mechanisms.
+`;
+  assert.equal(hasKhanExplainer([write('plans/169-first-programs.md', otherBody)], 'exp170'), false);
+});
+test('a thin plan with no metaphor or falsification does NOT count', () => {
+  const thin = '# exp170\nRun the thing with 3 seeds and see what happens.';
+  assert.equal(hasKhanExplainer([write('plans/170-depth-refresh.md', thin)], 'exp170'), false);
+});
+test('an explainer html for this experiment counts', () => {
+  assert.equal(hasKhanExplainer([write('docs/explainers/exp170-depth.html', KHAN_BODY)], 'exp170'), true);
+});
+
+// ── Russell approval detection ───────────────────────────────────────────────
+test('an explicit go from Russell counts as approval', () => {
+  assert.equal(russellApprovedThisSession([userSays('design looks right, launch it')]), true);
+});
+test('a bare question from Russell is NOT approval', () => {
+  assert.equal(russellApprovedThisSession([userSays('what does the control do?')]), false);
+});
+test('no user message at all is not approval', () => {
+  assert.equal(russellApprovedThisSession([]), false);
+});
+
+// ── evaluate ─────────────────────────────────────────────────────────────────
+test('BLOCK a launch with no explainer at all', () => {
+  const verdict = evaluate({ command: LAUNCH, entries: [] });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /khan/i);
+});
+test('BLOCK a launch that has an explainer but no Russell approval', () => {
+  const verdict = evaluate({
+    command: LAUNCH,
+    entries: [write('plans/170-depth-refresh.md', KHAN_BODY)],
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /review|approv/i);
+});
+test('ALLOW a launch with explainer AND Russell approval', () => {
+  const verdict = evaluate({
+    command: LAUNCH,
+    entries: [write('plans/170-depth-refresh.md', KHAN_BODY), userSays('yes, launch it')],
+  });
+  assert.equal(verdict.block, false);
+});
+test('ALLOW a non-launch command', () => {
+  assert.equal(evaluate({ command: 'ls runs/', entries: [] }).block, false);
+});
+test('ALLOW a smoke run without the gate', () => {
+  assert.equal(evaluate({ command: LOCAL_LAUNCH + ' --smoke', entries: [] }).block, false);
+});
+test('escape token clears the block', () => {
+  const verdict = evaluate({ command: LAUNCH, entries: [], replyText: 'EXPERIMENT_KHAN_OK re-run of a reviewed design' });
+  assert.equal(verdict.block, false);
+});
+test('env override clears the block', () => {
+  assert.equal(evaluate({ command: LAUNCH, entries: [], envOk: true }).block, false);
+});
