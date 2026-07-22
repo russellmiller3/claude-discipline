@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -69,6 +71,15 @@ node src\\cli.mjs app
 	assert.match(hookRun.stdout, /visible app close signal/);
 });
 
+test('allows a plain shell experiment with a start-step argument', () => {
+	const hookRun = runHook(writePayload('scripts/run-exp170.sh', `
+py -3 scripts/exp170_depth_repair.py --start-step 100
+`));
+
+	assert.equal(hookRun.status, 0);
+	assert.equal(hookRun.stdout, '');
+});
+
 test('allows a local app server with shutdown, stale-owner, and browser-close evidence', () => {
 	const hookRun = runHook(writePayload('src/server.mjs', `
 import http from 'node:http';
@@ -95,4 +106,18 @@ server.listen(8765, '127.0.0.1');
 
 	assert.equal(hookRun.status, 0);
 	assert.equal(hookRun.stdout, '');
+});
+
+test('is globally registered live and in the install fragment', () => {
+	const settings = JSON.parse(readFileSync(path.join(homedir(), '.claude', 'settings.json'), 'utf8'));
+	const matchers = (settings?.hooks?.PreToolUse || [])
+		.filter((group) => (group.hooks || []).some((hook) => (hook.command || '').includes('local-server-lifecycle.mjs')))
+		.map((group) => group.matcher || '');
+	for (const toolName of ['Write', 'Edit', 'MultiEdit']) {
+		assert.equal(matchers.some((matcher) => matcher.split('|').includes(toolName)), true, `${toolName} must be covered globally`);
+	}
+	const fragment = JSON.parse(readFileSync(new URL('../settings.fragment.json', import.meta.url), 'utf8'));
+	assert.deepEqual(fragment.tier3_opinionated?.['local-server-lifecycle'], [
+		{ event: 'PreToolUse', matcher: 'Write|Edit|MultiEdit', timeout: 5 },
+	]);
 });

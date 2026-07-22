@@ -11,7 +11,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isPaidLaunch, probesJobLiveness, isTeardown, evaluate, isInScopedRepo } from './pod-cost-circuit-breaker.mjs';
+import {
+  isPaidLaunch,
+  probesJobLiveness,
+  isTeardown,
+  evaluate,
+  isInScopedRepo,
+  latestRunPodMonitorLivenessAt,
+} from './pod-cost-circuit-breaker.mjs';
 
 test('scope: only marcus/legible repos arm the breaker', () => {
   assert.equal(isInScopedRepo('C:\\Users\\rmill\\Desktop\\programming\\marcus'), true);
@@ -98,6 +105,60 @@ test('a pod-STATUS poll does NOT count as liveness — still surfaces when stale
 });
 
 // ── teardown clears the timer ─────────────────────────────────────────────────
+// ── a RunPod Monitor's successful job probe also resets freshness ──────────────
+const monitorNotification = ({ timestamp, summary = 'Monitor event: "RunPod exp157"', event }) => ({
+  timestamp,
+  message: {
+    role: 'user',
+    content: [{
+      type: 'text',
+      text: `<task-notification><summary>${summary}</summary><event>${event}</event></task-notification>`,
+    }],
+  },
+});
+
+test('latest RunPod Monitor ALIVE notification refreshes an armed pod', () => {
+  const firstAt = Date.parse('2026-07-22T12:00:00.000Z');
+  const latestAt = Date.parse('2026-07-22T12:03:00.000Z');
+  const entries = [
+    monitorNotification({ timestamp: '2026-07-22T12:00:00.000Z', event: 'pod abc: ALIVE step=2800/4000' }),
+    monitorNotification({ timestamp: '2026-07-22T12:02:00.000Z', event: 'pod abc: DEAD exit=1' }),
+    monitorNotification({ timestamp: '2026-07-22T12:03:00.000Z', event: 'pod abc: ALIVE step=2850/4000' }),
+  ];
+
+  const monitorAt = latestRunPodMonitorLivenessAt(entries);
+  assert.equal(monitorAt, latestAt);
+
+  const armed = { launchAt: firstAt, lastLivenessAt: firstAt, lastSurfacedAt: 0 };
+  const refreshed = { ...armed, lastLivenessAt: Math.max(armed.lastLivenessAt, monitorAt) };
+  const { surface } = evaluate({ event: 'PostToolUse', command: BENIGN, state: refreshed, now: latestAt + STALE - 1, ...opts });
+  assert.equal(surface, false);
+});
+
+test('RunPod Monitor DEAD and status-only notifications do not refresh liveness', () => {
+  const entries = [
+    monitorNotification({ timestamp: '2026-07-22T12:01:00.000Z', event: 'pod abc: DEAD exit=1' }),
+    monitorNotification({ timestamp: '2026-07-22T12:02:00.000Z', event: 'pod abc: RUNNING desiredStatus=RUNNING' }),
+  ];
+  assert.equal(latestRunPodMonitorLivenessAt(entries), 0);
+});
+
+test('unrelated Monitor ALIVE notifications do not refresh RunPod liveness', () => {
+  const entries = [
+    monitorNotification({
+      timestamp: '2026-07-22T12:01:00.000Z',
+      summary: 'Monitor event: "Modal deployment"',
+      event: 'worker: ALIVE step=10/20',
+    }),
+    monitorNotification({
+      timestamp: '2026-07-22T12:02:00.000Z',
+      summary: 'Agent "RunPod monitor" finished',
+      event: 'pod abc: ALIVE step=2850/4000',
+    }),
+  ];
+  assert.equal(latestRunPodMonitorLivenessAt(entries), 0);
+});
+
 test('teardown/finalize clears launchAt (no surface after)', () => {
   const armed = { launchAt: 1000, lastLivenessAt: 1000, lastSurfacedAt: 0 };
   const done = evaluate({ event: 'PostToolUse', command: FINALIZE, state: armed, now: 2000, ...opts }).nextState;
@@ -134,7 +195,8 @@ test('fails safe on malformed input', () => {
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HOOK = join(HERE, 'pod-cost-circuit-breaker.mjs');
 const TEST_STATE = join(HERE, '.pcb-test-state.json');
@@ -158,6 +220,35 @@ test('integration: env override keeps it silent', () => {
   try { rmSync(TEST_STATE, { force: true }); } catch { /* cleanup */ }
 });
 
+test('integration: a recent RunPod Monitor ALIVE event prevents the stale-pod block', () => {
+  const armedState = join(HERE, '.pcb-monitor-state.json');
+  const transcriptPath = join(HERE, '.pcb-monitor-transcript.jsonl');
+  const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+  const recentProbeAt = new Date(Date.now() - 30 * 1000).toISOString();
+  writeFileSync(armedState, JSON.stringify({ launchAt: tenMinutesAgo, lastLivenessAt: tenMinutesAgo, lastSurfacedAt: 0 }));
+  writeFileSync(transcriptPath, JSON.stringify(monitorNotification({
+    timestamp: recentProbeAt,
+    summary: 'Monitor event: "RunPod paid training"',
+    event: 'pod abc123: ALIVE step=2850/4000',
+  })) + '\n');
+
+  const proc = spawnSync('node', [HOOK], {
+    input: JSON.stringify({
+      hook_event_name: 'PostToolUse',
+      cwd: 'C:\\Users\\rmill\\Desktop\\programming\\marcus',
+      transcript_path: transcriptPath,
+      tool_input: { command: 'git status --short' },
+    }),
+    encoding: 'utf8',
+    env: { ...process.env, POD_COST_BREAKER_STATE: armedState },
+  });
+  assert.equal(((proc.stdout || '') + (proc.stderr || '')).trim(), '');
+  const savedState = JSON.parse(readFileSync(armedState, 'utf8'));
+  assert.equal(savedState.lastLivenessAt, Date.parse(recentProbeAt));
+  try { rmSync(armedState, { force: true }); } catch { /* cleanup */ }
+  try { rmSync(transcriptPath, { force: true }); } catch { /* cleanup */ }
+});
+
 test('integration: unscoped repo stays silent even with an armed+stale pod (the Macher false-positive fix)', () => {
   const armedStale = join(HERE, '.pcb-scope-state.json');
   const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
@@ -172,4 +263,16 @@ test('integration: unscoped repo stays silent even with an armed+stale pod (the 
   const marcus = spawnWith('C:\\Users\\rmill\\Desktop\\programming\\marcus');
   assert.match(((marcus.stdout || '') + (marcus.stderr || '')).trim(), /PAID POD BLEEDING/); // in-scope → blocks
   try { rmSync(armedStale, { force: true }); } catch { /* cleanup */ }
+});
+
+test('is globally registered live and in the install fragment', () => {
+  const settings = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8'));
+  const registeredOnBash = (settings?.hooks?.PostToolUse || []).some((group) =>
+    (group.matcher || '').split('|').includes('Bash')
+      && (group.hooks || []).some((hook) => (hook.command || '').includes('pod-cost-circuit-breaker.mjs')));
+  assert.equal(registeredOnBash, true);
+  const fragment = JSON.parse(readFileSync(new URL('../settings.fragment.json', import.meta.url), 'utf8'));
+  assert.deepEqual(fragment.tier1_standalone?.['pod-cost-circuit-breaker'], [
+    { event: 'PostToolUse', matcher: 'Bash', timeout: 5 },
+  ]);
 });

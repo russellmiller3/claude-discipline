@@ -22,7 +22,7 @@ const SERVER_START_RE =
 const LOCAL_APP_RE = /\b(localhost|127\.0\.0\.1|0\.0\.0\.0|loopback|port)\b/i;
 const LAUNCHER_PATH_RE = /\.(cmd|bat|ps1|sh|desktop|plist|service)$/i;
 const LAUNCHER_SOURCE_RE =
-	/\b(node|bun|deno|python|python3|py|npm(?:\.cmd)?|pnpm|yarn)\b[\s\S]{0,140}\b(app|server|serve|dev|start)\b/i;
+	/\b(node|bun|deno|python|python3|py|npm(?:\.cmd)?|pnpm|yarn)\b[\s\S]{0,140}(?:\b(app|server|serve|dev)\b|(?<!-)\bstart\b)/i;
 const DESKTOP_OPEN_RE =
 	/\b(openBrowser|window\.open|shell\.CreateShortcut|Start-Process|xdg-open|cmd(?:\.exe)?\s+\/c\s+start|\.lnk|desktop shortcut)\b/i;
 

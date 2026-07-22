@@ -30,6 +30,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { readTranscript, textOf } from './lib/transcript.mjs';
 
 const ENV_OVERRIDE = 'POD_COST_BREAKER_OK';
 const ESCAPE_TOKEN = /\bPOD_COST_BREAKER_OK\b/;
@@ -74,6 +75,30 @@ export function probesJobLiveness(command) {
 export function isTeardown(command) {
   if (!command || typeof command !== 'string') return false;
   return TEARDOWN_RE.test(command);
+}
+
+/**
+ * Latest successful job-liveness result emitted by a RunPod Monitor task.
+ * The notification timestamp is when Claude received the probe result; status-only
+ * and failed/dead monitor events intentionally do not count.
+ */
+export function latestRunPodMonitorLivenessAt(entries) {
+  let latestAt = 0;
+  for (const entry of entries || []) {
+    const rawTimestamp = entry?.timestamp;
+    const entryAt = typeof rawTimestamp === 'number' ? rawTimestamp : Date.parse(rawTimestamp || '');
+    if (!Number.isFinite(entryAt)) continue;
+
+    const entryText = textOf(entry);
+    const notifications = entryText.matchAll(/<task-notification\b[^>]*>([\s\S]*?)<\/task-notification>/gi);
+    for (const notification of notifications) {
+      const body = notification[1];
+      const isRunPodMonitor = /<summary\b[^>]*>\s*Monitor event:\s*["']?RunPod\b[\s\S]*?<\/summary>/i.test(body);
+      const reportsJobAlive = /<event\b[^>]*>[\s\S]*?\bALIVE\b[\s\S]*?<\/event>/i.test(body);
+      if (isRunPodMonitor && reportsJobAlive) latestAt = Math.max(latestAt, entryAt);
+    }
+  }
+  return latestAt;
 }
 
 const REASON = (upMinutes) => `PAID POD BLEEDING UNCHECKED — a paid run has been up ~${upMinutes} min and nobody has confirmed the JOB is alive.
@@ -168,7 +193,13 @@ function main() {
     const replyText = payload.reply_text || '';
     if (ESCAPE_TOKEN.test(command) || ESCAPE_TOKEN.test(replyText)) process.exit(0);
 
-    const { surface, reason, nextState } = evaluate({ event, command, state: readState(), now: Date.now() });
+    const state = readState();
+    const transcriptPath = payload.transcript_path || payload.transcriptPath || '';
+    const monitorLivenessAt = latestRunPodMonitorLivenessAt(readTranscript(transcriptPath));
+    const stateWithMonitorLiveness = monitorLivenessAt > state.lastLivenessAt
+      ? { ...state, lastLivenessAt: monitorLivenessAt }
+      : state;
+    const { surface, reason, nextState } = evaluate({ event, command, state: stateWithMonitorLiveness, now: Date.now() });
     writeState(nextState);
     if (!surface) process.exit(0);
     process.stdout.write(JSON.stringify({ decision: 'block', reason }));
