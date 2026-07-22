@@ -123,3 +123,27 @@ test('escape token clears the block', () => {
 test('env override clears the block', () => {
   assert.equal(evaluate({ command: LAUNCH, entries: [], envOk: true }).block, false);
 });
+
+// ── chat-level explanation satisfies the gate (Russell 2026-07-22: "no full
+// explainer html required. just a few lines in chat") ────────────────────────
+const CHAT_EXPLANATION = { role: 'assistant', content: [{ type: 'text', text:
+  'Think of it as a digital repeater: a fading signal is read, decided, and retransmitted clean. '
+  + 'For example, x holds 3 at layer 8 and drifts to 2.87 by layer 16, where we restore it to exactly 3. '
+  + 'What would falsify this: if the no-restore control does not decay, the task is broken, not the model.' }] };
+
+test('a few lines in CHAT satisfy the explainer requirement', () => {
+  const verdict = evaluate({
+    command: LAUNCH,
+    entries: [CHAT_EXPLANATION, userSays('looks right, launch it')],
+  });
+  assert.equal(verdict.block, false);
+});
+test('chat explanation WITHOUT approval still blocks', () => {
+  const verdict = evaluate({ command: LAUNCH, entries: [CHAT_EXPLANATION] });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /approv/i);
+});
+test('approval WITHOUT any explanation still blocks', () => {
+  const verdict = evaluate({ command: LAUNCH, entries: [userSays('launch it')] });
+  assert.equal(verdict.block, true);
+});

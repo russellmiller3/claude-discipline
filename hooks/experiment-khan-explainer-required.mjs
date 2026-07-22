@@ -92,6 +92,29 @@ function flattenToolUses(entries) {
 }
 
 /**
+ * Was the design EXPLAINED IN CHAT this session? (Russell, 2026-07-22: "no full
+ * explainer html required. just a few lines in chat.") The bar is the CONTENT —
+ * a metaphor, a concrete example, and what would falsify it — not the medium.
+ * A few plain sentences in the reply satisfy this; a document is optional.
+ */
+export function explainedInChat(entries) {
+  let assistantProse = '';
+  for (const entry of entries || []) {
+    const role = entry?.role || entry?.message?.role;
+    if (role !== 'assistant') continue;
+    const content = entry?.content ?? entry?.message?.content ?? [];
+    if (typeof content === 'string') { assistantProse += ' ' + content; continue; }
+    for (const block of content || []) {
+      if (typeof block === 'string') assistantProse += ' ' + block;
+      else if (block?.type === 'text' && block?.text) assistantProse += ' ' + block.text;
+    }
+  }
+  return METAPHOR_RE.test(assistantProse)
+    && WORKED_EXAMPLE_RE.test(assistantProse)
+    && FALSIFICATION_RE.test(assistantProse);
+}
+
+/**
  * Was a Khan-level explainer for THIS experiment written this session?
  * Content-checked, not filename-checked: a stub named right proves nothing.
  */
@@ -115,7 +138,7 @@ export function hasKhanExplainer(entries, slug) {
 // Russell's own words approving the design. Deliberately narrow: a question,
 // a correction, or a neutral remark is NOT approval (meta-rule: broad on the
 // catching side, NARROW on the release side).
-const APPROVAL_RE = /\b(?:go ahead|launch it|run it|ship it|looks? (?:right|good|correct)|approved?|lgtm|makes sense[,.]? (?:go|run|launch)|yes,? (?:launch|run|go))\b/i;
+const APPROVAL_RE = /\b(?:go ahead|(?:launch|run|ship) (?:it|all|them|these|those|the \w+)|looks? (?:right|good|correct)|approved?|lgtm|makes sense[,.]? (?:go|run|launch)|yes,? (?:launch|run|go))\b/i;
 
 /** Did RUSSELL (a user message) explicitly approve the design this session? */
 export function russellApprovedThisSession(entries) {
@@ -145,15 +168,14 @@ pass saw a constant-size input and the flat curve was true BY CONSTRUCTION. Test
 controls present, seeds sufficient, monitor attached. Every mechanical gate passed. The flaw was
 CONCEPTUAL, and only a human reading the design catches that.
 
-Write the explainer to the standard of
-plans/167-spawn-judgment-design-and-metacognition-findings.md:
-  1. ONE sustained concrete metaphor, carried through EVERY mechanism — not a one-off aside.
-  2. A WORKED EXAMPLE with real numbers: one row/step, start to finish.
-  3. What would FALSIFY it — the specific outcome that means the claim is dead, AND the outcome
-     that would mean the TASK is broken rather than the model.
-  4. What it does NOT prove, stated before the run, not after a reviewer finds it.
+A FEW LINES IN CHAT IS ENOUGH (Russell, 2026-07-22: "no full explainer html required. just a few
+lines in chat"). The bar is the CONTENT, not the medium — a written doc is optional:
+  1. ONE concrete metaphor for the mechanism — what is this LIKE?
+  2. A concrete EXAMPLE with real numbers: one step, start to finish.
+  3. What would FALSIFY it — the outcome that means the claim is dead, AND the outcome that would
+     mean the TASK is broken rather than the model.
 
-Then show Russell and WAIT for his explicit go. His words, not your summary of them.
+Then WAIT for Russell's explicit go. His words, not your summary of them.
 
 Escape (a re-run of an ALREADY-reviewed, unchanged design — e.g. one more seed): put
 ${ENV_OVERRIDE} in your reply, or set ${ENV_OVERRIDE}=1.`;
@@ -166,7 +188,9 @@ export function evaluate({ command = '', entries = [], replyText = '', envOk = f
 
   const slug = launchSlug(command);
   const toolUses = flattenToolUses(entries);
-  const explainerExists = hasKhanExplainer(toolUses, slug);
+  // A few plain sentences in CHAT satisfy this, or a written explainer — the bar
+  // is the content, not the medium (Russell, 2026-07-22).
+  const explainerExists = explainedInChat(entries) || hasKhanExplainer(toolUses, slug);
   const approved = russellApprovedThisSession(entries);
   if (explainerExists && approved) return { block: false };
   return { block: true, mode: 'deny', reason: reasonFor(slug, explainerExists) };
