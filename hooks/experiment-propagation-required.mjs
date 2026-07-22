@@ -139,6 +139,16 @@ Writing the METHODS doc FEELS like finishing — that is exactly why the rest ge
 Update each missing surface now:
 ${guidance}
 
+HOW to update them (Russell, 2026-07-22 — these are DELETE-and-MOVE rules, not append rules):
+  - NDA brief: a proven item is DELETED from "What is not proven" ENTIRELY — not re-labelled, not
+    struck through, not left with a "repaired" badge. Its evidence moves UP into the architecture
+    table where the claim itself lives, and the CORE CLAIM in that row is rewritten to state what is
+    now true. A shrinking list is the point; that section is the honest remainder, not a changelog.
+  - priority board: a proven item LEAVES the ranked list and moves to the "Done" table, and every
+    item below it is RENUMBERED so the ranked list is always only the work that remains.
+  - truth ledger + METHODS doc: these are where correction history belongs — strike-throughs, the
+    prescription that turned out wrong, and the honest scope of what the result does NOT prove.
+
 Escape (the run is still in flight and the numbers are NOT final): put ${ENV_OVERRIDE} in your
 reply, or set ${ENV_OVERRIDE}=1.`;
 };
