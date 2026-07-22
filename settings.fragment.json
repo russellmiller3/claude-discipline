@@ -28,7 +28,8 @@
     "learnings-error-match":    [{ "event": "PostToolUse", "matcher": "Bash|Edit|Write|MultiEdit", "timeout": 5 }],
     "require-learnings-ack":    [{ "event": "PreToolUse", "matcher": "Edit|Write|MultiEdit|Read", "timeout": 5 }],
     "learnings-write-nudge":    [{ "event": "PostToolUse", "matcher": "Bash", "timeout": 5 }, { "event": "Stop", "timeout": 5 }],
-    "handoff-continuity":       [{ "event": "Stop", "timeout": 5 }]
+    "handoff-continuity":       [{ "event": "Stop", "timeout": 5 }],
+    "handoff-freshness-guard":  [{ "event": "Stop", "timeout": 10 }]
   },
 
   "tier3_opinionated": {

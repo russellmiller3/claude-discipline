@@ -116,6 +116,7 @@ known-words list; regression test added.*
 | `learnings-distill-nudge` | SessionStart | When the raw `learnings.md` pile has grown (8+ new lessons, or a smaller backlog older than a week), nudges to run `/distill-learnings` — the batch first-principles pass that clusters the loose gotchas by root cause, consolidates, and proposes an *enforced hook/rule* for anything that recurred. Advisory (never auto-runs the agent). |
 | `getty-no-repeat-mistakes` | UserPromptSubmit+Stop | On a correction, requires a learning; on a REPEAT correction, a learning already failed — requires asking to build a hook instead |
 | `handoff-continuity` | SessionStart+UserPromptSubmit+Stop | Fires every ~5 turns (and on compaction/"handoff"); blocks stop until `HANDOFF.md` is re-pruned whole-file, not just appended |
+| `handoff-freshness-guard` | Stop | Blocks stale, mechanically checkable handoff claims: finished BUILD targets, contradictory active/terminal status, absent live pod IDs, and moved branch heads |
 | `new-repo-scaffold` | PostToolUse(Bash) | On `git init`, writes a README (North Star / user-stories / roadmap / GTM), `HANDOFF.md`, `learnings.md` + a commit-gate config; never overwrites |
 
 ### Tier 3 — Opinionated (great defaults; some teams will disagree — that's fine, toggle them off)

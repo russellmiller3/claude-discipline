@@ -128,6 +128,20 @@ test('Stop: BLOCK when launch + Monitor but NO watch link was given', () => {
   assert.equal(verdict.mode, 'stop');
   assert.match(verdict.reason, /link/i);
 });
+
+test('Stop: a LOCAL experiment run also blocks when its Monitor has no watch link', () => {
+  const verdict = evaluate({
+    event: 'Stop',
+    entries: [
+      skillRef(),
+      monitor(),
+      bash('py -3 scripts/exp170_depth_repair.py --seed 0'),
+      stream(),
+    ],
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /link/i);
+});
 test('Stop: ALLOW with a localhost link', () => {
   const verdict = evaluate({ event: 'Stop', entries: [bash(LAUNCH), monitor(), stream(), liveness(), say('open http://127.0.0.1:8153/docs/x.html')] });
   assert.equal(verdict.block, false);
