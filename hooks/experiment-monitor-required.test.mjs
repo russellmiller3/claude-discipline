@@ -140,8 +140,59 @@ test('Stop: no-link block does NOT fire when there was no launch', () => {
   const verdict = evaluate({ event: 'Stop', entries: [bash('ls'), monitor()] });
   assert.equal(verdict.block, false);
 });
-test('Stop: BLOCK when the last Monitor precedes the last launch (stale monitor)', () => {
-  const verdict = evaluate({ event: 'Stop', entries: [monitor(), bash(LAUNCH)] });
+// ── ALL unmet requirements reported at once (Russell, 2026-07-22: "stop hook
+// fighting") ──────────────────────────────────────────────────────────────────
+// Reporting one failure per block turned a single launch into five sequential
+// block→fix→retry round-trips. One block must name everything that is missing.
+test('PreToolUse: a launch missing skill+monitor+stream reports ALL of them in ONE block', () => {
+  const verdict = evaluate({ event: 'PreToolUse', command: LAUNCH, entries: [] });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /ml-experiment/i);   // skill requirement
+  assert.match(verdict.reason, /Monitor/i);         // monitor requirement
+  assert.match(verdict.reason, /interim|stream/i);  // live-data requirement
+});
+test('PreToolUse: the combined block counts the unmet requirements', () => {
+  const verdict = evaluate({ event: 'PreToolUse', command: LAUNCH, entries: [] });
+  assert.match(verdict.reason, /3 REQUIREMENTS UNMET/i);
+});
+test('PreToolUse: one remaining gap reports only that gap', () => {
+  const verdict = evaluate({
+    event: 'PreToolUse', command: LAUNCH,
+    entries: [skillRef(), monitor()],
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /interim|stream/i);
+  assert.doesNotMatch(verdict.reason, /REQUIREMENTS UNMET/i); // single gap: no roll-up header
+});
+
+// ── Pre-armed Monitor coverage (Russell, 2026-07-22: this ordering rule cost an
+// hour of block→stop-monitor→re-arm→relaunch cycles in ONE session) ────────────
+// Arming the Monitor BEFORE the launch is the CORRECT pattern — it leaves no
+// coverage gap at all — but the old rule ("last Monitor must come after the last
+// launch") flagged it as a violation. Coverage, not ordering, is the invariant.
+test('Stop: ALLOW when a fresh Monitor was armed just BEFORE the launch (pre-armed)', () => {
+  const verdict = evaluate({
+    event: 'Stop',
+    entries: [skillRef(), monitor(), bash(LAUNCH), stream(), liveness(), say(LINK)],
+  });
+  assert.equal(verdict.block, false);
+});
+test('Stop: BLOCK when the only Monitor is STALE (far before the launch)', () => {
+  // A Monitor from much earlier in the session was watching some OTHER run; it is
+  // not covering this launch. Teeth must survive the fix above.
+  const staleGap = Array.from({ length: 15 }, () => bash('ls -la'));
+  const verdict = evaluate({
+    event: 'Stop',
+    entries: [monitor(), ...staleGap, bash(LAUNCH), stream(), liveness(), say(LINK)],
+  });
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.mode, 'stop');
+});
+test('Stop: BLOCK when a launch ran and there is NO Monitor at all', () => {
+  const verdict = evaluate({
+    event: 'Stop',
+    entries: [bash(LAUNCH), stream(), liveness(), say(LINK)],
+  });
   assert.equal(verdict.block, true);
   assert.equal(verdict.mode, 'stop');
 });

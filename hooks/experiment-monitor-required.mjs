@@ -76,6 +76,12 @@ import { readTranscript, toolUsesOf, lastAssistantText } from './lib/transcript.
 const ENV_OVERRIDE = 'EXPERIMENT_MONITOR_REQUIRED_OK';
 const ESCAPE_TOKEN = /\bEXPERIMENT_MONITOR_REQUIRED_OK\b/;
 const MONITOR_TOOL = 'Monitor';
+// How many tool-uses before a launch a Monitor can be armed and still count as
+// covering it. A pre-armed Monitor is the CORRECT pattern (no unwatched window);
+// this window distinguishes "armed for this launch" from a stale Monitor that was
+// watching an unrelated earlier run. Tool-use distance is the proxy — the
+// transcript library exposes no timestamps.
+const MONITOR_COVERAGE_WINDOW = 12;
 // A watch LINK Russell can open: an http(s) URL, a localhost:PORT, or a *-live.html
 // watch page. Russell's rule (2026-07-16): a Monitor must come with a link.
 const LINK_RE = /(https?:\/\/\S+)|(?:localhost|127\.0\.0\.1):\d+|[\w.-]+-live\.html/i;
@@ -378,6 +384,26 @@ Fix (one step): invoke the skill — Skill tool, name "ml-experiment" — or Rea
 
 Escape (rare — Russell explicitly waived it): ${ENV_OVERRIDE} in your reply, or ${ENV_OVERRIDE}=1.`;
 
+/**
+ * One block message listing EVERY unmet requirement (Russell, 2026-07-22: "stop
+ * hook fighting"). A single gap reads exactly as before — no roll-up noise for the
+ * common case. Two or more get a counted header so the fix is obviously "satisfy
+ * all of these, then relaunch ONCE" rather than a retry-per-gap loop.
+ */
+export function combineReasons(reasons) {
+  const gaps = (reasons || []).filter(Boolean);
+  if (gaps.length === 0) return '';
+  if (gaps.length === 1) return gaps[0];
+  const header = `EXPERIMENT LAUNCH BLOCKED — ${gaps.length} REQUIREMENTS UNMET. Fix ALL of them below, then relaunch ONCE.
+
+Reporting these one at a time is what turned a single launch into ${gaps.length} block-fix-retry
+round-trips. Everything missing is listed together here on purpose.
+`;
+  const numbered = gaps.map((gap, position) =>
+    `\n───────────── ${position + 1} of ${gaps.length} ─────────────\n${gap}`).join('\n');
+  return header + numbered;
+}
+
 // Shared: does any run this session stream interim trial data home? (a refresher/feeder that
 // pulls or writes the live/think JSONL the dashboard reads). Russell's rule, 2026-07-17.
 function streamsInterimData(toolUses) {
@@ -411,13 +437,16 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
   const toolUses = toolUsesInOrder(entries);
 
   if (event === 'PreToolUse') {
-    // FIRST prerequisite (Russell, 2026-07-21): ANY experiment launch — pod, modal,
-    // training, or a LOCAL scripts/exp*.py run — requires the ml-experiment skill
-    // referenced this session. The skill teaches everything the later denials demand.
+    // ALL unmet requirements are collected and reported in ONE block (Russell,
+    // 2026-07-22: "stop hook fighting"). Reporting the first failure only turned a
+    // single launch into five sequential block -> fix -> retry round-trips, which
+    // is how an hour vanished with no visible progress. One block, everything
+    // that's missing, fix it all, relaunch once.
     const isAnyExperimentLaunch = isLaunchCommand(command) || isTrainingLaunch(command)
       || isLocalExperimentRun(command);
+    const unmetRequirements = [];
     if (isAnyExperimentLaunch && !referencedExperimentSkill(toolUses)) {
-      return { block: true, mode: 'deny', reason: NO_SKILL_REFERENCE_REASON };
+      unmetRequirements.push(NO_SKILL_REFERENCE_REASON);
     }
     // FIX (Russell, 2026-07-21, the SAME evening he caught the PowerShell blind
     // spot — "the hook should have caught you when you relaunched"): the
@@ -432,14 +461,17 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
     // pod-specific) stay scoped to real pod/training launches below.
     if (!isAnyExperimentLaunch) return { block: false };
     const hasMonitor = toolUses.some((toolUse) => toolUse.name === MONITOR_TOOL);
-    if (!hasMonitor) return { block: true, mode: 'deny', reason: DENY_REASON };
+    if (!hasMonitor) unmetRequirements.push(DENY_REASON);
     // Monitor exists — but does interim trial data actually stream? (Russell 2026-07-17)
     if (!streamsInterimData(toolUses) && !INTERIM_STREAM_RE.test(command || '')) {
-      return { block: true, mode: 'deny', reason: NO_INTERIM_REASON };
+      unmetRequirements.push(NO_INTERIM_REASON);
     }
     // A TRAINING launch must be wired for step-level checkpointing (Russell 2026-07-17).
     if (isTrainingLaunch(command) && !hasCheckpointSetup(toolUses, command, replyText)) {
-      return { block: true, mode: 'deny', reason: NO_CHECKPOINT_REASON };
+      unmetRequirements.push(NO_CHECKPOINT_REASON);
+    }
+    if (unmetRequirements.length) {
+      return { block: true, mode: 'deny', reason: combineReasons(unmetRequirements) };
     }
     return { block: false };
   }
@@ -459,24 +491,36 @@ export function evaluate({ event, command = '', entries = [], replyText = '', st
       if (podOrTraining) lastPodOrTrainingLaunchIndex = index;
     });
     if (lastLaunchIndex < 0) return { block: false };
-    if (lastMonitorIndex < lastLaunchIndex) {
-      return { block: true, mode: 'stop', reason: STOP_REASON };
-    }
-    // The Monitor covers the launch — but was a watch LINK given to Russell?
-    if (!LINK_RE.test(allAssistantText(entries))) {
-      return { block: true, mode: 'stop', reason: NO_LINK_REASON };
-    }
-    // And does interim trial data actually stream home? (Russell 2026-07-17)
-    if (!streamsInterimData(toolUses)) return { block: true, mode: 'stop', reason: NO_INTERIM_REASON };
+    // COVERAGE, not ordering (Russell, 2026-07-22 — this rule cost an hour of
+    // block -> stop-monitor -> re-arm-identical-monitor -> relaunch cycles in one
+    // session). Arming the Monitor BEFORE the launch is the CORRECT pattern: it
+    // leaves no window where a paid run is unwatched. The old test (last Monitor
+    // must come AFTER the last launch) punished exactly that, forcing a pointless
+    // teardown-and-rearm every time. A Monitor counts as covering the launch when
+    // it is armed after it, OR shortly before it (same working stretch). A Monitor
+    // from far earlier was watching some OTHER run and still fails.
+    const monitorCoversLaunch = lastMonitorIndex >= 0
+      && (lastMonitorIndex >= lastLaunchIndex
+          || (lastLaunchIndex - lastMonitorIndex) <= MONITOR_COVERAGE_WINDOW);
+    // Same all-at-once rule as PreToolUse: collect EVERY gap, report once.
+    const unmetAtStop = [];
+    if (!monitorCoversLaunch) unmetAtStop.push(STOP_REASON);
+    // Was a watch LINK given to Russell?
+    if (!LINK_RE.test(allAssistantText(entries))) unmetAtStop.push(NO_LINK_REASON);
+    // Does interim trial data actually stream home? (Russell 2026-07-17)
+    if (!streamsInterimData(toolUses)) unmetAtStop.push(NO_INTERIM_REASON);
     // Job-liveness and checkpoint-setup stay scoped to real pod/training
     // launches (SSH-probing / checkpoint-cadence are meaningless for a local
     // CPU toy run) — only check them if a POD/TRAINING launch actually ran.
     if (lastPodOrTrainingLaunchIndex >= 0) {
-      if (!probesJobLiveness(toolUses)) return { block: true, mode: 'stop', reason: NO_JOB_LIVENESS_REASON };
+      if (!probesJobLiveness(toolUses)) unmetAtStop.push(NO_JOB_LIVENESS_REASON);
       const lastLaunchCommand = toolUses[lastPodOrTrainingLaunchIndex]?.command || '';
       if (isTrainingLaunch(lastLaunchCommand) && !hasCheckpointSetup(toolUses, lastLaunchCommand, allAssistantText(entries))) {
-        return { block: true, mode: 'stop', reason: NO_CHECKPOINT_REASON };
+        unmetAtStop.push(NO_CHECKPOINT_REASON);
       }
+    }
+    if (unmetAtStop.length) {
+      return { block: true, mode: 'stop', reason: combineReasons(unmetAtStop) };
     }
     return { block: false };
   }
