@@ -271,6 +271,25 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-24** — **`pod-inventory-sweep`: ask the provider, don't trust your notes.** A rented GPU
+  finished its job at 10:30am and then idled for **52 hours**, billing $23.50 for about $0.50 of real
+  work. The painful part: the existing mid-turn cost breaker was armed the whole time and its state
+  was *correct*. It just runs on `PostToolUse` — so it can only fire **inside a session**, and no
+  session ran for two days. It surfaced the bleed within one tool call of the next session opening.
+  - **The transferable lesson: a monitor's detection WINDOW must match its invariant's LIFETIME.**
+    "No pod bills unattended" lives in wall-clock time *across* sessions. A per-tool-call timer is
+    structurally blind to precisely the gap that costs money. Widen the window or the guard is theatre.
+  - **The second lesson: prefer reality to remembered state.** The breaker reasons over a local state
+    file, which a wipe, a pod launched outside the session, or a silently-dead watcher all falsify.
+    The new hook issues one `GET` for the provider's pod list at SessionStart. Reality can't go stale.
+  - **LIST-only by construction** — there is no delete path in the file, so a "check" can never
+    destroy something. (That rule came from a `teardown_check.py` that listed pods *and deleted them
+    all*, killing three live runs.) It also fails open on every error path, so it can never block a
+    session start.
+  - **Test the branch that broke, not the branch that works.** A clean account only ever exercises
+    "no pods, stay quiet" — the branch that was never wrong. Four of its 18 tests spawn the real hook
+    against a stub provider and replay the actual bleed to prove it speaks up.
+
 - **2026-07-22 (later)** — **Two hooks for the two ends of an experiment: review the design going in,
   propagate the record coming out.**
   - **`experiment-khan-explainer-required`** — an experiment run passed *every* mechanical gate we had:

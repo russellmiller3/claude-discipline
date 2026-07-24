@@ -59,7 +59,14 @@ const NOT_A_LAUNCH = /\bfinalize\b|--help\b|(?:^|\s)-h(?:\s|$)|--dry-run\b|--che
 const JOB_LIVENESS_RE = /\bssh\b[\s\S]*(?:\bps\b|pgrep|pkill\s*-0|nvidia-smi|tail[\s\S]*(?:nohup|stdout|job|\.log))|job[_-]?liveness|hang[_-]?detect(?:or|ion)?|log[_-]?freshness|process[_-]?alive|job[_-]?alive|no[_ -]update[_ -]in/i;
 
 // A teardown that ends the pod's cost: finalize (guarded rescue-then-delete) or a pod delete.
-const TEARDOWN_RE = /\bfinalize\b|(?:-X\s*)?\bDELETE\b[\s\S]*\/pods?\/|\brunpodctl\s+(?:remove|stop|terminate)\s+pods?\b|--delete-pod\b|--terminate-pod\b|\bpodTerminate\b/i;
+//
+// The `closeout ... --confirm` arm was added 2026-07-24 after a REAL teardown failed to
+// disarm this breaker, leaving it nagging about an already-deleted pod for a whole session.
+// BOTH halves are required on purpose: a closeout script with NO --confirm is the read-only
+// billing report, which deletes nothing and leaves the pod billing — disarming on that would
+// blind the breaker to a live pod. This mirrors the "match the EXACT failure token, never a
+// broad substring" rule that governs destructive branches.
+const TEARDOWN_RE = /\bfinalize\b|(?:-X\s*)?\bDELETE\b[\s\S]*\/pods?\/|\brunpodctl\s+(?:remove|stop|terminate)\s+pods?\b|--delete-pod\b|--terminate-pod\b|\bpodTerminate\b|closeout\w*\.py\b[\s\S]*--confirm\b/i;
 
 export function isPaidLaunch(command) {
   if (!command || typeof command !== 'string') return false;
