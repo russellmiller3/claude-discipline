@@ -123,6 +123,13 @@ const SILENT_WORK_THRESHOLD = 3;
 const EXPLAIN_WORD_BUDGET = 220; // ~2 short paragraphs + a few bullets; walls are 400-600+
 const WALL_PARA_WORDS = 110;     // one unbroken block this big is a wall on screen
 
+// WORKING turns (code shipped) used to skip this gate entirely — that was the hole Russell hit on
+// 2026-07-24 ("i can t read walls of text"): every long reply that session came on a turn that had
+// also edited files, so the brevity gate never ran. A shipping turn earns a WIDER budget (it has a
+// real status beat to deliver) but never an unlimited one. A wall of prose is a wall either way, so
+// WALL_PARA_WORDS applies unchanged on both kinds of turn.
+const SHIP_WORD_BUDGET = 400;
+
 // Russell explicitly asking for more — these lift the length cap (a wall still must be broken up).
 const DEPTH_REQUEST = /\b(walk me through|in detail|more detail|go deep|deep[ -]dive|step[ -]by[ -]step|give me an example|examples?|explain everything|comprehensive|thorough|elaborate|expand on|long version|full (?:detail|breakdown|explanation)|break (?:it|this) down|more context|teach me)\b/i;
 
@@ -195,15 +202,20 @@ async function main() {
 
   // GATE 1 — brevity / anti-wall, for EXPLAINING turns (no code shipped this turn). This is the gate
   // Russell kept hitting: a chat answer that's a wall of text, which the soft reminder never enforced.
-  if (mutatingCount === 0 && reply && !OVERRIDE.test(reply) && !STYLE_OVERRIDE.test(reply)) {
+  if (reply && !OVERRIDE.test(reply) && !STYLE_OVERRIDE.test(reply)) {
+    const shipped = mutatingCount > 0;
     const depthAsked = DEPTH_REQUEST.test(firstUserText(turnEntries));
     const { totalWords, longestParaWords } = proseMetrics(reply);
+    const wordBudget = shipped ? SHIP_WORD_BUDGET : EXPLAIN_WORD_BUDGET;
     const isWall = longestParaWords > WALL_PARA_WORDS;
-    const isTooLong = totalWords > EXPLAIN_WORD_BUDGET && !depthAsked;
+    const isTooLong = totalWords > wordBudget && !depthAsked;
     if (isWall || isTooLong) {
+      const turnKind = shipped
+        ? `This is a shipping turn, so you get ${SHIP_WORD_BUDGET} words for the status beat — not more`
+        : 'This is an explaining turn (no code shipped)';
       const brevityReason = `STOP — TOO LONG / a WALL OF TEXT (Russell's "≤2 short paragraphs unless asked", ADHD).
 
-This is an explaining turn (no code shipped) and your reply ${isWall ? `has a ${longestParaWords}-word unbroken paragraph` : `runs ~${totalWords} words`}. Russell has to re-parse walls of text — it costs him energy he doesn't have.
+${turnKind} and your reply ${isWall ? `has a ${longestParaWords}-word unbroken paragraph` : `runs ~${totalWords} words`}. Russell has to re-parse walls of text — it costs him energy he doesn't have.
 
 Rewrite it SHORT before stopping:
   • Lead with the one-line answer. Reasoning second, detail third — skippable.
