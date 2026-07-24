@@ -271,6 +271,17 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-24** — **`explain-as-you-work`: the exemption was the hole.** The brevity gate that
+  enforces "no walls of text" only ran on turns where *no code shipped*. In one long session every
+  over-long reply had also edited a file, so the gate never fired once — and the user finally had to
+  say it out loud: "i can t read walls of text." The rule was never the problem; the carve-out was.
+  - **The transferable lesson: audit a guard's exemptions harder than its detector.** An exemption is
+    an untested branch that silently grows to cover the common case. Here "coding turns need room to
+    narrate" was reasonable when written and became "almost every turn is exempt" in practice.
+  - **The fix:** shipping turns get a *wider* budget (400 words) for their status beat instead of a
+    free pass, and the wall-paragraph check now applies to every turn. A regression test pins the old
+    exemption shut so it cannot quietly return.
+
 - **2026-07-24** — **`pod-inventory-sweep`: ask the provider, don't trust your notes.** A rented GPU
   finished its job at 10:30am and then idled for **52 hours**, billing $23.50 for about $0.50 of real
   work. The painful part: the existing mid-turn cost breaker was armed the whole time and its state
