@@ -311,6 +311,17 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
     conceptual. So a launch is now denied unless the design was written up in plain language (checked
     for a sustained metaphor, a worked example, *and* a falsification statement) and a human approved
     it in their own words. The assistant cannot self-certify, and a question is not an approval.
+    **Amended 2026-07-24 — the half that needed a human got cut, the half that didn't stayed.** In
+    practice the approval half stopped every cheap, already-budgeted run and the owner overrode it by
+    fiat: *"nothing should require me. you have blanket approval as long as in budget."* A gate the
+    owner routinely overrides is worse than no gate — it teaches everyone to reach for the escape
+    hatch, which is how the escape hatch starts getting used on the runs that *should* have stopped.
+    So the two halves were separated by whether they actually need a person. The **design review
+    needs no one** and is now unconditional. The **approval wait** is satisfied by a sentinel file
+    carrying a dollar ceiling; delete the file to revoke it. Two details worth stealing: the check
+    **fails open** — an unparseable cost still launches, because here a false *block* is the failure
+    mode, the reverse of every sibling guard — and it excludes **rates** (`$0.44/hr`, `$2-3/seed`)
+    when reading a total, so a cheap run can't look like a budget breach and block anyway.
   - **`experiment-propagation-required`** — two finished experiments got their methods docs and
     nothing else, so the buyer-facing brief kept advertising a weakness that had already been repaired
     and the roadmap kept prescribing a fix that had already been disproven. The mechanism is worth

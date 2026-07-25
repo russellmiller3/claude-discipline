@@ -39,7 +39,8 @@
 // =============================================================================
 
 import { readFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { readTranscript, toolUsesOf, lastAssistantText } from './lib/transcript.mjs';
 
@@ -121,7 +122,7 @@ const TASK_DIFFICULTY_RE = /\b(?:remember|recall|carry|hold|track|over many|acro
  * worked example, falsification, the TEST arm, and the ABLATION it is compared
  * against. Naming the ablation is the one that would have caught the bad run.
  */
-export function explainedInChat(entries, slug, recentWindow = 6) {
+export function recentAssistantProse(entries, recentWindow = 6) {
   const assistantMessages = [];
   for (const entry of entries || []) {
     const role = entry?.role || entry?.message?.role;
@@ -139,7 +140,11 @@ export function explainedInChat(entries, slug, recentWindow = 6) {
   }
   // Only the most recent messages count — a stale explanation of something else
   // must not license this launch.
-  const recentProse = assistantMessages.slice(-recentWindow).join(' \n ');
+  return assistantMessages.slice(-recentWindow).join(' \n ');
+}
+
+export function explainedInChat(entries, slug, recentWindow = 6) {
+  const recentProse = recentAssistantProse(entries, recentWindow);
   if (slug) {
     const slugPattern = new RegExp(slug.replace(/^exp/, '(?:exp)?'), 'i');
     if (!slugPattern.test(recentProse)) return false;
@@ -191,6 +196,60 @@ export function russellApprovedThisSession(entries) {
   return false;
 }
 
+// ── BLANKET APPROVAL (Russell, 2026-07-24, verbatim: "fix that gate. nothing
+// should require me. you have blanket approval as long as in budget.") ───────
+//
+// The gate originally required BOTH an explanation AND Russell's words. The
+// explanation catches CONCEPTUAL flaws and needs no human, so it stays. The
+// WAIT for approval is what Russell removed: a standing sentinel
+// (~/.claude/BLANKET_EXPERIMENT_APPROVED) grants it up to a dollar ceiling.
+//
+// Polarity is deliberate and INVERTED from the usual guard: this one FAILS OPEN.
+// An unparseable or absent cost still launches, because Russell's instruction was
+// "nothing should require me" — a false block is the failure mode to avoid here.
+// It blocks only when it can SEE a number above the ceiling.
+const DEFAULT_CEILING_USD = 20;
+
+/** Ceiling from the sentinel's contents. null = no sentinel = no blanket. */
+export function blanketApprovalCeilingUsd(sentinelContents) {
+  if (sentinelContents === null || sentinelContents === undefined) return null;
+  const ceilingAmount = /(\d+(?:\.\d+)?)/.exec(String(sentinelContents));
+  return ceilingAmount ? Number(ceilingAmount[1]) : DEFAULT_CEILING_USD;
+}
+
+// A RATE ("$0.44/hr", "$2-3/seed") is not the run's total. Counting one as the
+// total is how a cheap run would look like a budget breach and block anyway.
+const COST_RE = /\$\s*([\d,]+(?:\.\d+)?)(?:\s*[-–—]\s*\$?([\d,]+(?:\.\d+)?))?\s*(\/\s*(?:hr|hour|seed|run|day|gpu|pod)\b|per\s+(?:hour|seed|run|day|gpu|pod)\b)?/gi;
+
+/** Largest NON-RATE dollar figure stated in the estimate prose, or null. */
+export function maxStatedCostUsd(estimateProse) {
+  const statedProse = String(estimateProse || '');
+  let largestStated = null;
+  for (const costMatch of statedProse.matchAll(COST_RE)) {
+    if (costMatch[3]) continue; // a rate, not a total
+    const lowerBound = Number(String(costMatch[1]).replace(/,/g, ''));
+    const upperBound = costMatch[2] ? Number(String(costMatch[2]).replace(/,/g, '')) : lowerBound;
+    const statedCost = Math.max(lowerBound, upperBound);
+    if (!Number.isFinite(statedCost)) continue;
+    largestStated = largestStated === null ? statedCost : Math.max(largestStated, statedCost);
+  }
+  return largestStated;
+}
+
+const overBudgetReason = (slug, statedCost, ceilingUsd) => `EXPERIMENT OVER BUDGET — blanket approval does not cover this one.
+
+Experiment: ${slug || '(unnamed)'}
+Stated cost: $${statedCost}   Blanket ceiling: $${ceilingUsd}
+
+Russell's blanket approval (2026-07-24) is explicitly bounded: "you have blanket approval as long
+as in budget." This run's own stated estimate is ABOVE that ceiling, so it needs his explicit go —
+the design review already passed, only the SPEND is in question.
+
+State the number and the reason, then WAIT for his words. If the figure was a misread (a rate
+quoted as a total, an unrelated dollar amount in the same message), restate the real total clearly.
+
+Escape: ${ENV_OVERRIDE} in your reply, or set ${ENV_OVERRIDE}=1.`;
+
 const reasonFor = (slug, hasExplainer) => `EXPERIMENT NOT REVIEWED — explain it at Khan level before spending.
 
 Experiment: ${slug || '(unnamed)'}
@@ -232,7 +291,9 @@ Escape (a re-run of an ALREADY-reviewed, unchanged design — e.g. one more seed
 ${ENV_OVERRIDE} in your reply, or set ${ENV_OVERRIDE}=1.`;
 
 /** PURE core. Returns { block, mode?, reason? }. Never throws. */
-export function evaluate({ command = '', entries = [], replyText = '', envOk = false } = {}) {
+export function evaluate({
+  command = '', entries = [], replyText = '', envOk = false, blanketCeilingUsd = null,
+} = {}) {
   if (envOk) return { block: false };
   if (ESCAPE_TOKEN.test(command || '') || ESCAPE_TOKEN.test(replyText || '')) return { block: false };
   if (!isExperimentLaunch(command)) return { block: false };
@@ -242,13 +303,34 @@ export function evaluate({ command = '', entries = [], replyText = '', envOk = f
   // A few plain sentences in CHAT satisfy this, or a written explainer — the bar
   // is the content, not the medium (Russell, 2026-07-22).
   const explainerExists = explainedInChat(entries, slug) || hasKhanExplainer(toolUses, slug);
-  const approved = russellApprovedThisSession(entries);
-  if (explainerExists && approved) return { block: false };
-  return { block: true, mode: 'deny', reason: reasonFor(slug, explainerExists) };
+  // The DESIGN REVIEW is unconditional: it needs no human, and it is the check
+  // that actually caught the run that measured nothing.
+  if (!explainerExists) return { block: true, mode: 'deny', reason: reasonFor(slug, false) };
+
+  if (russellApprovedThisSession(entries)) return { block: false };
+
+  // Blanket approval, bounded by budget (Russell, 2026-07-24).
+  if (blanketCeilingUsd !== null && blanketCeilingUsd !== undefined) {
+    const statedCost = maxStatedCostUsd(recentAssistantProse(entries));
+    if (statedCost === null || statedCost <= blanketCeilingUsd) return { block: false };
+    return {
+      block: true,
+      mode: 'deny',
+      reason: overBudgetReason(slug, statedCost, blanketCeilingUsd),
+    };
+  }
+  return { block: true, mode: 'deny', reason: reasonFor(slug, true) };
 }
 
 function readPayload() {
   try { return JSON.parse(readFileSync(0, 'utf8') || '{}'); } catch { return {}; }
+}
+
+// Absent sentinel => null => the original "wait for Russell" behavior returns.
+// Deleting the file is how blanket approval gets revoked.
+const SENTINEL_PATH = join(homedir(), '.claude', 'BLANKET_EXPERIMENT_APPROVED');
+function readSentinel() {
+  try { return readFileSync(SENTINEL_PATH, 'utf8'); } catch { return null; }
 }
 
 function main() {
@@ -262,6 +344,7 @@ function main() {
       command: (payload.tool_input || {}).command || '',
       entries,
       replyText: lastAssistantText(entries),
+      blanketCeilingUsd: blanketApprovalCeilingUsd(readSentinel()),
     });
     if (!verdict.block) process.exit(0);
     process.stdout.write(JSON.stringify({

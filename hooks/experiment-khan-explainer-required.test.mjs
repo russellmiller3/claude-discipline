@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isExperimentLaunch, hasKhanExplainer, russellApprovedThisSession, evaluate,
+  blanketApprovalCeilingUsd, maxStatedCostUsd,
 } from './experiment-khan-explainer-required.mjs';
 
 const bash = (command) => ({ role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: { command } }] });
@@ -182,4 +183,77 @@ test('an explanation for a DIFFERENT experiment does not license this launch', (
     entries: [otherExperiment, userSays('launch it')],
   });
   assert.equal(verdict.block, true);
+});
+
+// ── blanket approval (Russell, 2026-07-24: "fix that gate. nothing should
+// require me. you have blanket approval as long as in budget.") ──────────────
+//
+// The DESIGN REVIEW survives — an unexplained experiment is still blocked,
+// because that check needs no human at all. What is removed is the WAIT for
+// Russell's words. A standing sentinel grants approval up to a dollar ceiling.
+
+// Reuses the CHAT_EXPLANATION above (all six marks) and appends a cost line, so
+// the budget tests differ from the approval tests in exactly ONE variable.
+const explainedCosting = (costLine) => ({
+  role: 'assistant',
+  content: [{ type: 'text', text: CHAT_EXPLANATION.content[0].text + ' ' + costLine }],
+});
+
+test('blanket ceiling parses the sentinel, absent sentinel means no blanket', () => {
+  assert.equal(blanketApprovalCeilingUsd('20'), 20);
+  assert.equal(blanketApprovalCeilingUsd('$20\n'), 20);
+  assert.equal(blanketApprovalCeilingUsd(''), 20);
+  assert.equal(blanketApprovalCeilingUsd(null), null);
+});
+
+test('stated cost ignores RATES and reads the total', () => {
+  assert.equal(maxStatedCostUsd('A40 @ $0.44/hr, ~$2-3/seed, ~$6-9 total'), 9);
+  assert.equal(maxStatedCostUsd('no dollar figure here'), null);
+  assert.equal(maxStatedCostUsd('roughly $120 for the sweep'), 120);
+});
+
+test('BLANKET: explained + in budget launches with NO approval from Russell', () => {
+  const verdict = evaluate({
+    command: LAUNCH,
+    entries: [explainedCosting('Cost: ~$6-9 total for 3 seeds.')],
+    blanketCeilingUsd: 20,
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('BLANKET: an unexplained experiment is STILL blocked', () => {
+  assert.equal(evaluate({ command: LAUNCH, entries: [], blanketCeilingUsd: 20 }).block, true);
+});
+
+test('BLANKET: a stated cost ABOVE the ceiling still needs Russell', () => {
+  const verdict = evaluate({
+    command: LAUNCH,
+    entries: [explainedCosting('Cost: ~$250 total for the sweep.')],
+    blanketCeilingUsd: 20,
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /budget/i);
+});
+
+test('BLANKET fails OPEN: explained but no cost stated still launches', () => {
+  const verdict = evaluate({
+    command: LAUNCH, entries: [CHAT_EXPLANATION], blanketCeilingUsd: 20,
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('BLANKET: an hourly RATE is not mistaken for the run total', () => {
+  const verdict = evaluate({
+    command: LAUNCH,
+    entries: [explainedCosting('A40 @ $0.44/hr, ~$2-3/seed, ~$9 total.')],
+    blanketCeilingUsd: 20,
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('WITHOUT the sentinel the old approval requirement still stands', () => {
+  const entries = [CHAT_EXPLANATION];
+  assert.equal(evaluate({ command: LAUNCH, entries, blanketCeilingUsd: null }).block, true);
+  entries.push(userSays('go ahead'));
+  assert.equal(evaluate({ command: LAUNCH, entries, blanketCeilingUsd: null }).block, false);
 });
