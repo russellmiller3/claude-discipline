@@ -288,6 +288,13 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
     not a habit). The ledger is keyed on the session's own id with a 24h TTL — never a shared
     counter — so one project's pilots can't block an unrelated session, and a crashed session
     leaves no permanent trap. 37 tests.
+  - **Shipped alongside it in the same file:** a monitor **auto-start** with a pid file. The
+    live-watch rule said "a monitor is default-on for any run over a minute," and the gate that
+    enforced it could only *block* — so the operator had to go start one by hand. It now starts
+    the monitor itself when the port is free, and records the pid so the server is always
+    findable and stoppable. That last part is the real lesson: a leftover listener from a killed
+    run once answered `200` and satisfied the monitor check for a pod that was long dead, so
+    "something is listening" was never proof the *right* thing was listening.
 
 - **2026-07-24** — **`explain-as-you-work`: the exemption was the hole.** The brevity gate that
   enforces "no walls of text" only ran on turns where *no code shipped*. In one long session every
