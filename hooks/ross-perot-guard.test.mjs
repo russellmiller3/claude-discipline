@@ -226,12 +226,22 @@ check('does NOT block a declarative close (no "?" / no closer)',
   !isBlocked(transcript('do it', 'Shipped and green — both suites pass.')));
 check('does NOT block a blocker STATED as a sentence (not asked)',
   !isBlocked(transcript('clean up', 'I won’t run the destructive migration without your explicit go-ahead — it drops the prod table.')));
-check('does NOT block a mid-message "?" when the turn ends on a statement',
-  !isBlocked(transcript('was it cached?', 'Was it cached? Yes — I cached it and the suite is green.')));
-check('honors the override even when the turn ends with a "?"',
-  !isBlocked(transcript('do it', 'Plan looks right. Proceed? ross-perot-override: needs your prod creds first.')));
-check('does NOT block a trailing "?" in survey/think mode',
-  !isBlocked(transcript('what do you think — just brainstorm', 'Two angles here. Which feels closer to your intent?')));
+check('blocks rhetorical mid-message questions too',
+  isBlocked(transcript('was it cached?', 'Was it cached? Yes — I cached it and the suite is green.')));
+check('blocks the old override when the turn asks a non-destructive question',
+  isBlocked(transcript('do it', 'Plan looks right. Proceed? ross-perot-override: needs your prod creds first.')));
+check('blocks questions even in survey/think mode',
+  isBlocked(transcript('what do you think — just brainstorm', 'Two angles here. Which feels closer to your intent?')));
+check('allows a concrete destructive-action question',
+  !isBlocked(transcript('clean production', 'This will permanently delete the production records. Proceed?')));
+check('allows a destructive rationale immediately after the question',
+  !isBlocked(transcript('clean production', 'Run the production cleanup? It permanently deletes the records.')));
+check('allows a paid question only with an explicit estimate above the $5 budget gate',
+  !isBlocked(transcript('run the benchmark', 'Estimated cost is $18. Proceed?')));
+check('blocks a vague paid question without an above-budget estimate',
+  isBlocked(transcript('run the benchmark', 'This is a paid run. Proceed?')));
+check('blocks a browser-permission question even when followed by a statement',
+  isBlocked(transcript('deploy it', 'May I open a fresh Chrome window? I am ready to continue.')));
 check('still passes a clean enumerated summary that ends on a statement',
   !isBlocked(transcript('what changed?', '- Added the tool\n- Wrote tests\n- Rebuilt the bundle\nAll shipped and green.')));
 

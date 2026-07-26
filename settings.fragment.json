@@ -42,6 +42,8 @@
     "discipline-sync":          [{ "event": "Stop", "timeout": 5 }],
     "never-stop-asking":        [{ "event": "Stop", "timeout": 5 }],
     "recommend-when-listing":   [{ "event": "Stop", "timeout": 5 }],
+    "ross-perot-guard":         [{ "event": "Stop", "timeout": 5 }],
+    "askquestion-obvious-default-guard": [{ "event": "PreToolUse", "matcher": "AskUserQuestion", "timeout": 5 }],
     "file-size-guard":          [{ "event": "PostToolUse", "matcher": "Write", "timeout": 5 }],
     "e2e-or-its-theatre":       [{ "event": "Stop", "timeout": 5 }],
     "owed-live-gate-reminder":  [{ "event": "UserPromptSubmit", "timeout": 5 }],

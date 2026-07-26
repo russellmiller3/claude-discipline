@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { evaluateObviousDefault } from './askquestion-obvious-default-guard.mjs';
+
+test('canonical installer permanently registers the destructive-only question guard', () => {
+  const settings = JSON.parse(readFileSync(new URL('../settings.fragment.json', import.meta.url), 'utf8'));
+  assert.deepEqual(settings.tier3_opinionated['askquestion-obvious-default-guard'], [
+    { event: 'PreToolUse', matcher: 'AskUserQuestion', timeout: 5 },
+  ]);
+});
 
 // The exact 2026-07-16 failure: two questions whose Recommended option was the do-what-makes-sense answer.
 test('BLOCKS the two-question live failure (Build harness / Leave parked, both Recommended)', () => {
@@ -27,8 +35,8 @@ test('BLOCKS the two-question live failure (Build harness / Leave parked, both R
   assert.notEqual(evaluateObviousDefault(parked), null);
 });
 
-// ALLOW: a paid decision genuinely needs Russell's go (cost-autonomy > $5).
-test('ALLOWS a paid >$15 run decision even with a Recommended proceed option', () => {
+// Russell 2026-07-26: paid questions are allowed only when an explicit estimate exceeds the $5 budget gate.
+test('ALLOWS an explicit $18 estimate above the budget restriction', () => {
   const paid = {
     questions: [{
       question: 'Kick off the $18 sweep now?',
@@ -39,6 +47,12 @@ test('ALLOWS a paid >$15 run decision even with a Recommended proceed option', (
     }],
   };
   assert.equal(evaluateObviousDefault(paid), null);
+});
+
+test('BLOCKS vague paid questions and estimates at or below $5', () => {
+  for (const question of ['Run the paid sweep?', 'Run the $5 sweep?', 'This costs money. Proceed?']) {
+    assert.notEqual(evaluateObviousDefault({ questions: [{ question, options: [] }] }), null);
+  }
 });
 
 // ALLOW: a destructive/irreversible action is always a real question.
@@ -55,8 +69,7 @@ test('ALLOWS a destructive action question', () => {
   assert.equal(evaluateObviousDefault(destructive), null);
 });
 
-// ALLOW: a genuine design fork with no Recommended option.
-test('ALLOWS a genuine design fork with no Recommended option', () => {
+test('BLOCKS a genuine design fork and requires best judgment', () => {
   const fork = {
     questions: [{
       question: 'Which storage backend fits better here?',
@@ -66,11 +79,10 @@ test('ALLOWS a genuine design fork with no Recommended option', () => {
       ],
     }],
   };
-  assert.equal(evaluateObviousDefault(fork), null);
+  assert.notEqual(evaluateObviousDefault(fork), null);
 });
 
-// ALLOW: a Recommended PREFERENCE call with no proceed/no-op verb is a real taste question.
-test('ALLOWS a Recommended preference (palette) with no proceed verb', () => {
+test('BLOCKS a preference question and requires best judgment', () => {
   const palette = {
     questions: [{
       question: 'Which palette for the dashboard?',
@@ -80,11 +92,10 @@ test('ALLOWS a Recommended preference (palette) with no proceed verb', () => {
       ],
     }],
   };
-  assert.equal(evaluateObviousDefault(palette), null);
+  assert.notEqual(evaluateObviousDefault(palette), null);
 });
 
-// ALLOW: the explicit override token in the question text.
-test('ALLOWS when the override token is present', () => {
+test('BLOCKS a non-destructive question even when it contains the old override token', () => {
   const overridden = {
     questions: [{
       question: 'Build the harness now? ASKQUESTION_OBVIOUS_OK — genuinely want your read first.',
@@ -94,7 +105,17 @@ test('ALLOWS when the override token is present', () => {
       ],
     }],
   };
-  assert.equal(evaluateObviousDefault(overridden), null);
+  assert.notEqual(evaluateObviousDefault(overridden), null);
+});
+
+test('BLOCKS browser-permission, deploy, and external-send questions', () => {
+  for (const question of [
+    'May I open a fresh Chrome window?',
+    'Deploy the Worker now?',
+    'Send the finished report to the customer?',
+  ]) {
+    assert.notEqual(evaluateObviousDefault({ questions: [{ question, options: [] }] }), null);
+  }
 });
 
 // Non-question shapes never trip it.

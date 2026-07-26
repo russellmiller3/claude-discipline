@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // =============================================================================
-// ASKQUESTION-OBVIOUS-DEFAULT-GUARD — PreToolUse(AskUserQuestion): don't ask a
-//   question whose Recommended option is a free, reversible, just-do-it default.
+// ASKQUESTION-OBVIOUS-DEFAULT-GUARD — PreToolUse(AskUserQuestion): questions
+//   are forbidden unless they guard destructive data loss or an explicit >$5 estimate.
 // =============================================================================
 //
 // new-hook-category: Ross Perot / decision discipline — nearest existing is options-need-recommendation (same tool boundary) but that hook REQUIRES a recommendation; it never blocks a question that shouldn't be asked at all. This is the complementary teeth.
@@ -13,21 +13,11 @@
 // bullshit question whose answer was obvious (option 1 marked "(Recommended)":
 // "Build free harness", "Leave parked") sailed straight through.
 //
-// RULE: BLOCK an AskUserQuestion when a question has an option that is BOTH
-//   (1) marked "(Recommended)" — the model already knows the answer — AND
-//   (2) a proceed/no-op verb ("build", "proceed", "keep going", "leave parked",
-//       "leave as-is", "continue", "go ahead", "do it", "ship it", "no-op"),
-// AND the whole question is FREE + REVERSIBLE (no $/spend/cost/paid/budget, no
-// destructive/irreversible/external-send action). That's the do-what-makes-sense
-// next step — DO IT, don't ask.
-//
-// PRESERVED (never blocks): a paid/cost-gated decision (>$5 needs a go), a
-// destructive/irreversible action, a genuine design fork with no Recommended
-// proceed-option, and a Recommended PREFERENCE question with no proceed-verb
-// (e.g. "which palette? Recommended: teal" — a real taste call, not a no-op).
-//
-// Teeth: permissionDecision 'deny'. Override: ASKQUESTION_OBVIOUS_OK=1 in env,
-// or the literal token ASKQUESTION_OBVIOUS_OK in a question/option. Fail-open.
+// RULE (Russell, 2026-07-26): BLOCK every AskUserQuestion unless its chosen
+// action concretely deletes/overwrites data, or its explicit dollar estimate is
+// above the standing $5 autonomy budget. Design, taste, browser, deploy, send,
+// login, and missing-information questions are not exceptions: choose and act.
+// There is no model-authored override token. Teeth: permissionDecision 'deny'.
 // =============================================================================
 
 import { readFileSync } from 'node:fs';
@@ -35,42 +25,32 @@ import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const RECOMMENDED_RE = /\(recommended\)/i;
-const PROCEED_VERB_RE = /\b(build|proceed|keep\s+going|do\s+it|continue|go\s+ahead|leave\s+(?:as[- ]?is|parked|it)|no[- ]?op|noop|ship\s+it|just\s+do)\b/i;
-// A paid/cost signal means the decision legitimately needs Russell's go (cost-autonomy > $5).
-const PAID_RE = /\$|\bpaid\b|\bspend(?:ing|s)?\b|\bcosts?\b|\bdollars?\b|\bbudget\b|\bpricing\b|\bper\s+(?:run|call|token)\b/i;
-// A destructive/irreversible/external-send action is never a "just do it" — always a real question.
-const DESTRUCTIVE_RE = /\b(delete|deletes|deleting|force[- ]?push|drop|drops|overwrite|overwrites|destroy|destroys|wipe|wipes|truncat\w*|reset\s+--hard|rm\s+-rf|send|sends|publish|publishes|deploy|deploys|migrat\w*|irreversible|permanent(?:ly)?)\b/i;
-const OVERRIDE_RE = /\bASKQUESTION_OBVIOUS_OK\b/;
+const DESTRUCTIVE_RE = /\b(delete|deletes|deleting|erase|erases|erasing|force[- ]?push|drop|drops|dropping|overwrite|overwrites|overwriting|destroy|destroys|destroying|wipe|wipes|wiping|purge|purges|purging|truncat\w*|reset\s+--hard|rm\s+-rf|format\s+(?:the\s+)?(?:disk|drive)|irreversible\s+data\s+loss|permanent(?:ly)?\s+(?:delete|erase|destroy|overwrite))\b/i;
+const DOLLAR_ESTIMATE_RE = /\$\s*(\d+(?:\.\d{1,2})?)/g;
 
 const optionText = (option) => `${option?.label || ''} ${option?.description || ''}`;
 
-// Pure core: returns { question, option } to block on, or null to allow.
+function estimateExceedsBudget(text) {
+  return [...String(text || '').matchAll(DOLLAR_ESTIMATE_RE)]
+    .some((match) => Number(match[1]) > 5);
+}
+
+// Pure core: returns the first forbidden question, or null when every question guards an allowed gate.
 export function evaluateObviousDefault(toolInput) {
   const questions = Array.isArray(toolInput?.questions) ? toolInput.questions : [];
   for (const question of questions) {
     const options = Array.isArray(question?.options) ? question.options : [];
-    if (options.length < 1) continue;
-    const stem = question?.question || '';
-    if (OVERRIDE_RE.test(`${stem} ${options.map(optionText).join(' ')}`)) continue; // explicitly waved through
+    const stem = typeof question?.question === 'string' ? question.question.trim() : '';
+    if (!stem) continue;
     const recommended = options.find((option) => RECOMMENDED_RE.test(optionText(option)));
-    if (!recommended) continue;
-    // Gate paid/destructive on the RECOMMENDED action itself (stem + that option) — NOT on a rejected
-    // alternative that merely mentions cost ("Wait for a paid decision"); the recommended action is what
-    // you'd actually do, so its cost/reversibility is what decides whether the question is genuine.
-    const recommendedContext = `${stem} ${optionText(recommended)}`;
-    if (PAID_RE.test(recommendedContext) || DESTRUCTIVE_RE.test(recommendedContext)) continue;
-    if (PROCEED_VERB_RE.test(optionText(recommended))) {
-      return {
-        question: stem || '(unnamed)',
-        option: (recommended.label || '').replace(/\s*\(recommended\)\s*/i, '').trim(),
-      };
-    }
+    const actionContext = `${stem} ${recommended ? optionText(recommended) : ''}`;
+    if (DESTRUCTIVE_RE.test(actionContext) || estimateExceedsBudget(actionContext)) continue;
+    return { question: stem };
   }
   return null;
 }
 
 function main() {
-  if (process.env.ASKQUESTION_OBVIOUS_OK === '1') process.exit(0);
   let event;
   try { event = JSON.parse(readFileSync(0, 'utf8') || '{}'); } catch { process.exit(0); }
   if ((event.hook_event_name || event.hookEventName) !== 'PreToolUse') process.exit(0);
@@ -80,13 +60,13 @@ function main() {
   try { hit = evaluateObviousDefault(event.tool_input || {}); } catch { process.exit(0); } // fail-open
   if (!hit) process.exit(0);
 
-  const reason = `Ross Perot: you marked "${hit.option}" (Recommended) and it's a free, reversible, obvious next step — DO IT, don't ask.
+  const reason = `Ross Perot: this question is not guarding destructive data loss or an explicit estimate above $5 — DO IT, don't ask.
 
 Question: "${hit.question}"
 
-Russell's rule (2026-07-16, verbatim): "the ross perot rule is designed to prevent bullshit questions like this... Do what makes sense. right now." A recommended option that is free + reversible + a proceed/no-op is the do-what-makes-sense answer — execute it and narrate what you did; Russell can veto after the fact.
+Russell's rule (2026-07-26): never ask a question unless the action can destroy/irreversibly overwrite data, or a stated paid estimate exceeds the standing $5 budget restriction. Otherwise choose the best path and act now.
 
-This guard does NOT block: a paid/cost-gated decision (>$5 needs a go), a destructive/irreversible/external-send action, or a genuine design fork. If this is genuinely one of those (or a real taste call you need input on), put ASKQUESTION_OBVIOUS_OK in the question/option text or set ASKQUESTION_OBVIOUS_OK=1.`;
+Browser access, login, deploys, external sends, design forks, preferences, missing information, and vague cost language are not exceptions. State a hard blocker declaratively and keep exhausting safe paths. There is no self-override.`;
 
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {

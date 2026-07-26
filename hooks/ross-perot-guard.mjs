@@ -177,16 +177,46 @@ function stripCodeSpans(messageText) {
 // Does this prose END on a question? Strip trailing markdown wrappers / quotes / brackets / whitespace
 // (so "…want?**", "…proceed?)", '…merge?"' all count) then test for a final "?". This one structural
 // check replaces the whole asking-permission phrase list — any "…?" closer, present or future, is caught.
-function endsWithQuestion(prose) {
-  const trimmed = String(prose || '').replace(/[\s*_>"'`)\]]+$/g, '');
-  return /\?$/.test(trimmed);
+const DESTRUCTIVE_QUESTION_RE = /\b(delete|deletes|deleting|erase|erases|erasing|force[- ]?push|drop|drops|dropping|overwrite|overwrites|overwriting|destroy|destroys|destroying|wipe|wipes|wiping|purge|purges|purging|truncat\w*|reset\s+--hard|rm\s+-rf|format\s+(?:the\s+)?(?:disk|drive)|irreversible\s+data\s+loss|permanent(?:ly)?\s+(?:delete|erase|destroy|overwrite))\b/i;
+
+function estimateExceedsBudget(text) {
+  return [...String(text || '').matchAll(/\$\s*(\d+(?:\.\d{1,2})?)/g)]
+    .some((match) => Number(match[1]) > 5);
+}
+
+function questionContext(prose, questionIndex) {
+  const text = String(prose || '');
+  const sentenceStart = Math.max(
+    text.lastIndexOf('.', questionIndex - 1),
+    text.lastIndexOf('!', questionIndex - 1),
+    text.lastIndexOf('?', questionIndex - 1),
+    text.lastIndexOf('\n', questionIndex - 1),
+  ) + 1;
+  const direct = text.slice(sentenceStart, questionIndex + 1).trim();
+  const followingRationale = text.slice(questionIndex + 1, questionIndex + 301).split(/[?\n]/u, 1)[0];
+  const leadingContext = /^(?:proceed|continue|approve|confirm|go ahead|do it)\s*\?$/i.test(direct)
+    ? text.slice(Math.max(0, questionIndex - 500), questionIndex + 1)
+    : direct;
+  return `${leadingContext} ${followingRationale}`;
+}
+
+function forbiddenQuestion(prose) {
+  const text = String(prose || '');
+  for (let index = text.indexOf('?'); index >= 0; index = text.indexOf('?', index + 1)) {
+    const context = questionContext(text, index);
+    if (!DESTRUCTIVE_QUESTION_RE.test(context) && !estimateExceedsBudget(context)) {
+      return 'your last message asks Russell a non-destructive, within-budget question';
+    }
+  }
+  return null;
 }
 
 // SOLICITS-INPUT: the message ends by handing Russell the next decision. Either it ends with a question,
 // or its tail (last ~200 chars, where a closer lives) matches one of the few no-"?" hand-off closers.
 // Returns a short reason string when it solicits, else null. Language-agnostic by construction.
 function solicitsInput(prose) {
-  if (endsWithQuestion(prose)) return 'your last message ends with a question to Russell';
+  const forbidden = forbiddenQuestion(prose);
+  if (forbidden) return forbidden;
   const tail = String(prose || '').slice(-200);
   const closer = HANDOFF_CLOSERS.find((re) => re.test(tail));
   return closer ? `your last message hands Russell the next move (matched ${closer})` : null;
@@ -369,6 +399,23 @@ async function main() {
   // Suppress on explicit user-pause / survey-mode messages
   const userText = lastUserTextOf(payload.transcript_path);
   const userInSurveyMode = USER_PAUSE_PATTERNS.some(p => p.test(userText));
+  const questionProse = text.split(/\*\*Files touched:\*\*/i)[0];
+  const earlySolicitation = solicitsInput(questionProse);
+  if (earlySolicitation) {
+    process.stdout.write(JSON.stringify({
+      decision: 'block',
+      reason: `STOP-BLOCKED — asking Russell instead of acting (Ross Perot Rule).
+
+${earlySolicitation[0].toUpperCase() + earlySolicitation.slice(1)}.
+
+Questions are allowed only when the proposed action concretely destroys or irreversibly overwrites data,
+or when a stated paid estimate exceeds the standing $5 budget restriction. Otherwise choose the best path
+and act now. Browser access, login, deploys, external sends, design forks, preferences, missing information,
+and vague cost language are not exceptions. There is no model-authored override.`,
+    }));
+    process.exit(0);
+    return;
+  }
   if (userInSurveyMode) { process.exit(0); return; }
 
   // Shared release/grant state (2026-07-12): computed once, used by wind-down + the queue gate.
@@ -525,34 +572,6 @@ Instead of disengaging:
       process.exit(0);
       return;
     }
-  }
-
-  // SOLICITS-INPUT check — the structural replacement for the old asking-permission phrase museum. Fires on
-  // its own (no option-list required): block if the final message ends by handing Russell the next decision
-  // (a trailing "?" OR a no-"?" hand-off closer). Survey mode already early-exited above; the override token
-  // is the only extra escape — a genuine question belongs in the AskUserQuestion tool, not a prose "?".
-  const askProse = text.split(/\*\*Files touched:\*\*/i)[0];
-  const solicitation = solicitsInput(askProse);
-  if (solicitation && !ROSS_PEROT_OVERRIDE.test(text)) {
-    process.stdout.write(JSON.stringify({
-      decision: 'block',
-      reason: `STOP-BLOCKED — soliciting Russell's input instead of leading (Ross Perot Rule).
-
-${solicitation[0].toUpperCase() + solicitation.slice(1)}.
-
-Russell's Ross Perot Rule: never wait for permission. Work out what he's trying to accomplish and just do
-the most complete version. Ending on a question / "your call" / "say the word" hands him a decision he
-shouldn't have to make — it costs him energy (Mito + ADHD), and a trailing question is an OCD trigger.
-
-End on a DECISION and act in the same turn:
-  - "Doing X now." / "I'd do X unless you object — going with it."
-  - Obvious next step → just do it; don't ask, don't announce.
-  - A genuine fork or a real blocker (money / destructive / hardware / missing info you truly can't get):
-    use the AskUserQuestion TOOL (not a prose "?"), or STATE it — "the one call I can't make for you is X" —
-    then add  ross-perot-override: <why this genuinely needs Russell>.`,
-    }));
-    process.exit(0);
-    return;
   }
 
   const alternativeMatches = ALTERNATIVE_PATTERNS.filter(p => p.test(text)).map(p => p.toString());
