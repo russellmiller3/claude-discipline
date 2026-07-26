@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
 import { evaluateAgentDelegation, matchesCore, readCoreGlobs } from './no-core-delegation-guard.mjs';
 
 const hookPath = join(dirname(fileURLToPath(import.meta.url)), 'no-core-delegation-guard.mjs');
@@ -25,9 +25,10 @@ test('(b) ALLOWS the same spawn once the session signoff is present', () => {
   assert.equal(verdict.block, false);
 });
 
-test('(b2) ALLOWS when the AGENTS_APPROVED token is in the brief', () => {
+test('(b2) DENIES when the model self-inserts an AGENTS_APPROVED token', () => {
   const verdict = evaluateAgentDelegation({ prompt: 'AGENTS_APPROVED — refactor ui/Caption.svelte', approved: false });
-  assert.equal(verdict.block, false);
+  assert.equal(verdict.block, true);
+  assert.equal(verdict.gate, 'A');
 });
 
 test('(c) DENIES even when the brief says "in parallel" (parallel is NOT signoff)', () => {
@@ -99,4 +100,12 @@ test('end-to-end: DENIES a spawn with no env signoff', () => {
 });
 test('end-to-end: ALLOWS a spawn when AGENTS_APPROVED_THIS_SESSION=1', () => {
   assert.equal(denied(runHook('refactor something', { AGENTS_APPROVED_THIS_SESSION: '1' })), false);
+});
+
+test('live settings register the approval guard before other Agent hooks', () => {
+  const settings = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8'));
+  const agentGroup = settings.hooks?.PreToolUse?.find((entry) => entry.matcher === 'Agent');
+  const commands = (agentGroup?.hooks || []).map((entry) => entry.command || '');
+  const approvalIndex = commands.findIndex((command) => command.includes('no-core-delegation-guard.mjs'));
+  assert.equal(approvalIndex, 0, 'approval guard must be the first Agent PreToolUse hook');
 });

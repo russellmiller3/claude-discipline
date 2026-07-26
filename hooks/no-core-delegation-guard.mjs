@@ -19,7 +19,7 @@
 //     - env AGENTS_APPROVED_THIS_SESSION=1, OR
 //     - a sentinel file at ~/.claude/AGENTS_APPROVED_THIS_SESSION
 //       (override path: AGENTS_APPROVAL_SENTINEL), OR
-//     - the literal token AGENTS_APPROVED in the Agent prompt.
+//   Prompt text can NEVER approve its own spawn; the model controls that text.
 //   "in parallel" is NOT signoff — parallel means parallel TOOL CALLS or POD
 //   runs, not spawning build-agents.
 //
@@ -58,7 +58,6 @@ const BUILTIN_CORE_SIGNALS = [
 
 const SIGNOFF_ENV = 'AGENTS_APPROVED_THIS_SESSION';
 const SENTINEL_PATH_ENV = 'AGENTS_APPROVAL_SENTINEL';
-const IN_PROMPT_SIGNOFF = /\bAGENTS_APPROVED\b/;
 const CORE_OVERRIDE = /\bCORE_AGENT_OK\b/;
 
 function escapeForRegExp(rawText) {
@@ -105,14 +104,14 @@ const GATE_A_REASON = `Agent spawn BLOCKED — agents are OFF by default (Russel
 
 "Do it in parallel" is NOT approval — that means parallel TOOL CALLS or parallel POD runs, not spawning build-agents.
 
-To approve for this session: set ${SIGNOFF_ENV}=1, create the sentinel file (${SIGNOFF_ENV} under ~/.claude), or put the literal token AGENTS_APPROVED in the brief once Russell has said yes.`;
+To approve for this session after Russell explicitly says yes: set ${SIGNOFF_ENV}=1 or create the sentinel file (${SIGNOFF_ENV} under ~/.claude). Prompt text cannot approve its own spawn.`;
 
 // Pure core: returns { block, gate?, reason? }. `approved` = env/sentinel signoff already resolved.
 export function evaluateAgentDelegation({ prompt = '', approved = false, coreGlobs = [] } = {}) {
   const promptText = String(prompt || '');
 
   // Gate A — signoff (deny-by-default).
-  if (!approved && !IN_PROMPT_SIGNOFF.test(promptText)) {
+  if (!approved) {
     return { block: true, gate: 'A', reason: GATE_A_REASON };
   }
 
