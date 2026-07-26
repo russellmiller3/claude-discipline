@@ -1040,6 +1040,119 @@ test('commit.gpgsign in a config flag is NOT a commit; a real commit alongside i
   assert.equal(isBlocked(realCommit.combinedOutput), true, 'expected deny: the same flag next to a REAL commit must not hide it');
 });
 
+// ── 2026-07-26 false-positive lock: a narrow commit is judged by the INDEX, never the dirty tree ──
+// THE INCIDENT (codeservo, 2026-07-26): `git add CHANGELOG.md && git commit -m "docs: …"` was BLOCKED
+// because `docs/dogfood-report-v1.md` was dirty in the WORKING TREE. That file was never staged and
+// could not have been in the commit at all — only CHANGELOG.md was (33 insertions, 0 deletions).
+// Root cause: the hook that actually RAN was a stale on-disk copy in `~/.claude/hooks/` pinned to the
+// 2026-07-05 blob, whose `sweepsUnstagedChanges` flipped includeUnstaged on ANY `git add`, so every
+// loose worktree change counted as in-play. The scoping fixes (2026-07-06 explicit-path add,
+// 2026-07-15 directory pathspecs) already existed in HEAD — they just never executed.
+//
+// WHY THIS MATTERS BEYOND THE ONE COMMIT: Russell's repos routinely carry a prior session's
+// uncommitted slice. If unrelated WIP makes every narrow, safe commit demand PHANTOM_DELETE_OK, the
+// operator is trained to bypass a real safety guard — which defeats the guard entirely.
+//
+// These tests pin the PROPERTY (a commit can only bake in what is staged or explicitly swept in), so
+// a future regression at any layer fails here rather than in Russell's terminal. The dirty file is a
+// genuine HISTORICAL REVERT — the worst case — so a whole-tree reading would certainly block.
+
+// The exact incident shape: a repo whose tree carries a prior session's stale-revert WIP on
+// docs/dogfood-report-v1.md (unstaged, untouched by this session), while this session appends 33
+// lines to CHANGELOG.md and stages ONLY that file.
+function makeDirtyUnstagedSliceFixture() {
+  const repoDirectory = join(sandboxDirectory, `repo-${repoCounter++}`);
+  mkdirSync(repoDirectory, { recursive: true });
+  git(repoDirectory, 'init', '-q');
+  writeFileSync(join(repoDirectory, 'CHANGELOG.md'), '# Changelog\n', 'utf8');
+  mkdirSync(join(repoDirectory, 'docs'), { recursive: true });
+  writeFileSync(join(repoDirectory, 'docs', 'dogfood-report-v1.md'), 'dogfood report baseline\n', 'utf8');
+  git(repoDirectory, 'add', '-A');
+  git(repoDirectory, 'commit', '-q', '-m', 'baseline');
+  // The prior session's slice: a genuine stale historical revert left UNSTAGED in the tree. This is
+  // deliberately the WORST case — content that really does match an ancestor blob — so the test
+  // proves the commit is scoped to the index, not merely that novel content is exempt.
+  makeStaleModification(repoDirectory, join('docs', 'dogfood-report-v1.md'), { staged: false });
+  // This session's own work: 33 appended lines, 0 deletions — staged, and nothing else.
+  const changelogEntries = Array.from({ length: 33 }, (_, entryIndex) => `- entry ${entryIndex + 1}`).join('\n');
+  writeFileSync(join(repoDirectory, 'CHANGELOG.md'), `# Changelog\n${changelogEntries}\n`, 'utf8');
+  git(repoDirectory, 'add', 'CHANGELOG.md');
+  return repoDirectory;
+}
+
+test('narrow `git add CHANGELOG.md && git commit` with an unrelated DIRTY-BUT-UNSTAGED revert in the tree -> passes (2026-07-26 codeservo FP)', () => {
+  const repoDirectory = makeDirtyUnstagedSliceFixture();
+  const transcriptPath = makeTranscript([join(repoDirectory, 'CHANGELOG.md')]);
+  const { combinedOutput } = runHook(
+    'git add CHANGELOG.md && git commit -m "docs: record the dogfood run"',
+    { transcriptPath, workingDirectory: repoDirectory },
+  );
+  assert.equal(isBlocked(combinedOutput), false,
+    'expected allow: only CHANGELOG.md is staged — an unstaged worktree change cannot be in the commit');
+  assert.doesNotMatch(combinedOutput, /dogfood-report-v1\.md/,
+    'the unstaged file must not even be named — it was never in play');
+});
+
+test('a plain `git commit` (no add) with the same dirty unstaged revert present -> passes', () => {
+  const repoDirectory = makeDirtyUnstagedSliceFixture();
+  const transcriptPath = makeTranscript([join(repoDirectory, 'CHANGELOG.md')]);
+  const { combinedOutput } = runHook(
+    'git commit -m "docs: record the dogfood run"',
+    { transcriptPath, workingDirectory: repoDirectory },
+  );
+  assert.equal(isBlocked(combinedOutput), false,
+    'expected allow: a plain commit bakes the index only, and the index holds just CHANGELOG.md');
+});
+
+test('the SAME dirty tree swept with `git add -A` -> still BLOCKS and names the revert (scoping keeps its teeth)', () => {
+  const repoDirectory = makeDirtyUnstagedSliceFixture();
+  const transcriptPath = makeTranscript([join(repoDirectory, 'CHANGELOG.md')]);
+  const { combinedOutput } = runHook('git add -A && git commit -m "sweep it all in"', { transcriptPath, workingDirectory: repoDirectory });
+  assert.equal(isBlocked(combinedOutput), true,
+    'expected deny: `git add -A` really does stage the stale revert, so it IS in the commit');
+  assert.match(combinedOutput, /dogfood-report-v1\.md/, 'the swept-in revert must be named');
+});
+
+test('a STAGED whole-file deletion of an untouched sibling-landed file rides the narrow commit -> still BLOCKS', () => {
+  const repoDirectory = makeDirtyUnstagedSliceFixture();
+  writeFileSync(join(repoDirectory, 'docs', 'landed-by-sibling.md'), 'landed content\n', 'utf8');
+  git(repoDirectory, 'add', join('docs', 'landed-by-sibling.md'));
+  git(repoDirectory, 'commit', '-q', '-m', 'sibling lands a doc');
+  git(repoDirectory, 'rm', '-q', join('docs', 'landed-by-sibling.md')); // 'D ' — STAGED deletion
+  const transcriptPath = makeTranscript([join(repoDirectory, 'CHANGELOG.md')]);
+  const { combinedOutput } = runHook(
+    'git add CHANGELOG.md && git commit -m "docs: record the dogfood run"',
+    { transcriptPath, workingDirectory: repoDirectory },
+  );
+  assert.equal(isBlocked(combinedOutput), true,
+    'expected deny: a STAGED deletion of an untouched file is in the commit no matter how narrow the add is');
+  assert.match(combinedOutput, /landed-by-sibling\.md/, 'the staged phantom deletion must be named');
+});
+
+test('a STAGED >50-line content loss on an untouched file -> still BLOCKS (large-deletion sweep check survives scoping)', () => {
+  const repoDirectory = makeDirtyUnstagedSliceFixture();
+  const bigDocPath = join(repoDirectory, 'docs', 'METHODS.md');
+  const originalDoc = Array.from({ length: 120 }, (_, lineIndex) => `original line ${lineIndex + 1}`).join('\n') + '\n';
+  writeFileSync(bigDocPath, originalDoc, 'utf8');
+  git(repoDirectory, 'add', join('docs', 'METHODS.md'));
+  git(repoDirectory, 'commit', '-q', '-m', 'seed METHODS.md');
+  // A sibling lands a full rewrite; the stale checkout then puts the OLD 120-line body back and
+  // stages it — >50 lines of the landing destroyed, and the content matches a real ancestor blob.
+  writeFileSync(bigDocPath, Array.from({ length: 200 }, (_, lineIndex) => `landed rewrite line ${lineIndex + 1}`).join('\n') + '\n', 'utf8');
+  git(repoDirectory, 'add', join('docs', 'METHODS.md'));
+  git(repoDirectory, 'commit', '-q', '-m', 'sibling rewrites METHODS.md');
+  writeFileSync(bigDocPath, originalDoc, 'utf8');
+  git(repoDirectory, 'add', join('docs', 'METHODS.md'));
+  const transcriptPath = makeTranscript([join(repoDirectory, 'CHANGELOG.md')]);
+  const { combinedOutput } = runHook(
+    'git add CHANGELOG.md && git commit -m "docs: record the dogfood run"',
+    { transcriptPath, workingDirectory: repoDirectory },
+  );
+  assert.equal(isBlocked(combinedOutput), true,
+    'expected deny: a staged revert destroying >50 lines of a landing is exactly what this guard exists for');
+  assert.match(combinedOutput, /METHODS\.md/, 'the large staged content loss must be named');
+});
+
 test.after(() => {
   rmSync(sandboxDirectory, { recursive: true, force: true });
 });
