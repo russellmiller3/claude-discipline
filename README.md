@@ -271,6 +271,23 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-26** — **`launch-preflight`: a warning you can waive is not a guard.** The seed gate
+  told you a single-seed run was provisional, then let it through behind an
+  `EXPERIMENT_CLAIM_LEVEL=pilot` prefix. In one session it fired on **six consecutive
+  single-seed probes (~$24)** and changed nothing — each run's number was read as signal, and two
+  rounds of tuning were done against what a variance table later showed was noise (totals of
+  22/20/22, statistically the same number).
+  - **The transferable lesson: put the invariant where it can actually bite.** "Is this run
+    provisional?" is a per-launch question and the answer is always "yes, proceed." "Did this
+    *session* end up resting on provisional evidence?" is a whole-session question — so it belongs
+    at `Stop`, not `PreToolUse`. A guard placed where the answer is never "no" is decoration.
+  - **The fix:** launches record what *kind* of evidence they can produce; `Stop` blocks when ≥2
+    pilots ran with zero multi-seed runs. It clears on a real ≥3-seed run, on the literal token
+    `pilot-result-provisional: <what is unproven>`, or below two pilots (one pilot is a smoke test,
+    not a habit). The ledger is keyed on the session's own id with a 24h TTL — never a shared
+    counter — so one project's pilots can't block an unrelated session, and a crashed session
+    leaves no permanent trap. 37 tests.
+
 - **2026-07-24** — **`explain-as-you-work`: the exemption was the hole.** The brevity gate that
   enforces "no walls of text" only ran on turns where *no code shipped*. In one long session every
   over-long reply had also edited a file, so the gate never fired once — and the user finally had to
