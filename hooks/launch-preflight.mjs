@@ -45,6 +45,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 
 const SKILL_PATH = 'C:/Users/rmill/.claude/skills/launch-agent/SKILL.md';
 const AGENT_BRIEF_SCRIPT = 'node ~/.claude/scripts/agent-kit/agent-brief.mjs';
@@ -413,6 +414,93 @@ export function monitorServerListening(port) {
   });
 }
 
+// Where the auto-started monitor's pid is recorded, so the process we spawn is
+// always findable and stoppable. A server nobody can find is the zombie that
+// fooled this very gate on 2026-07-26: a leftover listener from a killed run
+// answered 200 and satisfied the monitor check for a pod that was long dead.
+const MONITOR_PID_FILE = 'C:/Users/rmill/.claude/state/live-monitor.pid';
+
+// LIFECYCLE, part 1 — never spawn onto a port someone already owns.
+// The caller probes with monitorServerListening() first and only reaches here
+// when nothing answered HTTP. A NON-http listener can still hold the port, in
+// which case python exits with EADDRINUSE; we detect that via the child's own
+// error/exit rather than assuming success, and fall back to blocking.
+//
+// LIFECYCLE, part 2 — record the pid so the server can always be stopped:
+// `stopMonitorServer()` below, or by hand from the pid file. The monitor is
+// DELIBERATELY long-lived (it must outlive this short-lived hook and serve the
+// whole training run), so "shut down when the hook exits" would be wrong; the
+// contract is "always findable, always stoppable, never duplicated".
+export function readMonitorPid(readFile = readFileSync, exists = existsSync) {
+  if (!exists(MONITOR_PID_FILE)) return null;
+  const parsed = Number.parseInt(String(readFile(MONITOR_PID_FILE, 'utf8')).trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function stopMonitorServer(killer = process.kill, readPid = readMonitorPid) {
+  const pid = readPid();
+  if (pid === null) return false;
+  try {
+    killer(pid);
+    return true;
+  } catch {
+    // Already gone (stale pid file) — that IS the desired end state.
+    return false;
+  }
+}
+
+// DON'T BLOCK ON SOMETHING YOU CAN JUST DO (2026-07-26, Russell: "can we make
+// it so i dont have to always say that?"). The gate used to deny a launch that
+// had no monitor and hand the operator a command to paste. That is a chore with
+// extra steps: the hook knows the port, the repo root, and the exact command --
+// so it starts the monitor ITSELF and lets the launch through.
+//
+// This is "a hook must ENFORCE THE OUTCOME, not make suggestions" taken one step
+// further. The outcome wanted is "a monitor is serving before the launch runs",
+// not "the operator has been told to start one".
+//
+// Detached + unref'd so the server outlives this short-lived hook; the launch
+// that follows needs it for hours. stdio ignored because an inherited pipe would
+// hold the hook's stdout open and stall the harness.
+export function startMonitorServer(port, workingDirectory, spawner = spawn, writeFile = writeFileSync) {
+  try {
+    const child = spawner(
+      'py',
+      ['-3', '-m', 'http.server', String(port), '--bind', '127.0.0.1'],
+      { cwd: workingDirectory, detached: true, stdio: 'ignore', windowsHide: true },
+    );
+    if (!child) return false;
+    // A port held by a non-HTTP listener makes python exit EADDRINUSE. Swallow
+    // the event so an unhandled 'error' can never crash the hook; the caller's
+    // re-probe is what actually decides whether we got a monitor.
+    if (typeof child.on === 'function') child.on('error', () => {});
+    if (typeof child.pid === 'number') {
+      try {
+        mkdirSync(dirname(MONITOR_PID_FILE), { recursive: true });
+        writeFile(MONITOR_PID_FILE, String(child.pid), 'utf8');
+      } catch { /* pid bookkeeping must never block a launch */ }
+    }
+    if (typeof child.unref === 'function') child.unref();
+    return true;
+  } catch {
+    // Never throw out of a PreToolUse hook — a spawn failure degrades to the
+    // old block-with-instructions path rather than bricking the tool call.
+    return false;
+  }
+}
+
+// Poll until the freshly-spawned server answers. Python's http.server binds in
+// well under a second, but the hook budget is ~4s, so this waits at most ~1.8s
+// then gives up and blocks — fail SAFE. Never let a launch through on the
+// assumption that a server we could not confirm is really there.
+export async function waitForMonitor(port, probe = monitorServerListening, attempts = 6, delayMs = 300) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (await probe(port)) return true;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return probe(port);
+}
+
 export function evaluateMonitorGate(toolName, command, monitorUp) {
   if (!isMonitorableLaunch(toolName, command)) {
     return { applies: false, block: false };
@@ -752,7 +840,19 @@ async function main() {
   // block BEFORE injecting the skill digest, so the operator stands up the
   // monitor first and never launches blind.
   if (isMonitorableLaunch(toolName, command)) {
-    const monitorUp = await monitorServerListening(configuredMonitorPort());
+    const monitorPort = configuredMonitorPort();
+    let monitorUp = await monitorServerListening(monitorPort);
+    // AUTO-START rather than nag (2026-07-26). If nothing is serving, start the
+    // monitor ourselves from the launch's own cwd and re-probe. Only if that
+    // fails do we fall through to the block — so the operator never has to be
+    // told to run a command the hook could have run itself, and a launch still
+    // never proceeds unconfirmed-blind.
+    if (!monitorUp) {
+      const projectRoot = hookEvent.cwd || process.cwd();
+      if (startMonitorServer(monitorPort, projectRoot)) {
+        monitorUp = await waitForMonitor(monitorPort);
+      }
+    }
     const monitorVerdict = evaluateMonitorGate(toolName, command, monitorUp);
     if (monitorVerdict.block) {
       emitDenial(eventName, monitorVerdict.reason);
