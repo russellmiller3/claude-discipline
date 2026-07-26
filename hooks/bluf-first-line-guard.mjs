@@ -99,6 +99,38 @@ export function analyzeFirstLine(reply) {
   return { verdict: 'ok', line: bare, words };
 }
 
+/** Detector for the shared style registry (hooks/lib/style-checkers.mjs).
+ *
+ *  This rule does NOT block on its own. A sibling session built `style-governor.mjs` on the same
+ *  day this hook was written, for a defect this hook would otherwise have made worse: four style
+ *  hooks blocked SEQUENTIALLY on one turn, so Russell read four stacked rewrites of the same reply.
+ *  Registering a fifth independent Stop block would recreate exactly that. So the rule ships as a
+ *  detector and joins the ONE combined verdict. */
+export function blufViolations({ entries = [], turnEntries = [], reply = '' } = {}) {
+  if (!turnEntries.length || !reply) return [];
+
+  const userMessage = lastUserText(entries);
+  if (!askedDirectQuestion(userMessage)) return [];
+
+  const analysis = analyzeFirstLine(reply);
+  if (analysis.verdict === 'ok') return [];
+
+  const measure = {
+    structural: 'first line is a heading, bullet, table row, or code fence',
+    'throat-clearing': 'first line announces what you will do instead of answering',
+    'too-long': `first line runs ${analysis.words} words (cap ${MAX_FIRST_LINE_WORDS})`,
+    'no-text': 'no answer-bearing line at all'
+  }[analysis.verdict] ?? 'first line is not the answer';
+
+  return [{
+    kind: 'the answer is not in the first line (Russell asked a direct question)',
+    measure,
+    quote: analysis.line.slice(0, 160),
+    guidance: 'Put the ANSWER on the first line after any compass line — name the option, or start '
+      + 'with YES/NO, then one line of why. Keep the table and bullets; just move the answer above them.'
+  }];
+}
+
 function blockReason(analysis, userMessage) {
   const why = {
     structural: 'it opens with a heading, bullet, table row, or code fence — a structural line cannot be an answer',
@@ -133,6 +165,11 @@ answer was supposed to save. wall-text-guard caps how LONG the reply is; this on
 that the answer is FIRST.`;
 }
 
+/** Standalone entry, kept for direct invocation and for the end-to-end wiring probe.
+ *
+ *  In settings.json this file is NOT registered — `style-governor.mjs` runs every style rule
+ *  through the registry and emits one merged verdict. Running this file directly still produces a
+ *  correct block, which is what the wiring probe exercises. */
 async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
@@ -149,15 +186,12 @@ async function main() {
   const turnEntries = currentTurnEntries(entries);
   if (turnEntries.length === 0) return;
 
-  const userMessage = lastUserText(entries);
-  if (!askedDirectQuestion(userMessage)) return;
-
   const reply = finalReplyText(turnEntries);
-  if (!reply) return;
+  const violations = blufViolations({ entries, turnEntries, reply });
+  if (violations.length === 0) return;
 
+  const userMessage = lastUserText(entries);
   const analysis = analyzeFirstLine(reply);
-  if (analysis.verdict === 'ok') return;
-
   process.stdout.write(JSON.stringify({ decision: 'block', reason: blockReason(analysis, userMessage) }));
 }
 
