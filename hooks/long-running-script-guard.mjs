@@ -265,6 +265,12 @@ export function isKnownShortCommand(command) {
 	return (
 		/\bnpm(\.cmd)?\s+(run\s+)?test\b/.test(loweredCommand) ||
 		/\b(pytest|vitest|playwright|svelte-check|eslint|prettier|tsc)\b/.test(loweredCommand) ||
+		// A known deterministic infra CLI (Supabase, Cloudflare Wrangler) is never an ML experiment,
+		// even though ITS OWN vocabulary overlaps the long-run keyword list ("migration" is a Supabase
+		// subcommand noun, not a backfill job; wrangler has "generate"/"d1 migrations"). False positive
+		// (2026-07-27): `npx supabase migration list` — a plain read of the prod migration ledger before
+		// a deploy — was denied "THREE DISTINCT SEEDS REQUIRED". These tools have no seed/RNG concept at all.
+		/\bnpx\s+(?:--\w+\s+)*(supabase|wrangler)\b/.test(loweredCommand) ||
 		// A unit-/spec-test file run directly (e.g. `node hookbook-sync.test.mjs`) is short by
 		// definition — exempt it even when its NAME contains a long-keyword like 'sync' or 'migrate'.
 		/\.(test|spec)\.[mc]?[jt]s\b/.test(loweredCommand) ||

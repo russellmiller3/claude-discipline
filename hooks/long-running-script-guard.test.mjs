@@ -308,5 +308,15 @@ check('still blocks a real bench run chained after a cp',
     !isInstantInvocation('python codeservo_session_bench.py --turns 24 --note "see --help for docs"'));
 }
 
+// 2026-07-27 FALSE-BLOCK: `npx supabase migration list` — a read-only check of the prod migration
+// ledger before a delicate merge+deploy — was denied "THREE DISTINCT SEEDS REQUIRED". "migration" is
+// a long-run keyword and npx is a recognized runner, but Supabase/wrangler are deterministic infra
+// CLIs with no seed/RNG concept at all. isKnownShortCommand now exempts npx invocations of both.
+check('allows npx supabase migration list (the 2026-07-27 false-block)', !isDenied('npx supabase migration list'));
+check('allows npx supabase link --project-ref', !isDenied('npx supabase link --project-ref abc123'));
+check('allows npx wrangler deploy --config', !isDenied('npx wrangler deploy --config wrangler.app.jsonc'));
+// REGRESSION: an unrelated genuine long-run keyword command must still block (allowlist stays narrow).
+check('still blocks a genuine unseeded migrate/backfill script', isDenied('python scripts/migrate_backfill.py --all'));
+
 if (failures.length) { console.error(`\n${failures.length} check(s) failed.`); process.exit(1); }
 console.log('\nAll long-running-script-guard checks passed.');

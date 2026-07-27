@@ -297,6 +297,34 @@ test('read-only: cat / grep / git diff over a launch-token PATH pass untouched',
   }
 });
 
+// ---- regression: known deterministic infra CLIs must never read as an experiment launch --
+//
+// 2026-07-27 false-positive (Macher deploy prep). `npx supabase migration list` — a plain read of
+// the prod migration ledger before a delicate merge+deploy — was denied "THREE DISTINCT SEEDS
+// REQUIRED": "migration" sits in the long-run keyword list and npx is a recognized runner, but
+// Supabase/wrangler are deterministic CLIs with no seed/RNG concept. Fixed via isKnownShortCommand
+// in long-running-script-guard.mjs (the shared primitive both this hook and its sibling consume).
+test('allows npx supabase migration list (the 2026-07-27 false-block)', () => {
+  const hookOutput = runHook(bashEvent('npx supabase migration list')).trim();
+  assert.equal(hookOutput, '', 'expected no output (no seed-gate denial) for npx supabase migration list');
+});
+
+test('allows npx supabase link --project-ref', () => {
+  const hookOutput = runHook(bashEvent('npx supabase link --project-ref abc123')).trim();
+  assert.equal(hookOutput, '', 'expected no output for npx supabase link');
+});
+
+test('allows npx wrangler deploy --config wrangler.app.jsonc', () => {
+  const hookOutput = runHook(bashEvent('npx wrangler deploy --config wrangler.app.jsonc')).trim();
+  assert.equal(hookOutput, '', 'expected no output for npx wrangler deploy');
+});
+
+test('still blocks an unrelated genuine unseeded migrate/backfill script (allowlist stays narrow)', () => {
+  const hookOutput = parsedHookOutput(runHook(bashEvent('python scripts/migrate_backfill.py --all')));
+  assert.equal(hookOutput.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(hookOutput.hookSpecificOutput.permissionDecisionReason, /THREE DISTINCT SEEDS REQUIRED/);
+});
+
 test('read-only: a git commit whose MESSAGE contains the launch token passes untouched', () => {
   const commitCommand = `git commit -m "fix(${BENCH_TOKEN}): ws-04 3-step setup wizard"`;
   assert.equal(runHook(bashEvent(commitCommand)).trim(), '');
