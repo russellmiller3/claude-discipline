@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { evaluateProcessGateOwnership } from './test-gate-child-cleanup-guard.mjs';
+import { evaluateProcessGateOwnership, launchesChildProcess } from './test-gate-child-cleanup-guard.mjs';
 
 const safeGateSource = `
 import { spawn } from 'node:child_process';
@@ -105,4 +106,23 @@ test('a bare exec( counts once the file really imports a process module', () => 
     readSource: () => `import { exec } from 'node:child_process';\nexec('npm test');`,
   });
   assert.equal(verdict.block, true);
+});
+
+// --- 2026-07-27, second false-fire, same session: this guard's OWN source lists these symbol
+// names inside its regex literals, so scanning raw text flagged the guard as launching a process
+// it merely detects the NAME of. Detection now blanks string/regex-literal content before matching
+// bare identifiers — a real import's string argument is checked BEFORE blanking, since there the
+// string content ('child_process') is itself the signal.
+test('the guard does not flag its own source (symbol names inside a regex literal)', () => {
+  assert.equal(launchesChildProcess(readFileSync(new URL('./test-gate-child-cleanup-guard.mjs', import.meta.url), 'utf8')), false);
+});
+
+test('a real execSync call survives even with an unrelated regex literal nearby', () => {
+  const source = `import { execSync } from 'node:child_process';\nconst pattern = /foo\/bar/;\nexecSync('npm test');`;
+  assert.equal(launchesChildProcess(source), true);
+});
+
+test('a string that merely CONTAINS the word execSync is not a call', () => {
+  const source = `const message = "never call execSync directly here";\nconsole.log(message);`;
+  assert.equal(launchesChildProcess(source), false);
 });

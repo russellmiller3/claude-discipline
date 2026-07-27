@@ -35,10 +35,32 @@ const PROCESS_MODULE_IMPORT =
 // Bare `exec(`/`spawn(` — only meaningful alongside a real process-module import (see above).
 const AMBIGUOUS_PROCESS_VERB = /\b(?:exec|spawn)\s*\(/;
 
+// (2026-07-27, second false-fire, same turn) This guard's OWN source file lists these very symbol
+// names inside its regex literals — `/\b(?:...execSync...)\b/` — so scanning raw text flagged the
+// guard as launching a child process it merely detects the NAME of. Blank quoted strings and regex
+// literals before matching, so a symbol appearing as pattern TEXT can never count as a real call —
+// only actual code (`execSync(...)`, `import ... from 'child_process'`) can.
+function withoutStringAndRegexLiterals(source) {
+  return source
+    .replace(/`(?:\\.|[^`\\])*`/g, '``')
+    .replace(/"(?:\\.|[^"\\])*"/g, '""')
+    .replace(/'(?:\\.|[^'\\])*'/g, "''")
+    .replace(/\/(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\n])+\/[a-z]*/gi, '//')
+    // Prose comments (this very docstring included) can name these symbols without calling them.
+    .replace(/\/\/[^\n]*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
 export function launchesChildProcess(gateSource) {
-  const source = String(gateSource || '');
-  if (UNAMBIGUOUS_PROCESS_LAUNCH.test(source)) return true;
-  return PROCESS_MODULE_IMPORT.test(source) && AMBIGUOUS_PROCESS_VERB.test(source);
+  const originalSource = String(gateSource || '');
+  // The import check needs the REAL string content ('child_process' is itself the signal) — check
+  // it first, before blanking destroys that text.
+  const importsProcessModule = PROCESS_MODULE_IMPORT.test(originalSource);
+  // Everything else is a bare identifier/call shape, which a string or regex literal can quote
+  // without meaning it — blank literals before testing those.
+  const scannableSource = withoutStringAndRegexLiterals(originalSource);
+  if (UNAMBIGUOUS_PROCESS_LAUNCH.test(scannableSource)) return true;
+  return importsProcessModule && AMBIGUOUS_PROCESS_VERB.test(scannableSource);
 }
 const DEADLINE = /\b(?:setTimeout|deadline|timeout(?:Ms|Seconds)?|AbortSignal\.timeout|runWithDeadline)\b/i;
 const TREE_CLEANUP = /\b(?:taskkill|terminate(?:Process|Child|Tree)|kill(?:Process|Tree)|process\.kill|\.kill\(|SIG(?:INT|TERM|BREAK)|pkill|killpg)\b/i;
