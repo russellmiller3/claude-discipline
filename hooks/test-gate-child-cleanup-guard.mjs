@@ -40,7 +40,7 @@ const AMBIGUOUS_PROCESS_VERB = /\b(?:exec|spawn)\s*\(/;
 // guard as launching a child process it merely detects the NAME of. Blank quoted strings and regex
 // literals before matching, so a symbol appearing as pattern TEXT can never count as a real call —
 // only actual code (`execSync(...)`, `import ... from 'child_process'`) can.
-function withoutStringAndRegexLiterals(source) {
+export function withoutStringAndRegexLiterals(source) {
   return source
     .replace(/`(?:\\.|[^`\\])*`/g, '``')
     .replace(/"(?:\\.|[^"\\])*"/g, '""')

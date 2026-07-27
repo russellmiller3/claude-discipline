@@ -147,6 +147,28 @@ const PYTEST_BUILTIN_FIXTURES = new Set([
 ]);
 const PYTEST_FILE_NAME = /(?:^|[\\/])(?:test_[^\\/]*\.py|[^\\/]*_test\.py|conftest\.py)$/i;
 
+// Blank the CONTENTS of same-line quoted strings before JS-binding/param regex matching, so text
+// living INSIDE a string literal (a fixture line describing another file's source, an example
+// baked into a message string) is never mistaken for a real binding or parameter in THIS file.
+// (2026-07-27 false-fire: a fixture array element holding a quoted line of test-file source text
+// — an arrow-function example with a short loop-style parameter name — was scanned as if that
+// parameter were a live binding in the script being written.)
+// Single/double-quoted JS strings cannot span raw lines, so blanking per-line is exact and can
+// never shift a later line's number. A same-line backtick string is blanked too; a template
+// literal that deliberately spans MULTIPLE raw lines is a narrower, separate residual — not the
+// bug reproduced here — left unhandled rather than risk collapsing line numbers across the file.
+//
+// A `//` line comment is blanked too, PROVEN live while writing this very fix: an explanatory
+// comment describing the bug in prose (quoting an example inside backticks, no string involved at
+// all) was itself flagged, since comments were never excluded from the scan either.
+function blankJsQuotedContent(sourceLine) {
+  return String(sourceLine)
+    .replace(/"(?:\\.|[^"\\])*"/g, '""')
+    .replace(/'(?:\\.|[^'\\])*'/g, "''")
+    .replace(/`(?:\\.|[^`\\])*`/g, '``')
+    .replace(/\/\/.*$/, '');
+}
+
 const OVERRIDE_PATTERNS = [
   /name-by-use-override/i,
   /NAME_BY_USE_OVERRIDE\s*=\s*1/i,
@@ -234,12 +256,13 @@ function findHits(text, filePath) {
     }
 
     if (ext === 'js' || ext === 'mjs' || ext === 'cjs' || ext === 'ts') {
+      const scannableLine = blankJsQuotedContent(ln);
       let m;
-      while ((m = jsBinding.exec(ln)) !== null) {
+      while ((m = jsBinding.exec(scannableLine)) !== null) {
         flag(lineNo, m[1], ln.trim(), 'js-binding');
       }
       jsBinding.lastIndex = 0;
-      while ((m = jsParamList.exec(ln)) !== null) {
+      while ((m = jsParamList.exec(scannableLine)) !== null) {
         for (const raw of m[1].split(',')) {
           const param = raw.trim().split(/[=:\s]/)[0];
           if (param && /^[a-zA-Z_$][\w$]*$/.test(param)) {

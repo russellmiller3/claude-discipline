@@ -176,3 +176,37 @@ test('still blocks a type-named non-fixture parameter inside a test file', () =>
   const bannedParamSnippet = 'def test_render(text):\n    assert text\n';
   assert.equal(hookDenies('test_config.py', bannedParamSnippet), true);
 });
+
+// --- 2026-07-27 FALSE-FIRE: the JS scanner had no string/comment blanking at all, so text
+// living INSIDE a quoted fixture line (describing ANOTHER file's source) or a `//` comment (a
+// prose example, no string involved) was scanned as if it were a real binding in THIS file.
+// Reproduced live while writing this very fix: an explanatory comment quoting the pattern got
+// flagged by the unfixed hook, on this exact file. ---
+test('a quoted fixture line describing another file\'s source is not scanned as real code', () => {
+  const fixtureArraySnippet = [
+    "const before = [",
+    "  '    const total = items.filter((item) => item.active).reduce((sum, item) => sum + item.price, 0);',",
+    "].join('\\n');",
+  ].join('\n');
+  assert.equal(hookDenies('repro.mjs', fixtureArraySnippet), false);
+});
+
+test('a // comment merely describing a pattern in prose is not scanned as real code', () => {
+  const commentSnippet = "// example: const total = list.filter((item) => item.active);";
+  assert.equal(hookDenies('notes.mjs', commentSnippet), false);
+});
+
+test('a double-quoted fixture string is blanked the same way as single-quoted', () => {
+  const doubleQuotedSnippet = 'const line = "const total = rows.map((item) => item.value);";';
+  assert.equal(hookDenies('repro.mjs', doubleQuotedSnippet), false);
+});
+
+// REGRESSION: a REAL binding/parameter on the same line, outside any string or comment, still blocks.
+test('still blocks a real type-named parameter sitting next to an unrelated string literal', () => {
+  const realParamNextToString = "function log(item) { console.log('recorded'); }";
+  assert.equal(hookDenies('service.mjs', realParamNextToString), true);
+});
+test('still blocks a real type-named const even when the line also contains a comment', () => {
+  const realConstWithComment = "const item = rows[0]; // grab the first row";
+  assert.equal(hookDenies('service.mjs', realConstWithComment), true);
+});
