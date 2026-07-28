@@ -10,6 +10,7 @@
     "tests-must-pass":          [{ "event": "PostToolUse", "matcher": "Bash", "timeout": 5 }, { "event": "Stop", "timeout": 5 }],
     "name-by-use":              [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit", "timeout": 5 }],
     "filename-quality-guard":   [{ "event": "PreToolUse", "matcher": "Write", "timeout": 5 }],
+    "worktree-default-for-edits": [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit|NotebookEdit|apply_patch", "timeout": 5 }],
     "no-write-to-main":         [{ "event": "PreToolUse", "matcher": "Bash", "timeout": 5 }],
     "delete-audit-guard":       [{ "event": "PreToolUse", "matcher": "Bash|PowerShell", "timeout": 5 }],
     "phantom-delete-commit-guard": [{ "event": "PreToolUse", "matcher": "Bash|PowerShell", "timeout": 10 }],

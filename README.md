@@ -83,6 +83,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 | `tests-must-pass` | PostToolUse+Stop | Any failing test (incl. "pre-existing") blocks stop until a full green run |
 | `name-by-use` | PreToolUse(Write/Edit) | Blocks type-named identifiers (`data`, `result`, `tmp`) — name by role |
 | `filename-quality-guard` | PreToolUse(Write) | Blocks low-quality file *names* — typos one edit from a real word (`findigns`→`findings`), lazy/scratch stems (`tmp`, `output2`, `untitled`), dropped-vowel tokens. Allowlists conventional caps files, dotfiles, tech acronyms — only close misspellings block. Override: `FILENAME_GUARD_OVERRIDE=1` |
+| `worktree-default-for-edits` | PreToolUse(Write/Edit/apply_patch) | Requires both isolation layers for repository edits: a linked git worktree and an attached non-`main`/non-`master` branch. A feature branch in the primary checkout, a linked worktree on `main`, and detached HEAD are all blocked. Non-repo files pass; there is no bypass. |
 | `coverage-claim-guard` | Stop | Blocks "tested everything / every X" claims that don't state the real scope (a count, or what's uncovered) |
 | `look-before-asking` | Stop | Blocks asking the user for a discoverable fact (a path/key/env var) when the turn ran zero searches/reads |
 | `agent-autocommit` | PostToolUse(Write/Edit) | Auto-commits WIP inside a linked git worktree after every edit — a dying agent loses ≤1 edit |
