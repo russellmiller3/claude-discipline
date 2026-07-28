@@ -278,7 +278,12 @@ export function isKnownShortCommand(command) {
 		// just reads finished output and prints — short by definition, never fan-out work — even when its
 		// path contains a long-keyword like 'bench'. This is the false-block that hit `node bench/.../report.mjs`
 		// (the guard treated a sequential reader as a parallel bench run). (2026-06-26)
-		/\b(report|analyz|summar(y|ize|ise)|stats|view|inspect|show|render|print|dump)[\w-]*\.(?:[mc]?[jt]s|py)\b/.test(loweredCommand) ||
+		// EXTENDED 2026-07-28: a live MONITOR/DASHBOARD server (monitor.mjs, dashboard.py, serve.mjs,
+		// watch.mjs) is the same class — it only reads the run's output file and renders it. Standing
+		// one up is what the live-watch rule DEMANDS before a run, yet `node scripts/bench/core-prompt/
+		// monitor.mjs` was denied "THREE DISTINCT SEEDS REQUIRED" by launch-preflight (which consults
+		// this same classifier) purely because 'bench' sat in its path. A watcher never has seeds.
+		/\b(report|analyz|summar(y|ize|ise)|stats|view|inspect|show|render|print|dump|monitor|dashboard|serve|watch)[\w-]*\.(?:[mc]?[jt]s|py)\b/.test(loweredCommand) ||
 		/\bnode\s+--check\b/.test(loweredCommand) ||
 		// A syntax check is instant, never a long job: `py_compile`, `ast.parse`, `tsc --noEmit`.
 		/\bpy_compile\b/.test(loweredCommand) ||

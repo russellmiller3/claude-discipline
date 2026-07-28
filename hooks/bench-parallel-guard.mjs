@@ -177,7 +177,13 @@ export function looksLikeBenchmark(command) {
     /\bmake\b\s/.test(loweredCommand)
   );
   // Even an execution that's clearly a RESULTS/REPORT reader (not a run) shouldn't be gated.
-  const isReportReader = /\breport(\.mjs|\.js|\.py)?\b/.test(loweredCommand) && !/\bharness|runner|run\.mjs\b/.test(loweredCommand);
+  // EXTENDED 2026-07-28: a live MONITOR/DASHBOARD server belongs to the same class — it reads the
+  // run's output file and serves it. Standing one up is exactly what the live-watch rule DEMANDS
+  // before a bench, yet `node scripts/bench/core-prompt/monitor.mjs` was denied for "no parallel
+  // evidence" — a single-threaded HTTP server has no tasks to parallelize.
+  const isReportReader =
+    /\b(report|monitor|dashboard|watch|serve)(\.mjs|\.js|\.py)?\b/.test(loweredCommand) &&
+    !/\bharness|runner|run\.mjs\b/.test(loweredCommand);
 
   return runsSomething && !isReportReader;
 }

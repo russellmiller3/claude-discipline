@@ -272,6 +272,19 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-28** — **`long-running-script-guard` + `bench-parallel-guard`: a dashboard is a reader,
+  not a launch.** Starting the live monitor for a benchmark — the thing the live-watch rule
+  *demands* you do **before** the run — was denied twice over: first "THREE DISTINCT SEEDS
+  REQUIRED" from the seed gate, then "no parallel/concurrency evidence" from the bench gate. Both
+  fired for the same dumb reason: the word `bench` sat in the monitor's **path**. A one-page HTTP
+  server has no seeds and no tasks to parallelize, so each guard was blocking the exact behavior it
+  exists to encourage. Fix: both already had a **results-reader exemption** (`report.mjs`,
+  `analyze*`, `summarize*`) — widened it to cover `monitor` / `dashboard` / `serve` / `watch`
+  rather than adding a fourth near-duplicate classifier. `launch-preflight` inherits it free,
+  because it consumes `long-running-script-guard`'s `isKnownShortCommand` instead of owning a copy.
+  Each guard got a **negative case** pinning that the real runner sitting next to the monitor in the
+  same directory still blocks — the exemption is about the *verb*, not the folder.
+
 - **2026-07-26** — **`launch-preflight`: a warning you can waive is not a guard.** The seed gate
   told you a single-seed run was provisional, then let it through behind an
   `EXPERIMENT_CLAIM_LEVEL=pilot` prefix. In one session it fired on **six consecutive

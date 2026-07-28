@@ -37,6 +37,11 @@ const NOT_RUNS = [
   'wc -l extension/bench/realworld/harness.mjs',
   'rg "firecrawl" extension/bench/realworld/suite.mjs',
   'node bench/realworld/report.mjs',            // analyzing results, not running the bench
+  // 2026-07-28 false-block: the LIVE MONITOR the live-watch rule requires before a bench was denied
+  // for "no parallel evidence" — a one-page HTTP server has no tasks to parallelize.
+  'node scripts/bench/core-prompt/monitor.mjs',
+  'node bench/sweep/dashboard.mjs',
+  'python evals/serve.py',
   'node --check bench/realworld/suite.mjs',     // syntax parse, not a run
   'node --check bench/realworld/harness.mjs && node --check bench/realworld/localSites.mjs',
   'node bench/realworld/suite.test.mjs',        // a test file, not a bench run

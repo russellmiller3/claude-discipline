@@ -51,6 +51,18 @@ check('allows cd+report reader', !isDenied('cd extension && node bench/realworld
 check('allows an analyze/summarize reader', !isDenied('node scripts/analyze-sweep.mjs runs/latest.jsonl'));
 check('allows a python stats reader', !isDenied('python evals/stats.py'));
 
+// 2026-07-28 FALSE-BLOCK: `node scripts/bench/core-prompt/monitor.mjs` (the live dashboard the
+// live-watch rule REQUIRES before a run) was denied "THREE DISTINCT SEEDS REQUIRED" by
+// launch-preflight, which consults this classifier — only because 'bench' sat in its path. A
+// watcher reads the run's output file and serves it; it has no seeds and runs no experiment.
+check('allows a bench MONITOR server (the 2026-07-28 false-block)',
+  !isDenied('node scripts/bench/core-prompt/monitor.mjs'));
+check('allows a dashboard server', !isDenied('node bench/sweep/dashboard.mjs'));
+check('allows a python watch/serve script', !isDenied('python evals/serve.py'));
+// The RUNNER next to it is still a launch — the exemption must not swallow it.
+check('still guards the bench RUNNER beside the monitor',
+  isDenied('node scripts/bench/core-prompt/run.mjs --force'));
+
 // 2026-06-30 FALSE-BLOCK: a git commit touching *.py files in bench/ — the `.py` EXTENSION matched the
 // `py` interpreter pattern, so a plain git command (with a 'bench'/'migrate' keyword in a path) looked
 // like a long python run. A git command runs no script; it must pass.
