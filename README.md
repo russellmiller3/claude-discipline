@@ -79,6 +79,7 @@ Hooks are **tiered by how portable they are** — pick your comfort level. This 
 | `protect-secrets` | PreToolUse | Blocks reads/writes of `.env`, key files, credential stores |
 | `no-commit-to-main` | PreToolUse(Bash) | Blocks direct commits to `main`/`master` — branch first. Auto-allows a commit when every staged file is doc-only (`.md`/`.markdown`/`.mdx`/`.txt`/`.rst`), including files staged by a chained `git add ... && git commit` in the same command — an ambiguous pathspec (`-A`, `.`, `-u`) still fails closed and blocks. Also denies a `COMMIT_MAIN_OVERRIDE=1` commit to main when another worktree is currently `locked` (a background agent may be mid-landing) — see HOOKBOOK for the incident that motivated this |
 | `read-before-write` | PreToolUse(Edit) | Blocks editing a file you haven't read this session |
+| `ground-truth-before-action` | Stop | Blocks completion when an edit, deploy, or live mutation preceded the evidence needed to understand the system. External integrations require web search plus an opened source before action; internal work requires local inspection. Late research clears only after correction and focused proof. |
 | `pixels-only-proof` | Stop | On a visual/"not rendering" task, blocks "fixed" claims that cite DOM/`toBeVisible` instead of a screenshot |
 | `tests-must-pass` | PostToolUse+Stop | Any failing test (incl. "pre-existing") blocks stop until a full green run |
 | `name-by-use` | PreToolUse(Write/Edit) | Blocks type-named identifiers (`data`, `result`, `tmp`) — name by role |
@@ -273,6 +274,10 @@ I'm **Russell Miller**. I built this from six months of using Claude Code as my 
 
 ## Recent changes
 
+- **2026-07-29** — Added `ground-truth-before-action`, a Stop hook that rejects the most general form
+  of assumption-driven work: an edit, deploy, or live mutation that happened before the evidence
+  needed to understand the system. External integrations require search plus an opened source first;
+  late research requires a corrective re-audit and focused proof instead of rubber-stamping the guess.
 - **2026-07-28** — **`long-running-script-guard` + `bench-parallel-guard`: a dashboard is a reader,
   not a launch.** Starting the live monitor for a benchmark — the thing the live-watch rule
   *demands* you do **before** the run — was denied twice over: first "THREE DISTINCT SEEDS

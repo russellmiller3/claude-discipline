@@ -6,6 +6,7 @@
     "protect-secrets":          [{ "event": "PreToolUse", "matcher": "Read|Edit|Write|Bash", "timeout": 5 }],
     "no-commit-to-main":        [{ "event": "PreToolUse", "matcher": "Bash", "timeout": 5 }],
     "read-before-write":        [{ "event": "PreToolUse", "matcher": "Edit|MultiEdit", "timeout": 5 }],
+    "ground-truth-before-action": [{ "event": "Stop", "timeout": 5 }],
     "pixels-only-proof":        [{ "event": "Stop", "timeout": 5 }],
     "tests-must-pass":          [{ "event": "PostToolUse", "matcher": "Bash", "timeout": 5 }, { "event": "Stop", "timeout": 5 }],
     "name-by-use":              [{ "event": "PreToolUse", "matcher": "Write|Edit|MultiEdit", "timeout": 5 }],
