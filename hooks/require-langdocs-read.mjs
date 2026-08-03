@@ -48,8 +48,37 @@ if (!filePath) process.exit(0);
 // in one pass. Russell's rule (2026-06-20, the OpenAI Realtime saga: ~2h lost patching one server error
 // at a time — voice field → top-level override → session.type → response overlap — every one in the
 // docs). Fires on the API SIGNALS in the code, so it catches the NEXT unknown API automatically.
+// A test file exercises an integration; it never defines the protocol, so it was always meant
+// to be exempt. The check only encoded the JS convention (`*.test.js` / `*.spec.ts`), so every
+// OTHER ecosystem's tests still blocked — Python's `test_*.py` / `*_test.py` / `conftest.py`,
+// Go's `*_test.go`, Rust's `tests/*.rs`. Editing test_durable_runner.py to add cases about
+// LOCAL usage-evidence reconciliation was blocked as "external-API code" on 2026-07-30 purely
+// because the module elsewhere touches HTTP. Same intent, more ecosystems.
+export function isTestFile(candidatePath) {
+  const normalized = String(candidatePath || '').replace(/\\/g, '/');
+  const base = normalized.split('/').pop() || '';
+  return /\.(test|spec)\./i.test(base)
+    || /^test_.+\.(py|rb)$/i.test(base)
+    || /_test\.(py|go|rb)$/i.test(base)
+    || /^conftest\.py$/i.test(base)
+    || /(^|\/)tests?\/[^/]+\.rs$/i.test(normalized);
+}
+
+// A dedicated integration module (e.g. realtimeVoiceSession.js) has no "safe
+// corner" — it IS the protocol, so any edit anywhere in it is protocol-adjacent
+// and the whole file is fair game for the signal check. A large multi-purpose
+// file (a benchmark harness, a utility module) can carry one API call among
+// thousands of unrelated lines; gating every unrelated edit on that one call
+// forever false-positives (confirmed 2026-08-03: a one-line `from pathlib
+// import Path` add to a 2284-line benchmark script blocked because the file
+// elsewhere makes a real OpenRouter call — the signal check ran against
+// fileText+editText with no size distinction). Threshold picked with margin:
+// real multi-purpose scripts hit today run 659-2284 lines; dedicated
+// integration fixtures run 1-3 lines. Nothing in between has been observed.
+const LARGE_FILE_LINE_THRESHOLD = 200;
+
 (function genericApiDocsGate() {
-  if (/\.(test|spec)\./i.test(filePath)) return; // editing a test, not integrating
+  if (isTestFile(filePath)) return; // editing a test, not integrating
   if (/\.(md|txt|rst)$/i.test(filePath)) return; // docs MENTION APIs; they don't integrate them
   const editText = [
     payload.tool_input?.content,
@@ -83,7 +112,9 @@ if (!filePath) process.exit(0);
     "from\\s+['\"](openai|@anthropic|@anthropic-ai|stripe|twilio|googleapis|@google-cloud|@aws-sdk|cohere|replicate|@deepgram|elevenlabs)",
     'api\\.(openai|anthropic|stripe|twilio|deepgram|elevenlabs)\\.com',
   ].join('|'), 'i');
-  if (!API_SIGNAL_RE.test(haystack)) return; // not external-API code
+  const fileLineCount = fileText ? fileText.split('\n').length : 0;
+  const signalSurface = fileLineCount > LARGE_FILE_LINE_THRESHOLD ? editText : haystack;
+  if (!API_SIGNAL_RE.test(signalSurface)) return; // not external-API code
 
   const transcriptPath = payload.transcript_path || process.env.CLAUDE_TRANSCRIPT_PATH || '';
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return; // can't verify → fail open

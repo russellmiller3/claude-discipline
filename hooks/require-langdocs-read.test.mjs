@@ -127,6 +127,76 @@ writeFileSync(docsFile, 'We call https://api.openai.com/v1/messages from the ser
 check('markdown mentioning an API host → allowed (docs skip)',
   blocked({ targetFile: docsFile, transcriptPath: transcriptFile(work, { fetchedDocs: false }) }) === false);
 
+// A test file exercises an integration; it never defines the protocol, so it was always meant to
+// be exempt. The check only encoded the JS convention, so Python/Go/Rust tests still blocked —
+// editing test_durable_runner.py to add LOCAL usage-evidence cases was blocked as "external-API
+// code" on 2026-07-30 because the module elsewhere touches HTTP.
+const apiSignalSource = "const url = 'https://api.openai.com/v1/realtime';";
+for (const [convention, name] of [
+  ['python test_ prefix', 'test_durable_runner.py'],
+  ['python _test suffix', 'durable_runner_test.py'],
+  ['python conftest', 'conftest.py'],
+  ['go _test suffix', 'client_test.go'],
+  ['ruby test_ prefix', 'test_client.rb'],
+]) {
+  const ecosystemTestFile = join(work, name);
+  writeFileSync(ecosystemTestFile, apiSignalSource);
+  check(`${convention} test file → allowed (test skip)`,
+    blocked({ targetFile: ecosystemTestFile, transcriptPath: transcriptFile(work, { fetchedDocs: false }) }) === false);
+}
+
+const rustTestDirectory = join(work, 'tests');
+mkdirSync(rustTestDirectory, { recursive: true });
+const rustTestFile = join(rustTestDirectory, 'realtime.rs');
+writeFileSync(rustTestFile, apiSignalSource);
+check('rust tests/ directory → allowed (test skip)',
+  blocked({ targetFile: rustTestFile, transcriptPath: transcriptFile(work, { fetchedDocs: false }) }) === false);
+
+// The exemption is for TESTS, not for anything whose name merely contains "test".
+const productionFile = join(work, 'latest_client.py');
+writeFileSync(productionFile, apiSignalSource);
+check('production file whose name merely contains "test" → still blocked',
+  blocked({ targetFile: productionFile, transcriptPath: transcriptFile(work, { fetchedDocs: false }) }) === true);
+
+const contestFile = join(work, 'contest.py');
+writeFileSync(contestFile, apiSignalSource);
+check('contest.py is not conftest.py → still blocked',
+  blocked({ targetFile: contestFile, transcriptPath: transcriptFile(work, { fetchedDocs: false }) }) === true);
+
+// A large multi-purpose file (a benchmark harness, a utility module) can carry ONE real API
+// call among hundreds of unrelated lines. Gating every future edit on that one call forever
+// false-positives: editing codeservo_session_bench.py (2284 lines, one real OpenRouter call)
+// to add an unrelated `from pathlib import Path` blocked as "external-API code" on 2026-08-03.
+// Small dedicated integration files (the apiFile case above) must keep blocking on ANY edit —
+// there is no "safe corner" in a file that IS the protocol — so this is scoped to LARGE files.
+function largeFileWithBuriedApiCall() {
+  const fillerFunctions = Array.from({ length: 250 }, (_, index) => `def filler_${index}(): return ${index}`);
+  fillerFunctions.splice(120, 0, "API_URL = 'https://api.openai.com/v1/chat/completions'");
+  return fillerFunctions.join('\n');
+}
+
+const largeMultiPurposeFile = join(work, 'big_benchmark.py');
+writeFileSync(largeMultiPurposeFile, largeFileWithBuriedApiCall());
+
+check('large file (>200 lines), unrelated edit far from the buried API line → allowed',
+  blocked({
+    targetFile: largeMultiPurposeFile,
+    transcriptPath: transcriptFile(work, { fetchedDocs: false }),
+    newString: 'from pathlib import Path',
+  }) === false);
+
+check('large file (>200 lines), edit ITSELF adds a new API call → still blocked',
+  blocked({
+    targetFile: largeMultiPurposeFile,
+    transcriptPath: transcriptFile(work, { fetchedDocs: false }),
+    newString: "requests.get('https://api.stripe.com/v1/charges')",
+  }) === true);
+
+// The size split must not weaken the SMALL dedicated file case above (apiFile is 1 line) —
+// re-assert it here, right next to the new large-file cases, so a regression is obvious.
+check('small dedicated file (<=200 lines), unrelated edit with no signal in the diff → still blocked',
+  blocked({ targetFile: apiFile, transcriptPath: transcriptFile(work, { fetchedDocs: false }), newString: 'x = 2;' }) === true);
+
 for (const path of cleanups) { try { rmSync(path, { recursive: true, force: true }); } catch { /* ignore */ } }
 
 if (failures.length) { console.error(`\n${failures.length} check(s) failed.`); process.exit(1); }
