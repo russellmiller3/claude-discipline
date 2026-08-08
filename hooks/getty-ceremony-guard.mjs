@@ -81,7 +81,16 @@ const TOOL_PROBE_RE = /(?:^|["'`;\s])(?:command\s+-v|which|where(?:\.exe)?|get-c
 // REASON TEXT merely named the script. Requiring the .sh extension frees the test file
 // (never an invocation) while keeping every real invocation matched. Same tightening applied
 // to COMMIT_RAN_RE so a test run cannot masquerade as a commit having happened.
-const WORKFLOW_EXPANSION_RE = /\bgit\s+worktree\s+add\b|\bgit\s+(?:switch|checkout)\s+(?:-[^\s]*[cb]|--create)\b|\bsafe-merge-to-main\.sh\b|\bgit\s+merge\b/i;
+const WORKFLOW_EXPANSION_RE = /\bgit\s+worktree\s+add\b|\bgit\s+(?:switch|checkout)\s+(?:-[^\s]*[cb]|--create)\b|\bgit\s+merge\b/i;
+// SPLIT OUT 2026-08-08 (live deadlock): safe-merge-to-main.sh used to share
+// WORKFLOW_EXPANSION_RE with genuinely NEW-scope actions (a fresh worktree/branch/merge),
+// so it inherited the SAME askedFor gate below -- but landing already-finished, already-tested
+// work is CLAUDE.md's own standing default ("Ship the moment a feature is DONE... Never wait
+// to be asked"), never new scope. A session's driving human message can be anything (a status
+// question, "continue", a redirect) with zero obligation to repeat "land it" every time
+// completed work is ready to merge; the old shared gate blocked exactly that, and then blocked
+// the `git worktree add` needed to fix itself -- a self-referential dead end with no legal move.
+const LANDING_RITUAL_RE = /\bsafe-merge-to-main\.sh\b/i;
 const PLAN_ARTIFACT_RE = /(?:^|[\\/"'])plans?[\\/]|(?:^|[\\/"'])plan-[^\\/"']+\.md\b/i;
 const OUTCOME_ACTION_RE = /\b(?:fix|change|update|edit|replace|rename|remove|add|implement|make|correct|prevent|enforce)\b/i;
 const COMPLEX_OUTCOME_RE = /\b(?:research|audit|investigat\w*|analy[sz]\w*|redesign|architect|migrat\w*|refactor|benchmark|experiment|sweep|clean\s+up\s+all|repo-wide|system-wide|global|structural|complex|multi-file|across\s+(?:the|all)|deploy|production|paid)\b/i;
@@ -295,11 +304,22 @@ function shipRitualDocAfterCommit(prior, current) {
 
 function processDetour(request, name, action, prior, current) {
   const askedFor = String(request || '');
+  // LANDING RITUAL IS STANDING-AUTHORIZED, NEVER GATED ON THIS TURN'S WORDING (2026-08-08,
+  // live deadlock -- see LANDING_RITUAL_RE's own comment above for the full incident). This
+  // ONLY exempts the "branch, worktree, or merge setup" classification below -- a real
+  // safe-merge-to-main.sh invocation never needs askedFor to contain land/ship/commit/etc for
+  // THAT check. It deliberately does NOT skip the OTHER checks later in this function (e.g. the
+  // "broad test suite" gate on line ~344): the script's own invocation is always sanctioned, but
+  // an unscoped test-cmd ARGUMENT passed to it (bare "npm test" instead of a focused selector)
+  // is still exactly the signal that check exists to catch, and an early return here would have
+  // silently swallowed it too (caught by red-teaming this very fix: an existing true-positive
+  // test for that separate case broke when the first draft returned null unconditionally).
+  const isLandingRitual = LANDING_RITUAL_RE.test(action);
   // "land the WIP", "ship it", "commit that" all REQUEST landing work without ever saying
   // the words worktree/branch/merge, so the detour check must recognise them too. Otherwise
   // the guard refuses the exact landing the human just asked for (2026-08-08: "fix the WIP"
   // was refused as unrequested setup, leaving uncommitted work with no sanctioned way to land).
-  if (WORKFLOW_EXPANSION_RE.test(action) && !/\b(?:worktree|branch|merge|land|ship|wip|commit|uncommitted)\b/i.test(askedFor)) return 'branch, worktree, or merge setup';
+  if (!isLandingRitual && WORKFLOW_EXPANSION_RE.test(action) && !/\b(?:worktree|branch|merge|land|ship|wip|commit|uncommitted)\b/i.test(askedFor)) return 'branch, worktree, or merge setup';
   // TIGHTENED 2026-08-08 (found live while fixing the same-file edit-limit incident below): this used
   // to test PLAN_ARTIFACT_RE against the whole stringified action blob, which includes old_string/
   // new_string CONTENT -- so a test file whose fixtures merely contain the sample string

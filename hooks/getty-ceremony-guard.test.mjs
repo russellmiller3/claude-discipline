@@ -1043,12 +1043,45 @@ test("running the landing script's OWN test file is not merge setup", () => {
   }).block, false);
 });
 
-test('actually INVOKING the landing script is still detoured when unrequested', () => {
-  assert.equal(detectEfficiencyKernel({
+// This blocks for the BROAD-TEST-SUITE reason (the embedded "npm test" argument is an
+// unscoped gate command), not the branch/worktree/merge-setup reason -- see the next two
+// tests, which prove that reason no longer applies to a real landing invocation at all.
+test('an unscoped test-cmd argument to the landing script is still a broad-test-suite detour', () => {
+  const verdict = detectEfficiencyKernel({
     userText: 'fix the WIP',
     toolName: 'Bash',
     toolInput: { command: 'bash ~/.claude/scripts/safe-merge-to-main.sh /repo mybranch "npm test"' },
-  }).block, true);
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /broad test suite/);
+});
+
+// FIX 2026-08-08 (live deadlock): landing already-finished, already-tested work is
+// CLAUDE.md's own standing default ("Ship the moment a feature is DONE... Never wait to be
+// asked") -- invoking safe-merge-to-main.sh must NEVER need this turn's wording to justify it,
+// unlike genuinely NEW scope (a fresh worktree/branch/merge). The driving human message in the
+// live incident was an unrelated question ("why did python exp fail"), containing none of
+// worktree/branch/merge/land/ship/wip/commit/uncommitted -- and the same gate then blocked the
+// `git worktree add` needed to fix itself, a self-referential dead end with no legal move.
+test('invoking the landing script with a SCOPED test command is never branch/worktree/merge setup, regardless of this turn wording', () => {
+  const verdict = detectEfficiencyKernel({
+    userText: 'why did python exp fail? make sure we get timestamps at each step. continue',
+    toolName: 'Bash',
+    toolInput: {
+      command: 'bash ~/.claude/scripts/safe-merge-to-main.sh /repo mybranch '
+        + '"python -m pytest test_codeservo_replay_ledger.py -q"',
+    },
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('invoking the landing script with NO test command at all is never branch/worktree/merge setup', () => {
+  const verdict = detectEfficiencyKernel({
+    userText: 'continue',
+    toolName: 'Bash',
+    toolInput: { command: 'bash ~/.claude/scripts/safe-merge-to-main.sh /repo mybranch' },
+  });
+  assert.equal(verdict.block, false);
 });
 
 // FP fixed 2026-08-08: "land the WIP" requests landing work without saying
