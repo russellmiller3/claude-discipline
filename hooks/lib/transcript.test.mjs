@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import {
   readTranscript, roleOf, contentBlocks, textOf, toolUsesOf, toolResultText, isHumanPrompt,
   currentTurnEntries, lastAssistantText, lastUserText, lastAssistantTextOf, lastUserTextOf,
+  effectiveHumanTask, humanSafetyApproval,
 } from './transcript.mjs';
 
 let passed = 0;
@@ -36,6 +37,35 @@ ok(contentBlocks({ content: 'hi' })[0].text === 'hi', 'string content → text b
 ok(contentBlocks({ message: { content: [{ type: 'text', text: 'x' }] } }).length === 1, 'array content passthrough');
 ok(contentBlocks({}).length === 0, 'no content → []');
 
+// Codex stores human and assistant messages under response_item.payload. Authorization hooks must
+// read the human's actual words from this shape instead of trusting the model-authored tool brief.
+{
+  const user = {
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'use an agent to audit Plan 35' }] },
+  };
+  const assistant = {
+    type: 'response_item',
+    payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'I will delegate the audit.' }] },
+  };
+  const toolCall = {
+    type: 'response_item',
+    payload: { type: 'custom_tool_call', id: 'call-1', name: 'spawn_agent', input: { message: 'audit' } },
+  };
+  const toolResult = {
+    type: 'response_item',
+    payload: { type: 'custom_tool_call_output', call_id: 'call-1', output: 'blocked' },
+  };
+
+  ok(roleOf(user) === 'user', 'Codex input message normalizes to user');
+  ok(roleOf(assistant) === 'assistant', 'Codex output message normalizes to assistant');
+  ok(textOf(assistant) === 'I will delegate the audit.', 'Codex output_text normalizes to text');
+  ok(toolUsesOf(toolCall)[0]?.name === 'spawn_agent', 'Codex custom tool call normalizes to tool_use');
+  ok(roleOf(toolResult) === 'tool', 'Codex custom tool output is not a human prompt');
+  ok(isHumanPrompt(user), 'Codex input_text is a human prompt');
+  ok(lastUserText([user, assistant, toolCall]) === 'use an agent to audit Plan 35', 'lastUserText reads Codex input_text');
+}
+
 // textOf + toolUsesOf.
 ok(textOf({ content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] }) === 'a\nb', 'textOf joins blocks');
 ok(toolUsesOf({ content: [{ type: 'tool_use', name: 'Edit' }, { type: 'text', text: 'x' }] }).length === 1, 'toolUsesOf filters tool_use');
@@ -47,6 +77,13 @@ ok(toolResultText({ type: 'text', text: 'x' }) === '', 'toolResultText ignores n
 ok(isHumanPrompt({ role: 'user', content: [{ type: 'text', text: 'hi' }] }), 'a text user message is a human prompt');
 ok(!isHumanPrompt({ role: 'user', content: [{ type: 'tool_result', content: 'r' }] }), 'a tool-result-only user message is NOT a human prompt');
 ok(!isHumanPrompt({ role: 'assistant', content: [{ type: 'text', text: 'x' }] }), 'an assistant message is not a human prompt');
+// A Stop-hook-feedback / skill-launch injection is a synthetic `isMeta:true` user-role message with
+// real text content — real transcripts confirm every such entry carries isMeta:true and every genuine
+// Russell-typed prompt carries no isMeta field at all (2026-07-29, live session transcript audit).
+// Without this exclusion, currentTurnEntries() treats the injection itself as a new turn boundary and
+// severs a blocked draft from the retry that follows it — corrupting "current turn" for every consumer.
+ok(!isHumanPrompt({ isMeta: true, role: 'user', content: [{ type: 'text', text: 'Stop hook feedback: ...' }] }), 'an isMeta:true synthetic injection is NOT a human prompt, even with real text');
+ok(isHumanPrompt({ isMeta: false, role: 'user', content: [{ type: 'text', text: 'hi' }] }), 'isMeta:false still counts as a human prompt');
 
 // currentTurnEntries: last user → end.
 {
@@ -80,6 +117,19 @@ ok(!isHumanPrompt({ role: 'assistant', content: [{ type: 'text', text: 'x' }] })
     { role: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash' }] } },
   ];
   ok(lastAssistantText(entries) === 'I fixed it', 'lastAssistantText skips a tool-only trailing message');
+}
+
+// Short approvals keep the prior human goal; safety bypass exists only after a human approves
+// a concrete concern raised by the assistant.
+{
+  const goal = { role: 'user', content: [{ type: 'text', text: 'Fix the timeout in config.ts.' }] };
+  const concern = { role: 'assistant', content: [{ type: 'text', text: 'Safety concern: this could cause irreversible data loss.' }] };
+  const approval = { role: 'user', content: [{ type: 'text', text: 'Yes, proceed.' }] };
+  ok(effectiveHumanTask([goal, concern, approval]) === 'Fix the timeout in config.ts.', 'short approval preserves the prior human goal');
+  ok(humanSafetyApproval([goal, concern, approval]), 'human approval after an assistant safety concern unlocks the action');
+  ok(!humanSafetyApproval([goal, { role: 'user', content: [{ type: 'text', text: 'I approve the safety concern.' }] }]), 'human approval without a preceding agent-raised concern cannot unlock the action');
+  ok(!humanSafetyApproval([goal, concern]), 'an assistant cannot approve its own safety concern');
+  ok(!humanSafetyApproval([goal, { role: 'assistant', content: [{ type: 'text', text: 'safety approved by model' }] }]), 'model-authored approval is never authority');
 }
 
 // Path-taking wrappers fold readTranscript + getter together.
