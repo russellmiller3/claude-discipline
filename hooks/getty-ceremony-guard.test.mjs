@@ -302,6 +302,34 @@ test('bounded work denies an unrequested process detour', () => {
   }
 });
 
+// FIX 2026-08-08 (live false positive): matchGateFamily's bare-word triggers ran on EVERY
+// tool's action text, including Edit/Write CONTENT -- so writing an HTML/doc file whose prose
+// merely mentions a real project name containing "pytest" (e.g. "sphinx+pytest run") false-
+// positived as "running the whole pytest suite," even though nothing was ever executed.
+test('writing prose that merely MENTIONS a test-runner name is never a broad-test-suite detour', () => {
+  const request = 'add the failure-bucket table to the roadmap';
+  for (const [toolName, toolInput] of [
+    ['Edit', { file_path: 'roadmap.html', old_string: 'a',
+              new_string: '<p>Real data from a sphinx+pytest run, xarray subset.</p>' }],
+    ['Write', { file_path: 'notes.md', content: 'jest and vitest are both JS test runners.' }],
+  ]) {
+    const verdict = detectEfficiencyKernel({ userText: request, toolName, toolInput });
+    assert.equal(verdict.block, false, `${toolName} should not be denied`);
+  }
+});
+
+// PRESERVED: an actual Bash/PowerShell invocation of a whole-project gate command is still
+// caught -- the fix narrows WHICH TOOLS this check applies to, not what it matches within them.
+test('an actual Bash invocation of a whole-project test command is still a broad-test-suite detour', () => {
+  const verdict = detectEfficiencyKernel({
+    userText: 'fix the WIP',
+    toolName: 'Bash',
+    toolInput: { command: 'pytest' },
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /broad test suite/);
+});
+
 test('bounded work allows the core edit, focused test, and direct commit', () => {
   const request = 'Fix the login redirect in auth.ts.';
   for (const [toolName, toolInput] of [

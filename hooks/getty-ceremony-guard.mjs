@@ -347,7 +347,16 @@ function processDetour(request, name, action, prior, current) {
   if (shipRitualDocAfterCommit(prior, current)) return '';
   if (!isReadOnlyTool && /handoff\.md/i.test(action) && !/\bhandoff\b/i.test(askedFor)) return 'handoff maintenance';
   if ((/(?:websearch|webfetch|exa|research)/i.test(name) || /\b(?:curl|wget)\s+https?:\/\/(?!localhost|127\.0\.0\.1)/i.test(action)) && !/\b(?:research|source|web|current|latest)\b/i.test(askedFor)) return 'external research';
-  if (matchGateFamily(action) && !/\b(?:full|broad|all|suite|repository)\s+(?:test|gate|check)|\btest\s+suite\b/i.test(askedFor)) return 'a broad test suite';
+  // SCOPED TO COMMAND-EXECUTION TOOLS 2026-08-08 (live false positive, same root cause as the
+  // plan-artifact/handoff-maintenance content-vs-target bugs above): matchGateFamily's bare-word
+  // triggers (a Python test-runner name, a JS test-runner name, etc) are meant to catch a REAL
+  // command invocation, but this check ran on `action` for EVERY tool -- so writing an HTML/doc
+  // file whose PROSE merely mentions a real project name containing one of those trigger words
+  // false-positived as "running the whole [runner] suite." Only Bash/PowerShell tool calls
+  // actually EXECUTE their input; an Edit/Write's content is never itself an invocation, whatever
+  // words happen to appear in it.
+  const isCommandExecutionTool = /^(?:bash|powershell)$/i.test(name);
+  if (isCommandExecutionTool && matchGateFamily(action) && !/\b(?:full|broad|all|suite|repository)\s+(?:test|gate|check)|\btest\s+suite\b/i.test(askedFor)) return 'a broad test suite';
   return '';
 }
 
