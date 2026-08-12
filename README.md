@@ -437,3 +437,5 @@ change the rules, encode your own opinions.
 **Commercial or for-profit use requires a paid license** — see
 [COMMERCIAL.md](COMMERCIAL.md). The hooks are easy to copy; the value is the
 system. If it saves your team engineering time, it's worth a license.
+
+- `wall-text-guard` — reply-length rule that now recognizes a *teaching* question in the user's own words and lifts its paragraph/word caps, because a length-only gate cannot tell "terse and clear" from "terse and impenetrable". Walls and shipping turns still blocked. See `docs/HOOKBOOK.md`.
