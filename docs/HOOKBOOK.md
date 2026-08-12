@@ -284,3 +284,33 @@ Shared libs: `lib/buildFingerprint.mjs` (content-based dist provenance); `lib/tr
 | `absence-claim-guard.mjs` | (2026-07-17, Stop) Blocks a reply that asserts a code CAPABILITY is absent ("no `<X>` API/method", "net-new", "not built", "`<X>` doesn't exist", "missing the `<X>` capability") when NO repo-wide search ran that turn — only a single-file grep or none. Every absence phrase is tied to a capability noun (api/method/function/tool/module/engine/…) so innocent "there's no need to"/"no problem"/"the file doesn't exist" never trip it; the claim clears on a Grep with no single-file path, a Glob, or a Bash `grep -r`/`rg`/`git grep`/`find -name`. Built after a one-file grep produced a false "this capability is missing" alarm (the capability lived in another focused module). An absence-claim is a factual claim — it earns the fact-check bar. Fail-open; escape `absence-verified: <where I searched>`. Locked by `absence-claim-guard.test.mjs` (18 tests). |
 | `check-runner-logger-before-build.mjs` | (2026-07-15, PreToolUse Write; extended 2026-07-16) Blocks a Write of a NEW source file under a `programming/` project when a sibling `runner`/`Logger` shared lib is reachable and the file shows no sign of reusing it. Fires on EITHER of two signals: (a) infra-shaped vocabulary (concurrency/retry/pod/telemetry/logging — the original), or (b) **experiment identity** — the file IS an experiment by naming convention (`exp<N>_*.py`, `runpod_exp<N>.py`, `modal_*.py`) or by content (2+ of train/fit/cuda/checkpoint/epoch/runpod/modal-run), so a clean experiment script with zero infra-smell vocabulary still gets checked. Reuse the shared plumbing: `programming/runner` owns retry/resume/concurrency/pulses/telemetry + `TrainingLifecycle` (pod identity, checkpoint rescue, off-machine publish, guarded teardown); `programming/Logger` owns the validated+redacted log shape. Passes the moment the file references reuse (`from runner`, `TrainingLifecycle`, `TelemetryRecorder`, `from logger`, `StructuredLogger`, …). Built after a training script was written without opening `programming/runner`, inferring its API from a sibling's imports; extended after experiment scripts with no infra vocabulary were found sailing past the original check. **(2026-07-19 token-void fix):** the self-cert token was a blanket rubber-stamp — a new experiment worker cloning `ProcessPoolExecutor`+hand-rolled `pulse`/`retry` passed the moment it carried the token in a docstring. Now ANY STRONG plumbing signal VOIDS the token; the only escapes then are a real `runner` import or the env override. The token still exempts genuine domain science (model + mask, no infra). Override: `runner-logger-checked` token (unless strong plumbing present), or `CHECK_RUNNER_LOGGER_BEFORE_BUILD_OK=1`. Locked by `check-runner-logger-before-build.test.mjs` (34 tests). |
 | `retell-deploy-guard.mjs` | (2026-07-19, Stop, TEETH, project-scoped by trigger) Blocks stop when a session MINTED a version-locked Retell voice agent (ran `make-{party,owner}-agent.mjs`) but left the cutover half-done: the matching Cloudflare secret was never repointed via `wrangler secret put`, OR the new agent id (parsed from the script's `NEW [OWNER] AGENT:` output) isn't recorded in CHANGELOG/HANDOFF. Minting without repointing = an orphan while the live line runs the old brain; an unrecorded id makes the next rebuild clone a STALE base and silently revert live prompt changes. Gates on the real commands + the id on disk, never a self-asserted claim. No-ops unless a make-*-agent run appears. Escape: `retell-deploy-ok: <why>`. **(PreToolUse half, 2026-07-19)** ALSO denies a `make-{party,owner}-agent.mjs` run BEFORE it starts if the script's hardcoded clone-base differs from the current-live id ARCHITECTURE.md records — cloning a stale base silently reverts live prompt changes. Provable-only (hardcoded base + differing record), fail-open, escape `stale-base-ok: <why>`. Locked by `retell-deploy-guard.test.mjs` (22 tests: full-deploy passes, base-matches-live/dynamic-base/no-record must-allows, escape, fail-open). |
+
+## `wall-text-guard` — length rule, with room to teach (added 2026-08-11)
+
+Enforces the reply-shape rule: no more than 2 prose paragraphs, no paragraph over 3 lines, no
+unbroken block over 110 words, and a total-word budget (220 explaining / 400 shipping).
+Implemented once in `lib/prose-shape.mjs`; the hook file only re-exports and delegates to
+`style-governor`.
+
+**The trap this hook fell into, and the fix.** A length-only gate cannot tell *terse and clear*
+from *terse and impenetrable*, so it pushes every reply shorter and denser — including the ones
+whose whole job is to make a human understand a mechanism. When the operator's rule set also
+contained a "write less" rule AND an "understanding beats brevity" rule, every tie broke toward
+compression and produced correct, unreadable tables. The operator's verdict was literal: *"I
+dont understand this"*, then *"nothing in hooks seems to work."*
+
+**`TEACHING_REQUEST_RE`** detects a mechanism question in the USER's own words (`why`, `how does`,
+`explain`, `I don't understand`, `thoughts?`, `plainly`) and lifts the paragraph-count and
+total-word caps, because a teaching answer is structurally 3-4 paragraphs (concrete picture → walk
+it → name the surprise → map to real names).
+
+**The teeth that deliberately do NOT move:**
+- The >110-word unbroken-wall check still fires on every turn, including teaching ones. Paragraph
+  *count* never protected readability; the wall check does.
+- The lift never applies on a shipping turn — that's a status beat, not a lesson.
+- It reads the USER's message (`firstUserText` filters `role === 'user'`), never the assistant's
+  own reply, so the model cannot self-grant the exemption by writing something that merely looks
+  like a lesson.
+
+Escape: `style-override: <why>`. Locked by `wall-text-guard.test.mjs` (23 tests, 5 of them pinning
+the teaching lift in both directions).
