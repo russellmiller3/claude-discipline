@@ -289,11 +289,26 @@ function isGuardRefusal(record) {
 // A source-control bookkeeping command's exit code says nothing about whether the PRODUCT
 // works, so it can never be the live proof a repair lease locks onto. Behavior proofs are
 // tests, builds, lints, smokes, launches, and deploys — all still matched by LIVE_PROOF_RE.
+// Exempt ONLY a command that is bookkeeping end to end. Red-teaming the first cut of this
+// fix caught it exempting `pytest && git commit` — the commonest shape there is — which would
+// have silently removed lease protection from every test-then-commit chain. So every segment
+// must be bookkeeping (or inert glue); one real proof verb anywhere keeps the lease armable.
 const SOURCE_CONTROL_BOOKKEEPING_RE =
-  /\bgit\s+(?:commit|add|stage|checkout|switch|restore|branch|worktree|stash|tag|remote|config|rev-parse|for-each-ref)\b/i;
+  /^\s*git\s+(?:commit|add|stage|checkout|switch|restore|branch|worktree|stash|tag|remote|config|rev-parse|for-each-ref)\b/i;
+const INERT_GLUE_RE = /^\s*(?:cd|echo|true|set\s|export\s|\$?\{?[A-Za-z_]\w*=)/i;
 
 function isSourceControlBookkeeping(record) {
-  return SOURCE_CONTROL_BOOKKEEPING_RE.test(inputText(record?.input));
+  const command = toolCommandText(record?.input);
+  if (typeof command !== 'string' || !command.trim()) return false;
+  const segments = command
+    .split(/&&|\|\||[;|]/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  if (!segments.length) return false;
+  return segments.every(
+    (segment) =>
+      SOURCE_CONTROL_BOOKKEEPING_RE.test(segment) || INERT_GLUE_RE.test(segment),
+  );
 }
 
 function isLiveProofFailure(record, userText) {
