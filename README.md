@@ -117,6 +117,7 @@ known-words list; regression test added.*
 | `require-learnings-ack` | PreToolUse(Edit) | Blocks code edits until you've actually read the surfaced lesson |
 | `learnings-write-nudge` | PostToolUse+Stop | Blocks stop when you fixed a real bug but wrote no learning |
 | `learnings-distill-nudge` | SessionStart | When the raw `learnings.md` pile has grown (8+ new lessons, or a smaller backlog older than a week), nudges to run `/distill-learnings` — the batch first-principles pass that clusters the loose gotchas by root cause, consolidates, and proposes an *enforced hook/rule* for anything that recurred. Advisory (never auto-runs the agent). |
+| `getty-ceremony-guard` | PreToolUse+Stop | Efficiency + repair lease. After a failed live proof: two diagnostic reads, one repair, then the exact proof again. Source-control bookkeeping (a whole command of `git commit`/`add`/`checkout`/…) can never arm the lease — only real behavior proofs can, so `pytest && git commit` still counts |
 | `getty-no-repeat-mistakes` | UserPromptSubmit+Stop | On a correction, requires a learning; on a REPEAT correction, a learning already failed — requires asking to build a hook instead |
 | `handoff-continuity` | SessionStart+UserPromptSubmit+Stop | Fires every ~5 turns (and on compaction/"handoff"); blocks stop until `HANDOFF.md` is re-pruned whole-file, not just appended |
 | `handoff-freshness-guard` | Stop | Blocks stale, mechanically checkable handoff claims: finished BUILD targets, contradictory active/terminal status, absent live pod IDs, and moved branch heads |
