@@ -1,7 +1,63 @@
 // bench-pattern-guard.test.mjs — run: node --test ~/.claude/hooks/bench-pattern-guard.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { looksLikeRunner, missingMarkers } from './bench-pattern-guard.mjs';
+import {
+  looksLikeRunner,
+  missingMarkers,
+  sweepsDestructivelyOnLiveRoot,
+} from './bench-pattern-guard.mjs';
+
+// --- the 2026-08-15 near-miss: a profiler sweeping the LIVE checkout ---------
+// CodeServo plan 255 proposed timing every action "against the repo itself".
+// The registry it walked held delete_file, git_commit, checkout and run_python.
+
+const LIVE_ROOT_SWEEP = `"""Profile every CodeServo action on the real repository."""
+from codeservo_tool_specs import TOOL_SPECS
+ROOT = Path("C:/Users/rmill/Desktop/programming/codeservo")
+for spec in TOOL_SPECS:
+    if spec["name"] == "delete_file":
+        adapter.call("delete_file", {"file": target})
+    adapter.call(spec["name"], arguments_for(spec))`;
+
+const COPIED_ROOT_SWEEP = `"""Profile every CodeServo action on a disposable copy."""
+import shutil, tempfile
+from codeservo_tool_specs import TOOL_SPECS
+ROOT = Path(tempfile.mkdtemp(prefix="codeservo-profile-"))
+shutil.copytree(LIVE_CHECKOUT, ROOT, dirs_exist_ok=True)
+for spec in TOOL_SPECS:
+    adapter.call(spec["name"], arguments_for(spec))  # delete_file included, on the copy`;
+
+const READ_ONLY_SWEEP = `from codeservo_tool_specs import TOOL_SPECS
+for spec in TOOL_SPECS:
+    adapter.call("search_code", {"query": spec["name"]})`;
+
+test('a sweep that walks the tool registry destructively on a live root is blocked', () => {
+  assert.equal(
+    sweepsDestructivelyOnLiveRoot('scripts/codeservo_action_profile.py', LIVE_ROOT_SWEEP),
+    true,
+  );
+});
+
+test('the same sweep against a copied root passes', () => {
+  assert.equal(
+    sweepsDestructivelyOnLiveRoot('scripts/codeservo_action_profile.py', COPIED_ROOT_SWEEP),
+    false,
+  );
+});
+
+test('a read-only registry sweep is not blocked', () => {
+  assert.equal(
+    sweepsDestructivelyOnLiveRoot('scripts/codeservo_action_profile.py', READ_ONLY_SWEEP),
+    false,
+  );
+});
+
+test('the destructive-sweep check ignores test files', () => {
+  assert.equal(
+    sweepsDestructivelyOnLiveRoot('scripts/test_action_profile.test.mjs', LIVE_ROOT_SWEEP),
+    false,
+  );
+});
 
 const RUNNER = `import { TASKS } from './suite.mjs';
 async function runOneTask(task){ await brain.runAgent(task.prompt); }

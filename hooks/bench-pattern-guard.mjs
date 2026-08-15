@@ -55,6 +55,55 @@ const HAS_HANDROLLED_RETRY = /(max_attempts|maxAttempts|maxRetries|max_retries)\
 
 const OVERRIDE = /bench-pattern-override/i;
 
+// --- Fifth marker: a sweep must never run against the LIVE checkout ---------
+//
+// Added 2026-08-15. A CodeServo plan proposed profiling every action "against
+// the repo itself" for realistic size. The tool registry it enumerated held
+// delete_file, move_file, git_commit, merge, checkout, rollback and run_python.
+// Running that sweep would have deleted files, moved HEAD, and executed
+// arbitrary code inside the live working checkout. A red-team pass caught it,
+// which is luck, not a system.
+//
+// This check is deliberately NOT gated on BENCH_PATH: a profiler lives wherever
+// it likes (scripts/, tools/, the repo root), and the damage does not care.
+const ENUMERATES_TOOL_REGISTRY =
+  /(TOOL_SPECS|REPOSITORY_TOOL_SPECS|COCKPIT_TOOL_SPECS|list_tools\s*\(\)|for\s+\w+\s+in\s+\w*(?:tools|specs|actions)\b)/i;
+const DESTRUCTIVE_OPERATIONS =
+  /\b(delete_file|move_file|git_commit|rollback|run_python|rmtree|shutil\.rmtree)\b/;
+// Any sign the target root is a copy, a temp dir, or is explicitly refused when
+// it resolves inside the live checkout.
+const DISPOSABLE_ROOT =
+  /(mkdtemp|tempfile\.|gettempdir|copytree|materialize_starting_repository|disposable\s+cop(?:y|ies)|scratchpad|refus\w*[\s\S]{0,60}live\s+checkout|must\s+not\s+be\s+the\s+live)/i;
+
+/** Does this file sweep a tool registry destructively without a disposable root? */
+export function sweepsDestructivelyOnLiveRoot(filePath, source) {
+  const lower = (filePath || '').toLowerCase();
+  if (/\.test\.|\.spec\./.test(lower)) return false;
+  if (!/\.(mjs|cjs|js|ts|py)$/.test(lower)) return false;
+  if (!ENUMERATES_TOOL_REGISTRY.test(source)) return false;
+  if (!DESTRUCTIVE_OPERATIONS.test(source)) return false;
+  return !DISPOSABLE_ROOT.test(source);
+}
+
+function sweepDenial(filePath) {
+  return `BLOCKED — this sweep would run destructive tools against a live checkout.
+
+${filePath} enumerates a tool registry and executes what it finds, and the registry it
+walks includes destructive operations (delete_file / move_file / git_commit / rollback /
+run_python / rmtree). Nothing in the file shows the target root is disposable.
+
+Run the sweep against a COPY, and refuse a root inside the live checkout:
+  - copy the repository first (tempfile.mkdtemp + shutil.copytree, or a materialized fixture);
+  - assert the resolved target root is NOT inside the working checkout, and exit if it is;
+  - delete the copy when the run finishes.
+
+Caught for real on 2026-08-15 (CodeServo plan 255): a proposed action profiler was one
+red-team pass away from running delete_file and checkout against live work. Size realism
+comes from copying a big repo, never from pointing at the live one.
+
+Bypass only for a genuinely read-only sweep: put bench-pattern-override in the file.`;
+}
+
 /** Is this the runner that actually drives the benchmark loop (vs a helper module)? */
 export function looksLikeRunner(filePath, source) {
   if (!BENCH_PATH.test(filePath || '')) return false;
@@ -115,6 +164,21 @@ function main() {
   const source = input.content || '';
   if (!source) { process.exit(0); return; }
   if (process.env.BENCH_PATTERN_OVERRIDE === '1' || OVERRIDE.test(source)) { process.exit(0); return; }
+
+  // Checked BEFORE the runner shape: a destructive sweep on the live checkout is
+  // damaging whether or not it is parallel, and it need not live under bench/.
+  if (sweepsDestructivelyOnLiveRoot(filePath, source)) {
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: sweepDenial(filePath),
+      },
+    }));
+    process.exit(0);
+    return;
+  }
+
   if (!looksLikeRunner(filePath, source)) { process.exit(0); return; }
 
   const missing = missingMarkers(source);
