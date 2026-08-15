@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { classifyCommit, trailingInfraOnlyStreak, repeatedSameOpCount, detectCeremony, isInfraPath, matchGateFamily, classifyGateOutcome, detectDuplicateVerification, detectSimpleScalarToolBudget, detectSimpleEditCeremony, detectEfficiencyKernel, latestNormalizedTurnSummary } from './getty-ceremony-guard.mjs';
+import { classifyCommit, trailingInfraOnlyStreak, repeatedSameOpCount, detectCeremony, isInfraPath, matchGateFamily, classifyGateOutcome, detectDuplicateVerification, detectSimpleScalarToolBudget, detectSimpleEditCeremony, detectEfficiencyKernel, detectRepairLease, latestNormalizedTurnSummary } from './getty-ceremony-guard.mjs';
 
 const hookPath = join(dirname(fileURLToPath(import.meta.url)), 'getty-ceremony-guard.mjs');
 
@@ -316,6 +316,100 @@ test('writing prose that merely MENTIONS a test-runner name is never a broad-tes
     const verdict = detectEfficiencyKernel({ userText: request, toolName, toolInput });
     assert.equal(verdict.block, false, `${toolName} should not be denied`);
   }
+});
+
+// FIX 2026-08-15 (live deadlock): WORKFLOW_EXPANSION_RE ran against the whole stringified action,
+// which includes edit CONTENT -- so editing a source file that merely MENTIONS the setup commands
+// was classified as performing that setup. Editing this very guard, whose own regexes contain the
+// words, became unfixable: the commit guard demanded a branch, and this check refused every edit
+// that named one. Third instance of the same defect already fixed twice for plan artifacts.
+test('editing a file whose CONTENT mentions branch setup is not itself branch setup', () => {
+  const request = 'fix the guard';
+  for (const [toolName, toolInput] of [
+    ['Edit', {
+      file_path: 'hooks/some-guard.mjs',
+      old_string: 'const SETUP_RE = /old/i;',
+      new_string: 'const SETUP_RE = /git\\s+worktree\\s+add|git\\s+switch\\s+-c/i;',
+    }],
+    ['Write', {
+      file_path: 'docs/runbook.md',
+      content: 'Land the work with git merge --ff-only after the branch is green.',
+    }],
+  ]) {
+    const verdict = detectEfficiencyKernel({ userText: request, toolName, toolInput });
+    assert.equal(verdict.block, false, `${toolName} should not be denied`);
+  }
+});
+
+test('actually running the setup command is still an unrequested detour', () => {
+  const verdict = detectEfficiencyKernel({
+    userText: 'fix the guard',
+    toolName: 'Bash',
+    toolInput: { command: 'git worktree add ../scratch -b feature/spelunk' },
+  });
+  assert.equal(verdict.block, true, 'a real setup command must still be caught');
+  assert.match(verdict.reason, /EFFICIENCY/);
+});
+
+// FIX 2026-08-09 (live false positive, hit 4 times same session): a request phrased in ordinary
+// language -- never using the literal word "research" -- was denied as an unrequested detour even
+// though it explicitly asked for the external lookup. Real blocked message (verbatim, kept as the
+// regression case): "your next move is to figure out if tts stt is best on modal runpod or
+// somewehre else, and test out tts stt wiuth your own audioscripts to see if we can get it to good
+// quality or not." Widened askedFor synonyms: figure out, find out, look up, check/recheck,
+// verify, compare, confirm, test out.
+test('a request phrased without the literal word "research" is not an unrequested external-research detour', () => {
+  const requests = [
+    'your next move is to figure out if tts stt is best on modal runpod or somewehre else, and test out tts stt wiuth your own audioscripts to see if we can get it to good quality or not.',
+    'find out what the real GPU rental price is before we decide.',
+    'look up the current Twilio rate.',
+    'recheck the Twilio cost per min per hour from as real data as you can get.',
+    'can you verify the pricing on that.',
+    'compare Modal and RunPod for this workload.',
+  ];
+  for (const request of requests) {
+    const verdict = detectEfficiencyKernel({
+      userText: request,
+      toolName: 'WebFetch',
+      toolInput: { url: 'https://example.com/pricing', prompt: 'get pricing' },
+    });
+    assert.equal(verdict.block, false, `should not deny: "${request}"`);
+  }
+});
+
+// FIX 2026-08-09 (same session, second occurrence): "is there a hosted X service" -- a plain
+// yes/no question that implies "go find out" -- hit the identical block for the identical reason
+// as the fix above, because it uses none of THOSE synonyms either. Real blocked message
+// (verbatim): "is ther a hosted kokor service since sounds better than neural?" Widened: is
+// there, are there, does X exist, what options, what alternatives.
+test('"is there a hosted X" and similar yes/no lookup phrasings are not an unrequested external-research detour', () => {
+  const requests = [
+    'is ther a hosted kokor service since sounds better than neural?',
+    'are there any cheaper alternatives to this provider?',
+    'does a managed version of this model exist?',
+    'what options do we have for hosting this?',
+    'what alternatives exist to Deepgram?',
+  ];
+  for (const request of requests) {
+    const verdict = detectEfficiencyKernel({
+      userText: request,
+      toolName: 'WebSearch',
+      toolInput: { query: 'hosted kokoro tts api' },
+    });
+    assert.equal(verdict.block, false, `should not deny: "${request}"`);
+  }
+});
+
+// PRESERVED: a request with NONE of the research-intent phrasings is still caught -- the fix
+// widens the exemption vocabulary, it does not remove the check.
+test('external research with none of the exemption phrasings is still a detour', () => {
+  const verdict = detectEfficiencyKernel({
+    userText: 'Fix the login redirect in auth.ts.',
+    toolName: 'WebSearch',
+    toolInput: { query: 'login redirect fix' },
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /external research/);
 });
 
 // PRESERVED: an actual Bash/PowerShell invocation of a whole-project gate command is still
@@ -1122,4 +1216,242 @@ test('landing language counts as REQUESTING the merge', () => {
       toolInput: { command: 'bash scripts/land.sh /repo mybranch' },
     }).block, false, ask);
   }
+});
+
+// Getty fix 2026-08-12: the advisory sidequest rule burned two hours because every individual
+// setup action looked locally reasonable. The enforceable transition is a repair lease: after a
+// failed live proof, one bounded repair is allowed, then the exact failed proof must run next.
+const LIVE_PROOF = {
+  name: 'PowerShell',
+  input: { command: 'py -3 -X utf8 scripts/codeservo_codex.py doctor' },
+};
+
+function failed(record, resultText = 'Exit code: 1') {
+  return { ...record, isError: true, resultText };
+}
+
+function passed(record, resultText = 'Exit code: 0') {
+  return { ...record, isError: false, resultText };
+}
+
+test('repair lease allows one repair after a failed live proof', () => {
+  const verdict = detectRepairLease({
+    userText: 'g',
+    completedTools: [failed(LIVE_PROOF)],
+    toolName: 'Edit',
+    toolInput: { file_path: 'hooks/codex-doctor.mjs', old_string: 'bad', new_string: 'good' },
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('repair lease requires the exact failed proof immediately after the repair', () => {
+  const repair = passed({
+    name: 'Edit',
+    input: { file_path: 'hooks/codex-doctor.mjs', old_string: 'bad', new_string: 'good' },
+  });
+  const verdict = detectRepairLease({
+    userText: 'g',
+    completedTools: [failed(LIVE_PROOF), repair],
+    toolName: 'PowerShell',
+    toolInput: { command: 'npm install' },
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /REPAIR LEASE/);
+  assert.match(verdict.reason, /codeservo_codex\.py doctor/);
+});
+
+test('repair lease allows the exact failed proof after the repair', () => {
+  const repair = passed({
+    name: 'Edit',
+    input: { file_path: 'hooks/codex-doctor.mjs', old_string: 'bad', new_string: 'good' },
+  });
+  const verdict = detectRepairLease({
+    userText: 'g',
+    completedTools: [failed(LIVE_PROOF), repair],
+    toolName: LIVE_PROOF.name,
+    toolInput: LIVE_PROOF.input,
+  });
+  assert.equal(verdict.block, false);
+});
+
+// An inline-script proof cannot be replayed byte-for-byte after a repair, because fixing the
+// script IS editing the command. Treating the repaired run as a different action spent the sole
+// repair pass, left the original unrunnable, and jammed the lease for the rest of the turn with
+// no legal move -- observed 2026-08-15, where it went on to refuse a heredoc re-run, a written
+// script file, an MCP write, a plain Write, and even a read-only Read.
+const INLINE_PROOF = {
+  name: 'Bash',
+  input: {
+    command: "cd /repo && py -3 - <<'PYEOF'\nimport json\nprint(record['result_id'])\nPYEOF",
+    description: 'seal the benchmark record',
+  },
+};
+
+const INLINE_PROOF_REPAIRED = {
+  name: 'Bash',
+  input: {
+    command: "cd /repo && py -3 - <<'PYEOF'\nimport json\nprint(record['event_log_sha256'])\nPYEOF",
+    description: 'seal the benchmark record',
+  },
+};
+
+test('repair lease: a repaired inline script counts as replaying its own proof', () => {
+  const verdict = detectRepairLease({
+    userText: 'go',
+    completedTools: [failed(INLINE_PROOF), passed(INLINE_PROOF_REPAIRED)],
+    toolName: 'Write',
+    toolInput: { file_path: 'summary.json', content: 'sealed' },
+  });
+  assert.equal(verdict.block, false, 'a green repaired replay must clear the lease');
+});
+
+test('repair lease: the repaired inline script is itself allowed to run', () => {
+  const verdict = detectRepairLease({
+    userText: 'go',
+    completedTools: [failed(INLINE_PROOF)],
+    toolName: INLINE_PROOF_REPAIRED.name,
+    toolInput: INLINE_PROOF_REPAIRED.input,
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('repair lease: an inline repair does not excuse an unrelated command', () => {
+  const verdict = detectRepairLease({
+    userText: 'go',
+    completedTools: [
+      failed(INLINE_PROOF),
+      passed({ name: 'Edit', input: { file_path: 'seal.py', old_string: 'a', new_string: 'b' } }),
+    ],
+    toolName: 'Bash',
+    toolInput: { command: 'cd /repo && npm run something-else' },
+  });
+  assert.equal(verdict.block, true, 'the lease must still stop real sidequests');
+});
+
+// FIX 2026-08-15: a sibling guard's refusal armed the lease, which then admitted only a byte-exact
+// replay of the command that guard refuses again -- no legal move for the rest of the turn.
+test('a sibling guard refusal never arms a repair lease', () => {
+  const refused = {
+    name: 'Bash',
+    input: { command: 'cd /repo && git commit -q -m "fix: land it"' },
+    isError: true,
+    resultText: 'Commit to main blocked.\n\nCurrent branch: main\n'
+      + 'Rule: never commit CODE directly to main. Always work on a feature/ or fix/ branch.\n'
+      + 'Override for deliberate main commits (version bumps, doc-only, repo maintenance):\n'
+      + '  COMMIT_MAIN_OVERRIDE=1',
+  };
+  const verdict = detectRepairLease({
+    userText: 'go',
+    completedTools: [refused],
+    toolName: 'Bash',
+    toolInput: { command: 'cd /repo && git switch -c fix/land-it' },
+  });
+  assert.equal(verdict.block, false, 'the remedy the guard printed must stay reachable');
+});
+
+test('a real failed live proof still arms the repair lease', () => {
+  const verdict = detectRepairLease({
+    userText: 'go',
+    completedTools: [
+      failed(LIVE_PROOF),
+      passed({ name: 'Edit', input: { file_path: 'a.mjs', old_string: 'x', new_string: 'y' } }),
+    ],
+    toolName: 'Bash',
+    toolInput: { command: 'npm run something-else' },
+  });
+  assert.equal(verdict.block, true, 'a genuine execution failure must still arm the lease');
+});
+
+test('repair lease permits at most two diagnostic reads before repair or replay', () => {
+  const reads = [
+    passed({ name: 'Read', input: { file_path: 'one.mjs' } }),
+    passed({ name: 'Grep', input: { pattern: 'doctor', path: 'hooks' } }),
+  ];
+  const verdict = detectRepairLease({
+    userText: 'g',
+    completedTools: [failed(LIVE_PROOF), ...reads],
+    toolName: 'Read',
+    toolInput: { file_path: 'three.mjs' },
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /two diagnostic reads/);
+});
+
+test('a second failed live proof freezes new repair work until a new human turn', () => {
+  const repair = passed({
+    name: 'Edit',
+    input: { file_path: 'hooks/codex-doctor.mjs', old_string: 'bad', new_string: 'good' },
+  });
+  const verdict = detectRepairLease({
+    userText: 'g',
+    completedTools: [failed(LIVE_PROOF), repair, failed(LIVE_PROOF, 'Exit code: 2')],
+    toolName: 'Edit',
+    toolInput: { file_path: 'hooks/another-config.mjs', old_string: 'x', new_string: 'y' },
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason, /second failed replay/);
+  assert.match(verdict.reason, /new instruction/);
+});
+
+test('a green replay clears the repair lease', () => {
+  const repair = passed({
+    name: 'Edit',
+    input: { file_path: 'hooks/codex-doctor.mjs', old_string: 'bad', new_string: 'good' },
+  });
+  const verdict = detectRepairLease({
+    userText: 'g',
+    completedTools: [failed(LIVE_PROOF), repair, passed(LIVE_PROOF)],
+    toolName: 'PowerShell',
+    toolInput: { command: 'py -3 -X utf8 scripts/next-core-proof.py' },
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('failed read-only probes do not arm a repair lease', () => {
+  const verdict = detectRepairLease({
+    userText: 'g',
+    completedTools: [failed({ name: 'Grep', input: { pattern: 'missing', path: 'scripts' } })],
+    toolName: 'Read',
+    toolInput: { file_path: 'HANDOFF.md' },
+  });
+  assert.equal(verdict.block, false);
+});
+
+test('end-to-end PreToolUse denies a sidequest after one completed repair', () => {
+  const { path, dir } = writeTranscript('repair-lease-tx-', [
+    { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'g' }] } },
+    {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'proof-1', ...LIVE_PROOF }] },
+    },
+    {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'proof-1', is_error: true, content: 'Exit code: 1' }] },
+    },
+    {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{
+        type: 'tool_use', id: 'repair-1', name: 'Edit',
+        input: { file_path: 'hooks/codex-doctor.mjs', old_string: 'bad', new_string: 'good' },
+      }] },
+    },
+    {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'repair-1', content: 'Applied' }] },
+    },
+  ]);
+  try {
+    const run = spawnSync(process.execPath, [hookPath], {
+      input: JSON.stringify({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'PowerShell',
+        tool_input: { command: 'npm install' },
+        transcript_path: path,
+      }),
+      encoding: 'utf8',
+    });
+    assert.match(run.stdout || '', /"permissionDecision"\s*:\s*"deny"/);
+    assert.match(run.stdout || '', /REPAIR LEASE/);
+    assert.match(run.stdout || '', /codeservo_codex\.py doctor/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

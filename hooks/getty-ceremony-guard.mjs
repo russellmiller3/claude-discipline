@@ -159,6 +159,12 @@ const EFFICIENCY_SAME_FILE_EDIT_LIMIT = 12;
 // The same region reworked this many times is bikeshedding one passage, not composing a change.
 const EFFICIENCY_SAME_REGION_EDIT_LIMIT = 3;
 const WHOLE_FILE_REGION = ' whole-file';
+const REPAIR_DIAGNOSTIC_READ_LIMIT = 2;
+const CONTINUATION_TASK_RE = /^\s*(?:g|go|continue|focus|back\s+to\s+work|follow\s+(?:the\s+)?handoff)\b/i;
+const LIVE_PROOF_RE = /\b(?:test|verify|verification|doctor|install|launch|deploy|start|serve|build|lint|check|smoke|acceptance|benchmark|commit|run(?:ning)?)\b/i;
+const READ_ONLY_TOOL_RE = /(?:^|__)(?:read|grep|glob|search|find|list|status|diff|show|inspect|view|get|open)(?:_|$)/i;
+const READ_ONLY_COMMAND_RE = /^\s*(?:rg|grep|findstr|select-string|get-content|get-childitem|ls|dir|pwd|type|cat|head|tail|git\s+(?:status|diff|log|show|branch\s+--list)|where(?:\.exe)?|get-command)\b/i;
+const COMMAND_TOOL_RE = /(?:bash|powershell|shell_command|exec_command|command)(?:$|__)/i;
 
 function inputText(toolInput) {
   if (typeof toolInput === 'string') return toolInput;
@@ -193,7 +199,14 @@ function toolRecord(name, input, outcome = {}) {
 // the demand is read from real harness state, never from model prose (Rule 1.6). Each pattern must
 // match a guard's compound denial wording, not a bare mention of the word.
 const GUARD_DEMAND_PATTERNS = {
-  'branch, worktree, or merge setup': /(?:worktree|branch)\s+required[\s\S]{0,400}?git\s+worktree\s+add|create\s+one\s+isolated\s+branch\s+worktree/i,
+  // WIDENED 2026-08-15: the two guards that most often demand this setup -- the commit-to-main
+  // guard ("never commit CODE directly to main. Always work on a feature/ or fix/ branch") and
+  // the write-on-main guard ("you're on main. To write code, switch to a feature branch first")
+  // -- print neither "branch required ... git worktree add" nor "create one isolated branch
+  // worktree", so their demand was invisible here. Their remedy was then classified an
+  // unrequested detour and refused, while they refused the commit without it: two guards,
+  // opposite demands, no legal move. The added alternatives match the remedy each one prints.
+  'branch, worktree, or merge setup': /(?:worktree|branch)\s+required[\s\S]{0,400}?git\s+worktree\s+add|create\s+one\s+isolated\s+branch\s+worktree|git\s+switch\s+-c\s+(?:feature|fix)\/|never\s+commit\s+code\s+directly\s+to\s+main|switch\s+to\s+a\s+feature\s+branch\s+first/i,
   planning: /\bplan\s+(?:file\s+)?(?:is\s+)?required\b|\bwrite\s+the\s+plan\s+first\b/i,
   'handoff maintenance': /\bHANDOFF\.md\b[\s\S]{0,200}?\b(?:required|must\s+be\s+(?:refreshed|updated))\b/i,
   'external research': /\btwo\s+independent\s+primary\s+sources\b|\bfact-?check\s+before\s+delivery\b/i,
@@ -209,7 +222,150 @@ function guardDemandedDetour(prior, detour) {
 }
 
 function actionSignature(name, input) {
-  return `${String(name || '').toLowerCase()}|${inputText(input).replace(/\s+/g, ' ').trim().toLowerCase()}`;
+  const toolName = String(name || '').toLowerCase();
+  if (COMMAND_TOOL_RE.test(toolName)) {
+    return `${toolName}|${stripInlineScriptBody(toolCommandText(input)).toLowerCase()}`;
+  }
+  return `${toolName}|${inputText(input).replace(/\s+/g, ' ').trim().toLowerCase()}`;
+}
+
+function repairOutcomeFailed(record) {
+  if (record?.isError === true) return true;
+  return /(?:^|\n)\s*(?:script (?:failed|error)|exit code:\s*[1-9]\d*|process exited with code\s+[1-9]\d*)\b/i
+    .test(String(record?.resultText || ''));
+}
+
+// Named for the tool input it reads, so it does not shadow the local `commandText` bindings
+// further down this file, which hold an already-extracted command string.
+function toolCommandText(input) {
+  return input && typeof input === 'object' && typeof input.command === 'string'
+    ? input.command
+    : inputText(input);
+}
+
+// A live proof carried in an INLINE script cannot be replayed byte-for-byte after a repair,
+// because fixing the script IS editing the command. Signing the whole body made the repaired run
+// look like a different action: it spent the sole repair pass, left the original unrunnable, and
+// froze the turn with no legal move — the deadlock the GUARD_DEMAND_PATTERNS note above already
+// forbids, reached from a different direction. LOOSENED 2026-08-15 after that jam refused a
+// heredoc re-run, a written script file, an MCP write, a plain Write and a read-only Read in one
+// turn. Signing the invocation lets a repaired script replay its own proof, while a different
+// script path, interpreter, or working directory still reads as a separate action.
+function stripInlineScriptBody(command) {
+  return String(command || '')
+    .replace(/<<-?\s*['"]?[A-Za-z_]\w*['"]?[\s\S]*$/, '<<INLINE')
+    .replace(/(\s-c\s+)(['"])[\s\S]*$/, '$1INLINE')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isRepairDiagnosticRead(record) {
+  const name = String(record?.name || '');
+  if (READ_ONLY_TOOL_RE.test(name)) return true;
+  if (!COMMAND_TOOL_RE.test(name)) return false;
+  return READ_ONLY_COMMAND_RE.test(toolCommandText(record?.input));
+}
+
+// A refusal printed by a SIBLING guard is not a failed proof: nothing ran, so there is no cause to
+// diagnose and nothing to repair. Arming the lease on one was the third leg of a live deadlock on
+// 2026-08-15 -- the commit guard refused a commit, that refusal armed the lease, and the lease then
+// admitted only a byte-exact replay of the very command the commit guard would refuse again, with
+// no legal move left in the turn. The same principle already governs priorHasMutation below: a
+// denial from this or any sibling guard proves nothing about what the model was doing.
+const GUARD_REFUSAL_RE = /(?:^|\n)\s*(?:[A-Z][A-Z0-9 -]{2,}(?:BLOCKED|REQUIRED)\b|BLOCKED\b|STOP\b)|\bnot\s+requested\s+and\s+does\s+not\s+advance\b|\bOverride\s+for\s+deliberate\b/;
+
+function isGuardRefusal(record) {
+  return GUARD_REFUSAL_RE.test(String(record?.resultText || ''));
+}
+
+function isLiveProofFailure(record, userText) {
+  if (isGuardRefusal(record)) return false;
+  if (!repairOutcomeFailed(record) || isMutation(record) || isRepairDiagnosticRead(record)) return false;
+  const name = String(record?.name || '');
+  const action = inputText(record?.input);
+  if (LIVE_PROOF_RE.test(name) || LIVE_PROOF_RE.test(action)) return true;
+  return CONTINUATION_TASK_RE.test(String(userText || '')) && COMMAND_TOOL_RE.test(name);
+}
+
+function repairProofLabel(record) {
+  const input = record?.input;
+  let label = input && typeof input === 'object' && typeof input.command === 'string'
+    ? input.command
+    : String(record?.name || 'the failed proof');
+  label = label
+    .replace(/\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD))\s*=\s*([^\s;]+)/g, '$1=<redacted>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return label.slice(0, 220) || 'the failed proof';
+}
+
+function repairLeaseReason(detail, target) {
+  return `REPAIR LEASE — ${detail}. The locked live proof is: ${repairProofLabel(target)}. `
+    + 'One failure earns one bounded repair pass, then this exact proof must run next. '
+    + 'A second failed replay ends tool work for this turn; report it and wait for a new instruction.';
+}
+
+/**
+ * Enforce the transition that prose could not: failed live proof -> at most two reads -> one repair
+ * -> exact proof replay. A green replay clears the lease. A second failure freezes further tools
+ * until the next genuine human turn, which latestNormalizedTurnSummary scopes independently.
+ */
+export function detectRepairLease({ userText = '', completedTools = [], toolName = '', toolInput = {} } = {}) {
+  const prior = (completedTools || []).map((record) => toolRecord(record?.name, record?.input, record));
+  let lease = null;
+
+  for (const record of prior) {
+    if (!lease) {
+      if (isLiveProofFailure(record, userText)) {
+        lease = { target: record, phase: 'repair', diagnosticReads: 0 };
+      }
+      continue;
+    }
+
+    const replay = actionSignature(record.name, record.input)
+      === actionSignature(lease.target.name, lease.target.input);
+    if (replay) {
+      if (repairOutcomeFailed(record)) lease.phase = 'exhausted';
+      else lease = null;
+      continue;
+    }
+
+    if (lease.phase === 'repair' && isRepairDiagnosticRead(record)) {
+      lease.diagnosticReads += 1;
+      continue;
+    }
+
+    // The first non-read action consumes the sole repair pass. Any later non-replay action may
+    // appear in the transcript as a sibling-hook denial; it never changes or replaces the target.
+    if (lease.phase === 'repair') lease.phase = 'replay';
+  }
+
+  if (!lease) return { block: false };
+  const current = toolRecord(toolName, toolInput);
+  const exactReplay = actionSignature(current.name, current.input)
+    === actionSignature(lease.target.name, lease.target.input);
+
+  if (lease.phase === 'exhausted') {
+    return {
+      block: true,
+      reason: repairLeaseReason('the second failed replay exhausted this turn; no new repair or setup action is allowed until Russell sends a new instruction', lease.target),
+    };
+  }
+  if (exactReplay) return { block: false };
+
+  if (lease.phase === 'repair') {
+    if (!isRepairDiagnosticRead(current)) return { block: false };
+    if (lease.diagnosticReads < REPAIR_DIAGNOSTIC_READ_LIMIT) return { block: false };
+    return {
+      block: true,
+      reason: repairLeaseReason('two diagnostic reads already consumed the inspection budget; repair the proven cause or replay the proof now', lease.target),
+    };
+  }
+
+  return {
+    block: true,
+    reason: repairLeaseReason('the one repair pass has been used; this unrelated action is a sidequest', lease.target),
+  };
 }
 
 function isMutation(record) {
@@ -319,7 +475,15 @@ function processDetour(request, name, action, prior, current) {
   // the words worktree/branch/merge, so the detour check must recognise them too. Otherwise
   // the guard refuses the exact landing the human just asked for (2026-08-08: "fix the WIP"
   // was refused as unrequested setup, leaving uncommitted work with no sanctioned way to land).
-  if (!isLandingRitual && WORKFLOW_EXPANSION_RE.test(action) && !/\b(?:worktree|branch|merge|land|ship|wip|commit|uncommitted)\b/i.test(askedFor)) return 'branch, worktree, or merge setup';
+  // TIGHTENED 2026-08-15, third instance of the defect the two dated notes below already fixed
+  // for plan artifacts: WORKFLOW_EXPANSION_RE ran against the whole stringified action, which
+  // includes old_string/new_string CONTENT. Editing a source file that merely MENTIONS these
+  // words -- a guard's own regex, a doc, a regression fixture -- was classified as performing
+  // that setup and blocked. Only a shell tool can actually create one, so classify from the
+  // command. A literal string appearing IN an edit is not the edit DOING the thing.
+  const performsWorkflowExpansion = COMMAND_TOOL_RE.test(String(name || ''))
+    && WORKFLOW_EXPANSION_RE.test(action);
+  if (!isLandingRitual && performsWorkflowExpansion && !/\b(?:worktree|branch|merge|land|ship|wip|commit|uncommitted)\b/i.test(askedFor)) return 'branch, worktree, or merge setup';
   // TIGHTENED 2026-08-08 (found live while fixing the same-file edit-limit incident below): this used
   // to test PLAN_ARTIFACT_RE against the whole stringified action blob, which includes old_string/
   // new_string CONTENT -- so a test file whose fixtures merely contain the sample string
@@ -346,7 +510,20 @@ function processDetour(request, name, action, prior, current) {
   if (!isReadOnlyTool && (/update_plan/i.test(name) || targetIsPlanArtifact) && !/\bplan\b/i.test(askedFor)) return 'planning';
   if (shipRitualDocAfterCommit(prior, current)) return '';
   if (!isReadOnlyTool && /handoff\.md/i.test(action) && !/\bhandoff\b/i.test(askedFor)) return 'handoff maintenance';
-  if ((/(?:websearch|webfetch|exa|research)/i.test(name) || /\b(?:curl|wget)\s+https?:\/\/(?!localhost|127\.0\.0\.1)/i.test(action)) && !/\b(?:research|source|web|current|latest)\b/i.test(askedFor)) return 'external research';
+  // WIDENED 2026-08-09 (live false positive, hit 4 times same session): the askedFor exemption
+  // only recognized the literal words research/source/web/current/latest, so an explicit request
+  // phrased in ordinary language ("figure out if X is best", "recheck the real cost", "test out Y
+  // to see if it's good") -- never using the word "research" itself -- read as unprompted detour
+  // every time, even for a request the user stated in the SAME turn. Widened to the common
+  // synonyms people actually say instead of the word "research": figure out, find out, look up,
+  // check/recheck, verify, compare, confirm, test out. Deliberately still narrow (not a bare
+  // "\bany\b" catch-all) -- a message with none of these phrasings is still caught.
+  // WIDENED AGAIN 2026-08-09 (same session, second occurrence of this class): "is there a hosted
+  // X service" -- a yes/no question that plainly implies "go find out" -- hit the same block as
+  // the first widening, for the same reason: it uses none of the recognized synonyms either. Added
+  // is there/are there/does ... exist/what options/what alternatives, the other common ways people
+  // ask "look this up for me" without saying so explicitly.
+  if ((/(?:websearch|webfetch|exa|research)/i.test(name) || /\b(?:curl|wget)\s+https?:\/\/(?!localhost|127\.0\.0\.1)/i.test(action)) && !/\b(?:research|source|web|current|latest|figure\s+out|find\s+out|look\s?up|re?check|verify|compare|confirm|test\s+out|is\s+there|are\s+there|does\s+\S+\s+exist|what\s+options|what\s+alternatives)\b/i.test(askedFor)) return 'external research';
   // SCOPED TO COMMAND-EXECUTION TOOLS 2026-08-08 (live false positive, same root cause as the
   // plan-artifact/handoff-maintenance content-vs-target bugs above): matchGateFamily's bare-word
   // triggers (a Python test-runner name, a JS test-runner name, etc) are meant to catch a REAL
@@ -494,7 +671,14 @@ const GATE_FAMILIES = [
   { id: 'js-test', trigger: /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test(?::all)?\b/i },
   { id: 'vitest', trigger: /\bvitest\s+run\b/i },
   { id: 'jest', trigger: /\bjest\b/i },
-  { id: 'pytest', trigger: /\bpytest\b/i },
+  // Negative lookaround (not just \b) because a hyphen/slash is a WORD BOUNDARY to regex but
+  // not to a real path or compound name: "runs/sphinx-pytest-full/..." contains the whole word
+  // "pytest" by \b's definition alone, which made every read of that run's own output directory
+  // misclassify as invoking the test suite (2026-08-08 — blocked `ls`, `grep`, and a Python
+  // script reading that exact path, none of which executed anything). A real invocation is never
+  // hyphen/slash-adjacent on either side, so this loosening cannot un-catch an actual `pytest`
+  // command; it only stops matching the substring inside an unrelated path/identifier.
+  { id: 'pytest', trigger: /(?<![\w/-])pytest(?![\w-])/i },
   { id: 'go-test', trigger: /\bgo\s+test\b/i, requireAll: [/\.\/\.\.\.(?:\s|$)/] },
   { id: 'cargo-test', trigger: /\bcargo\s+test\b/i },
   { id: 'dotnet-test', trigger: /\bdotnet\s+test\b/i },
@@ -625,10 +809,19 @@ export function hasSelectorMarker(command) {
   return false;
 }
 
+// A command whose leading (first-invoked) program only ever READS/SEARCHES text and cannot
+// itself execute a named tool -- `grep -rn "pytest" hooks/` or `ls runs/sphinx-pytest-full/`
+// never runs pytest, whatever trigger words its ARGUMENTS happen to contain as literal text
+// (a search pattern, a directory name). Deliberately narrow: does not include `python`/`bash`/
+// `sh`/etc, which genuinely can execute an arbitrary named tool via `-c`/a script, so those
+// still go through the normal trigger match.
+const READ_ONLY_LEADING_COMMAND_RE = /^\s*(?:\S+=\S*\s+)*(?:grep|rg|ls|dir|cat|type|head|tail|wc|less|more)\b/i;
+
 // The normalized whole-project gate family `command` invokes, or null when it doesn't match any
 // known family, or matches one but is scoped down by a selector (focused, not whole-project).
 export function matchGateFamily(command) {
   const normalizedCommand = String(command || '');
+  if (READ_ONLY_LEADING_COMMAND_RE.test(normalizedCommand)) return null;
   for (const family of GATE_FAMILIES) {
     if (!family.trigger.test(normalizedCommand)) continue;
     if (family.requireAll && !family.requireAll.every((marker) => marker.test(normalizedCommand))) continue;
@@ -1224,7 +1417,12 @@ function main() {
   if (hookEvent === 'PreToolUse') {
     let earlyVerdict;
     try {
-      earlyVerdict = detectSimpleScalarToolBudget(latestTurn);
+      earlyVerdict = detectRepairLease({
+        ...latestTurn,
+        toolName: event.tool_name || event.toolName || '',
+        toolInput: event.tool_input || event.toolInput || {},
+      });
+      if (!earlyVerdict.block) earlyVerdict = detectSimpleScalarToolBudget(latestTurn);
       if (!earlyVerdict.block) earlyVerdict = detectEfficiencyKernel({
         ...latestTurn,
         toolName: event.tool_name || event.toolName || '',
