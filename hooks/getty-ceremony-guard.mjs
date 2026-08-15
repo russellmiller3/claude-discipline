@@ -278,8 +278,27 @@ function isGuardRefusal(record) {
   return GUARD_REFUSAL_RE.test(String(record?.resultText || ''));
 }
 
+// FALSE POSITIVE FIX 2026-08-15 (live deadlock, Servo session). LIVE_PROOF_RE matches the
+// bare word `commit`, so `git commit` counted as a live behavior proof. Git exits non-zero on
+// the entirely benign "nothing to commit, working tree clean" — which happens whenever an
+// autocommit hook already banked the same work — so the guard armed a repair lease on a
+// bookkeeping command and then refused every subsequent call, including the doc update and
+// merge it was itself demanding. It blocked its own repair, exactly like the 2026-08-07
+// filename deadlock.
+//
+// A source-control bookkeeping command's exit code says nothing about whether the PRODUCT
+// works, so it can never be the live proof a repair lease locks onto. Behavior proofs are
+// tests, builds, lints, smokes, launches, and deploys — all still matched by LIVE_PROOF_RE.
+const SOURCE_CONTROL_BOOKKEEPING_RE =
+  /\bgit\s+(?:commit|add|stage|checkout|switch|restore|branch|worktree|stash|tag|remote|config|rev-parse|for-each-ref)\b/i;
+
+function isSourceControlBookkeeping(record) {
+  return SOURCE_CONTROL_BOOKKEEPING_RE.test(inputText(record?.input));
+}
+
 function isLiveProofFailure(record, userText) {
   if (isGuardRefusal(record)) return false;
+  if (isSourceControlBookkeeping(record)) return false;
   if (!repairOutcomeFailed(record) || isMutation(record) || isRepairDiagnosticRead(record)) return false;
   const name = String(record?.name || '');
   const action = inputText(record?.input);
