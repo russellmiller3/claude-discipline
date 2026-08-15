@@ -77,8 +77,17 @@ export const MAX_CALL_BLOCKS = (() => {
 /** Hard cap on findings in one refusal, so the message is not itself a wall of text. */
 export const MAX_VERDICT_ITEMS = 6;
 
-/** Per-checker wall clock. A hung checker must not stall every tool call. */
-export const CHECKER_TIMEOUT_MS = Number(process.env.PRETOOLUSE_ARBITER_TIMEOUT_MS) || 5_000;
+/**
+ * Per-checker wall clock. A hung checker must not stall every tool call.
+ *
+ * A FUNCTION, not a module-level const: reading the env once at import time ignores anything set
+ * afterwards, which silently pins the default in tests (found by red-teaming this file -- a probe
+ * that set 300 ms measured 5,027 ms). The Stop arbiter documents the same hazard on its state dir.
+ */
+export function checkerTimeoutMs() {
+  const configured = Number(process.env.PRETOOLUSE_ARBITER_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 5_000;
+}
 
 /** Env escape: waive the whole PreToolUse gate. */
 export const ENV_ESCAPE_VARS = ['PRETOOLUSE_ARBITER_OK'];
@@ -118,9 +127,15 @@ export function checkerWatchesTool(checker, toolName) {
  */
 export function callKeyFor(turnKey, toolName, toolInput) {
   let serializedInput;
-  try { serializedInput = JSON.stringify(toolInput ?? {}); } catch { serializedInput = String(toolInput || ''); }
+  try {
+    serializedInput = JSON.stringify(toolInput ?? {});
+  } catch {
+    // A circular tool input (MCP payloads can carry one) must degrade, never throw: throwing here
+    // would take the whole gate down through the catch in runPreToolUseArbiter.
+    serializedInput = String(toolInput || '');
+  }
   return createHash('sha1')
-    .update(`${turnKey}${String(toolName || '')}${serializedInput}`)
+    .update(`${turnKey}${String(toolName || '')}${serializedInput}`)
     .digest('hex')
     .slice(0, 20);
 }
@@ -230,7 +245,7 @@ function runChecker(checker, payload) {
     const hangTimer = setTimeout(() => {
       try { child.kill(); } catch { /* already gone */ }
       finish(null);
-    }, CHECKER_TIMEOUT_MS);
+    }, checkerTimeoutMs());
     hangTimer.unref?.();
 
     let stdout = '';
@@ -315,6 +330,9 @@ export async function runPreToolUseArbiter(payload, { checkers } = {}) {
     for (const envVar of ENV_ESCAPE_VARS) if (process.env[envVar] === '1') return null;
 
     const entries = readTranscript(payload?.transcript_path);
+    // turnKeyFor now folds in the session id (fixed in style-verdict.mjs on 2026-08-15 after
+    // red-teaming this file): without it, every session whose transcript is unreadable shared the
+    // key "#0", and one session's spent breaker budget silently pre-released calls in another.
     const turnKey = turnKeyFor(payload, entries);
     const toolName = calledToolName(payload);
     const callKey = callKeyFor(turnKey, toolName, calledToolInput(payload));

@@ -8,6 +8,7 @@ import {
   MAX_CALL_BLOCKS,
   callBlockCount,
   callKeyFor,
+  checkerTimeoutMs,
   checkerWatchesTool,
   collectFindings,
   formatVerdict,
@@ -224,6 +225,46 @@ test('counters are per-call, so two calls never share a budget', () => {
     assert.equal(callBlockCount(firstCall), 1);
     assert.equal(callBlockCount(secondCall), 0);
   });
+});
+
+// FOUND BY RED-TEAM 2026-08-15, the worst failure this gate can have. turnKeyFor returns the same
+// "#0" for every session whose transcript is unreadable -- rotated, permission-denied, or too new
+// to have one. Two sessions then shared one breaker budget, so a call contested in session A
+// arrived PRE-RELEASED in session B, with nothing in either session looking wrong.
+test('two sessions never share a breaker budget', async () => {
+  await withStateDir(async (stateDir) => {
+    const checkers = [refusingChecker(stateDir, 'always-refuses', 'no')];
+    const contested = { command: 'the same command in both sessions' };
+    const inFirst = { ...payloadFor(contested), session_id: 'session-one' };
+    const inSecond = { ...payloadFor(contested), session_id: 'session-two' };
+
+    for (let attempt = 0; attempt <= MAX_CALL_BLOCKS; attempt += 1) {
+      await runPreToolUseArbiter(inFirst, { checkers });
+    }
+    assert.equal(await runPreToolUseArbiter(inFirst, { checkers }), null, 'its own budget is spent');
+
+    const other = await runPreToolUseArbiter(inSecond, { checkers });
+    assert.equal(other?.decision, 'deny', 'a second session must start with a full budget');
+  });
+});
+
+// FOUND BY RED-TEAM 2026-08-15: read as a module-level const, the timeout ignored anything set
+// after import, so a probe asking for 300ms measured 5,027ms. The same hazard the Stop arbiter
+// documents on its state dir. A pinned default means one hung checker stalls every tool call for
+// the full five seconds with no way to tune it down.
+test('the checker timeout is read at call time, not at import', () => {
+  const prior = process.env.PRETOOLUSE_ARBITER_TIMEOUT_MS;
+  try {
+    process.env.PRETOOLUSE_ARBITER_TIMEOUT_MS = '250';
+    assert.equal(checkerTimeoutMs(), 250);
+    delete process.env.PRETOOLUSE_ARBITER_TIMEOUT_MS;
+    assert.equal(checkerTimeoutMs(), 5_000);
+    process.env.PRETOOLUSE_ARBITER_TIMEOUT_MS = 'nonsense';
+    assert.equal(checkerTimeoutMs(), 5_000, 'a malformed value falls back, never to 0');
+  } finally {
+    if (prior === undefined) delete process.env.PRETOOLUSE_ARBITER_TIMEOUT_MS;
+    else process.env.PRETOOLUSE_ARBITER_TIMEOUT_MS = prior;
+  }
 });
 
 test('collectFindings skips checkers whose matcher excludes this tool', async () => {

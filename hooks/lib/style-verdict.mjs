@@ -66,9 +66,20 @@ export function humanPromptCount(entries) {
   return count;
 }
 
-/** The stable identity of THIS turn: which transcript, which human prompt. */
+/**
+ * The stable identity of THIS turn: which session, which transcript, which human prompt.
+ *
+ * The session id is load-bearing, not decoration. `transcript_path` alone collapses to the empty
+ * string whenever the payload omits it — a rotated transcript, a permission-denied read, or a
+ * session too new to have written one — and every such session then shares the single key "#0".
+ * Both arbiters key per-turn STATE on this (the Stop arbiter's one-block claim, the PreToolUse
+ * arbiter's circuit-breaker counters), so a collision silently spends one session's budget in
+ * another, with nothing in either session looking wrong. Found by red-teaming the PreToolUse
+ * arbiter on 2026-08-15; fixed here rather than in either caller so both inherit it.
+ */
 export function turnKeyFor(payload, entries) {
-  return `${payload?.transcript_path || ''}#${humanPromptCount(entries)}`;
+  const session = payload?.session_id || payload?.sessionId || '';
+  return `${session}|${payload?.transcript_path || ''}#${humanPromptCount(entries)}`;
 }
 
 /** The final assistant text of the turn — the reply Russell actually reads. */
