@@ -259,11 +259,16 @@ function stripInlineScriptBody(command) {
     .trim();
 }
 
+// RED-TEAM FIX 2026-08-16. `READ_ONLY_COMMAND_RE` is anchored at the START of the command only,
+// so `git status && npm run deploy` read as a diagnostic read and the whole chain went free. That
+// was survivable while this only gated the repair phase; the continuation bypass added below makes
+// it reachable in the replay phase too, which would turn a read-only allowance into a way to
+// smuggle any command past an armed lease. Found by red-teaming the installed file, not by a test.
 function isRepairDiagnosticRead(record) {
   const name = String(record?.name || '');
   if (READ_ONLY_TOOL_RE.test(name)) return true;
   if (!COMMAND_TOOL_RE.test(name)) return false;
-  return READ_ONLY_COMMAND_RE.test(toolCommandText(record?.input));
+  return everySegmentMatches(record, (segment) => READ_ONLY_COMMAND_RE.test(segment));
 }
 
 // A refusal printed by a SIBLING guard is not a failed proof: nothing ran, so there is no cause to
@@ -318,7 +323,11 @@ const SOURCE_CONTROL_BOOKKEEPING_RE =
 const INERT_GLUE_RE =
   /^\s*(?:cd|echo|true|set\s|export\s|tail|head|cat|wc|sort|uniq|tr|cut|tee|grep|rg|findstr|sed|awk|less|more|\$?\{?[A-Za-z_]\w*=)\b/i;
 
-function isSourceControlBookkeeping(record) {
+// Split a shell command into its segments and require EVERY one to satisfy `matches` (inert glue
+// always passes). Shared because both callers depend on the same invariant: one real verb anywhere
+// in a chain means the chain is not harmless, and a start-anchored regex alone lets
+// `git status && npm run deploy` masquerade as a read. Two copies of this would drift.
+function everySegmentMatches(record, matches) {
   const command = toolCommandText(record?.input);
   if (typeof command !== 'string' || !command.trim()) return false;
   const segments = command
@@ -326,10 +335,11 @@ function isSourceControlBookkeeping(record) {
     .map((segment) => segment.trim())
     .filter(Boolean);
   if (!segments.length) return false;
-  return segments.every(
-    (segment) =>
-      SOURCE_CONTROL_BOOKKEEPING_RE.test(segment) || INERT_GLUE_RE.test(segment),
-  );
+  return segments.every((segment) => matches(segment) || INERT_GLUE_RE.test(segment));
+}
+
+function isSourceControlBookkeeping(record) {
+  return everySegmentMatches(record, (segment) => SOURCE_CONTROL_BOOKKEEPING_RE.test(segment));
 }
 
 function isLiveProofFailure(record, userText) {
