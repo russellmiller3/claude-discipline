@@ -39,13 +39,32 @@ function readKnownConcepts() {
 // Claude — who actually understands the sentence — append the precise term to the known list.
 const KNOWS_SIGNAL = /\b(i (?:already )?know (?:what|about|how)|i'?m familiar with|i (?:already )?(?:get|understand) (?:what|how)|(?:stop|don'?t|no need to|quit) explain|you don'?t (?:need|have) to explain|i know this)\b/i;
 
-const NARRATION_STANDARD = `=== OUTPUT STYLE (Russell's rule, updated 2026-06-16) ===
-Two modes — pick by what THIS turn actually is:
+// Russell, 2026-08-16, verbatim: "I need you to always speak in terms of the higher level goal, as
+// a global rule. otherwise I lose my place." He had just read a reply that was technically correct
+// and completely unnavigable. The failure is NOT length -- it is a missing anchor. Without a Goal
+// line he cannot tell a legitimate sub-step from a rabbit hole, so he has to stop and ask, which
+// spends the energy this whole standard exists to protect. The template is therefore the FIRST
+// thing in this injection, above the two modes, not a footnote below them.
+const NARRATION_STANDARD = `=== OUTPUT STYLE (Russell's rule, updated 2026-08-16) ===
+
+THE ANCHOR — every working message opens with these lines, in this order, no exceptions:
+  Goal: <the OUTCOME Russell wants, in his words, never the system's> (e.g. "Hear Macher's voice")
+  Task: <the one thing being worked right now, plain English, one line>
+  Doing now:
+    <emoji> <one short line>
+    <emoji> <one short line>
+Then, when it teaches: "This is like <a concrete everyday scene, or a real business / science /
+engineering story>" — plus a small emoji diagram whenever a shape, flow, or contrast is the point.
+
+The Goal line never changes just because a sub-step did. If it WOULD change, that is drift — say so
+out loud instead of quietly rewriting it.
+
+Two modes for the BODY under that anchor — pick by what THIS turn actually is:
   • EXPLAINING / strategy / research / chat → SHORT: ≤2 short paragraphs unless asked. Short sentences. Say each point ONCE. No play-by-play of tool calls. No 4-line beat.
-  • CODING / building (writing or editing code, running builds/tests, multi-step implementation) → NARRATE AS YOU GO LIKE A TEACHER. Before each chunk, one plain sentence that ties what you're about to do to THE BIG PICTURE — not "editing file X" but "here's the thing we're building, here's the piece I'm adding, here's why it matters and what it unlocks next." The story should compound so Russell always knows where we are in the whole and why this step earns its place. Keep it flowing; do NOT save it for an end dump.
+  • CODING / building (writing or editing code, running builds/tests, multi-step implementation) → give a 2-3 sentence high-level update every few minutes or at a real milestone. State what moved, why it matters, and the next gate. Put each sentence on its own line. Do NOT narrate each tool, test, or wait. Every 4-5 updates, restate the North Star and how this task advances it.
 Always: when you use a technical term, gloss it in a few plain words (coffee-shop level). The test: each narration should read like a teacher explaining how a part fits the whole — never like a changelog line. Show the full status beat only when code ships.`;
 
-import { readTranscript, roleOf, contentBlocks, currentTurnEntries } from './lib/transcript.mjs';
+import { roleOf, contentBlocks } from './lib/transcript.mjs';
 
 const MUTATING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const MUTATING_BASH = /\bgit\s+(commit|merge|push|cherry-pick|rebase|revert)\b|\bnpm\s+(i|install|ci)\b|\bnpx\s+husky\b/;
@@ -63,7 +82,7 @@ function isMutatingBlock(block) {
 // Count mutating tool calls, and detect whether ANY narration text appeared BEFORE the final
 // assistant message — i.e. interleaved with the work, the "as you go" signal. A text block that
 // sits before a tool_use in the same message also counts (text-then-act in one breath).
-function analyzeTurn(turnEntries) {
+export function analyzeTurn(turnEntries) {
   let mutatingCount = 0;
   let narratedAlong = false;
 
@@ -98,43 +117,23 @@ function analyzeTurn(turnEntries) {
   return { mutatingCount, narratedAlong };
 }
 
-function lastAssistantReply(turnEntries) {
-  for (let i = turnEntries.length - 1; i >= 0; i--) {
-    if (roleOf(turnEntries[i]) !== 'assistant') continue;
-    let collected = '';
-    for (const block of contentBlocks(turnEntries[i])) {
-      if (block?.type === 'text' && typeof block.text === 'string') collected += block.text + '\n';
-    }
-    if (collected.trim()) return collected;
-  }
-  return '';
-}
+// (The "read the final reply" helper lives in lib/style-verdict.mjs now — the governor hands
+// every detector the reply text, so this file no longer walks the transcript for it.)
 
 const OVERRIDE = /explain-override:/i;
-// A second escape hatch specific to the brevity gate: when Russell genuinely wants the long form.
-const STYLE_OVERRIDE = /style-override:/i;
-// Only nag on genuinely multi-step silent work — a quick one-off edit doesn't need mid-narration.
-const SILENT_WORK_THRESHOLD = 3;
+// Only nag after a meaningful work chunk — a few edits do not justify commentary chatter.
+const SILENT_WORK_THRESHOLD = 12;
 
-// --- Brevity / anti-wall gate (Russell's "≤2 short paragraphs unless asked" + "no walls of text") ---
-// EXPLAINING turns (no code shipped) must be tight. Two ways a reply trips the gate:
-//   • a WALL — a single unbroken paragraph longer than WALL_PARA_WORDS (break it into bullets), or
-//   • TOO LONG overall (> EXPLAIN_WORD_BUDGET) when Russell did NOT ask for depth.
-const EXPLAIN_WORD_BUDGET = 220; // ~2 short paragraphs + a few bullets; walls are 400-600+
-const WALL_PARA_WORDS = 110;     // one unbroken block this big is a wall on screen
-
-// WORKING turns (code shipped) used to skip this gate entirely — that was the hole Russell hit on
-// 2026-07-24 ("i can t read walls of text"): every long reply that session came on a turn that had
-// also edited files, so the brevity gate never ran. A shipping turn earns a WIDER budget (it has a
-// real status beat to deliver) but never an unlimited one. A wall of prose is a wall either way, so
-// WALL_PARA_WORDS applies unchanged on both kinds of turn.
-const SHIP_WORD_BUDGET = 400;
-
-// Russell explicitly asking for more — these lift the length cap (a wall still must be broken up).
-const DEPTH_REQUEST = /\b(walk me through|in detail|more detail|go deep|deep[ -]dive|step[ -]by[ -]step|give me an example|examples?|explain everything|comprehensive|thorough|elaborate|expand on|long version|full (?:detail|breakdown|explanation)|break (?:it|this) down|more context|teach me)\b/i;
+// --- THE BREVITY / ANTI-WALL RULE NOW LIVES IN ONE PLACE -------------------------------------
+// It used to be implemented HERE (word budgets + a 110-word wall test) *and* independently in
+// wall-text-guard.mjs (a 2-paragraph cap + a 3-line paragraph cap) — two hooks, two threshold
+// sets, two block messages, for ONE CLAUDE.md rule. On 2026-07-26 they fired back to back and
+// Russell watched the same reply get rewritten twice for the same offence. Both now call
+// hooks/lib/prose-shape.mjs, which owns the single threshold set and the single message.
+// The DEPTH_REQUEST regex moved there too (exported as DEPTH_REQUEST_RE).
 
 // The first real user message in the turn (skips tool_result entries) — used to detect a depth request.
-function firstUserText(turnEntries) {
+export function firstUserText(turnEntries) {
   for (const entry of turnEntries) {
     if (roleOf(entry) !== 'user') continue;
     let userMessage = '';
@@ -146,24 +145,56 @@ function firstUserText(turnEntries) {
   return '';
 }
 
-// Measure a reply: total prose words (code fences excluded) and the longest non-bullet paragraph.
-function proseMetrics(replyText) {
-  const noCode = replyText.replace(/```[\s\S]*?```/g, ' ');
-  const wordCount = (passage) => (passage.replace(/[#*_>`~-]/g, ' ').match(/\S+/g) || []).length;
-  const totalWords = wordCount(noCode);
-  let longestParaWords = 0;
-  for (const block of noCode.split(/\n\s*\n/)) {
-    const lines = block.split('\n').map((line) => line.trim()).filter(Boolean);
-    if (!lines.length) continue;
-    // A block that is entirely bullets / numbered items / headers / quotes is structure, not a wall.
-    const structured = lines.every((line) => /^([-*•>]|\d+[.)]|#{1,6}\s)/.test(line));
-    if (structured) continue;
-    const words = wordCount(block);
-    if (words > longestParaWords) longestParaWords = words;
-  }
-  return { totalWords, longestParaWords };
+/**
+ * PURE DETECTOR for the shared style governor (hooks/lib/style-verdict.mjs) — the
+ * "you worked silently and saved the talking for the end" rule (GATE 2). The brevity/wall
+ * half of this hook (GATE 1) is now supplied to the governor by hooks/lib/prose-shape.mjs.
+ * Returns [] or ONE violation; it never writes a block itself.
+ */
+export function silentWorkViolations({ turnEntries = [], reply = '' } = {}) {
+  if (!turnEntries.length) return [];
+  const { mutatingCount, narratedAlong } = analyzeTurn(turnEntries);
+  if (mutatingCount < SILENT_WORK_THRESHOLD) return []; // not enough work to demand mid-narration
+  if (narratedAlong) return [];                         // you talked as you went
+  if (OVERRIDE.test(reply)) return [];
+
+  return [{
+    kind: 'worked silently, saved the talking for the end',
+    measure: `${mutatingCount} changes this turn, narrated only at the very end`,
+    guidance: `Russell wants high-level milestones, not a tool-by-tool transcript:
+  • Every few minutes or at a real milestone: 2-3 sentences on what moved, why it matters, and the next gate.
+  • Every 4-5 updates: restate the North Star and how the current task advances it.
+  • Explain a technical term only when it helps the decision (Khan-Academy level, coffee-shop plain).
+
+This is not a request for a bigger end-summary. Give a few useful milestones while the work unfolds.
+(If this turn genuinely couldn't be narrated mid-stream, write "explain-override: <reason>".)`,
+  }];
 }
 
+/**
+ * Deliver the style verdict held from the previous turn.
+ *
+ * Russell, 2026-08-17: "But I want i ony want to see 1 version, not 2." The
+ * style governor no longer blocks, because a block leaves the rejected draft in
+ * his transcript and he reads the answer twice. It records its findings instead,
+ * and they arrive here — before the next reply is written rather than after the
+ * last one was sent. Same feedback, one version on his screen.
+ */
+function deferredStyleVerdict() {
+  const held = takeDeferredVerdict();
+  if (!held) return '';
+  return `=== STYLE VERDICT ON YOUR LAST REPLY (deferred so Russell saw only one version) ===
+`
+    + `${held}
+`
+    + `Apply this to the reply you are about to write. Do not apologise for the last one and `
+    + `do not restate it.
+`;
+}
+
+// `for await` over stdin is only legal inside an async function. Without the keyword the whole
+// MODULE fails to parse, so the hook dies before it can inject anything -- and a hook that never
+// runs is indistinguishable from a hook with nothing to say. Found 2026-08-16.
 async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
@@ -192,58 +223,23 @@ async function main() {
     return;
   }
 
-  // END of the turn: only the silent-work failure Russell named gets a nudge.
-  const entries = readTranscript(payload.transcript_path);
-  const turnEntries = currentTurnEntries(entries);
-  if (turnEntries.length === 0) return;
-
-  const { mutatingCount, narratedAlong } = analyzeTurn(turnEntries);
-  const reply = lastAssistantReply(turnEntries);
-
-  // GATE 1 — brevity / anti-wall, for EXPLAINING turns (no code shipped this turn). This is the gate
-  // Russell kept hitting: a chat answer that's a wall of text, which the soft reminder never enforced.
-  if (reply && !OVERRIDE.test(reply) && !STYLE_OVERRIDE.test(reply)) {
-    const shipped = mutatingCount > 0;
-    const depthAsked = DEPTH_REQUEST.test(firstUserText(turnEntries));
-    const { totalWords, longestParaWords } = proseMetrics(reply);
-    const wordBudget = shipped ? SHIP_WORD_BUDGET : EXPLAIN_WORD_BUDGET;
-    const isWall = longestParaWords > WALL_PARA_WORDS;
-    const isTooLong = totalWords > wordBudget && !depthAsked;
-    if (isWall || isTooLong) {
-      const turnKind = shipped
-        ? `This is a shipping turn, so you get ${SHIP_WORD_BUDGET} words for the status beat — not more`
-        : 'This is an explaining turn (no code shipped)';
-      const brevityReason = `STOP — TOO LONG / a WALL OF TEXT (Russell's "≤2 short paragraphs unless asked", ADHD).
-
-${turnKind} and your reply ${isWall ? `has a ${longestParaWords}-word unbroken paragraph` : `runs ~${totalWords} words`}. Russell has to re-parse walls of text — it costs him energy he doesn't have.
-
-Rewrite it SHORT before stopping:
-  • Lead with the one-line answer. Reasoning second, detail third — skippable.
-  • Bullets over prose. No paragraph longer than ~3 lines. Bold the load-bearing words.
-  • Add a diagram/table/emoji only if it makes it FASTER to grasp — never as filler.
-  • Say each point once. Cut anything that doesn't move the idea forward.
-${depthAsked ? '' : '  • He did NOT ask for depth this turn — keep it to ≤2 short paragraphs.\n'}(If he genuinely asked for the long form, write "style-override: <why>".)`;
-      process.stdout.write(JSON.stringify({ decision: 'block', reason: brevityReason }));
-      return;
-    }
-  }
-
-  // GATE 2 — narrate-as-you-go: only the silent multi-step-work failure Russell named gets a nudge.
-  if (mutatingCount < SILENT_WORK_THRESHOLD) return; // not enough work to demand mid-narration
-  if (narratedAlong) return;                         // you talked as you went — no end-dump required
-  if (OVERRIDE.test(reply)) return;
-
-  const reason = `STOP — you worked silently and saved the talking for the end (Russell's rule, 2026-06-02).
-
-You ran ${mutatingCount} changes this turn but only narrated at the very end. Russell wants the story told AS YOU GO:
-  • Before each chunk: one plain sentence — what you're about to do and why.
-  • Explain every technical term the moment you use it (Khan-Academy level, coffee-shop plain).
-  • He should never be surprised by what you did, because you said it before you did it.
-
-This isn't a request for a bigger end-summary — it's the opposite. Narrate next time BETWEEN the steps, not after them.
-(If this turn genuinely couldn't be narrated mid-stream, write "explain-override: <reason>".)`;
-
-  process.stdout.write(JSON.stringify({ decision: 'block', reason }));
+  // END of the turn: this hook no longer blocks on its own. It delegates to the SHARED STYLE
+  // GOVERNOR, which runs every style checker (brevity/wall, silent-work, compass line, narration
+  // cadence) and emits ONE combined verdict per turn. See hooks/lib/style-verdict.mjs for why —
+  // four hooks blocking sequentially made Russell read four stacked drafts (2026-07-26).
+  // The registry import is DYNAMIC so the hook -> registry -> hook module cycle resolves cleanly.
+  const { runStyleGovernor } = await import('./lib/style-verdict.mjs');
+  const { STYLE_CHECKERS } = await import('./lib/style-checkers.mjs');
+  const verdict = runStyleGovernor(payload, { checkers: STYLE_CHECKERS });
+  if (verdict) process.stdout.write(JSON.stringify(verdict));
 }
 
-main().catch(() => process.exit(0));
+// Entry-point guard: only read stdin and run when invoked directly as the hook process — never
+// when merely IMPORTED (by the style-checker registry, or by a test reaching the primitives).
+// Basename comparison stays stable across MSYS `/c/...` vs `C:\...` path spellings.
+import { basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { takeDeferredVerdict } from './lib/style-verdict.mjs';
+if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {
+  main().catch(() => process.exit(0));
+}
