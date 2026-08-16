@@ -419,12 +419,18 @@ test('session open: a SHORT factual first reply stays exempt (not every session 
   assert.equal(isBlocked(stopOn(transcriptPath)), false);
 });
 
-test('session open: the requirement is FIRST-turn only, not every turn', () => {
+// NARROWED 2026-08-16. This asserted a bare "not blocked", which stopped being the right
+// assertion once the Goal / Task / Doing now anchor landed: UNGROUNDED_OPENER is a substantial
+// work reply with no anchor, so the anchor check now blocks it — correctly, and on every turn.
+// The claim this test actually exists to defend is narrower and still true: the SESSION-GROUNDING
+// demand is first-turn-only and must not reappear on turn two. Asserting that directly keeps the
+// test honest instead of quietly requiring the anchor to stay off.
+test('session open: the grounding requirement is FIRST-turn only, not every turn', () => {
   const transcriptPath = transcriptWith('keep going', UNGROUNDED_OPENER, {
     toolUses: [{ name: 'Read', input: {} }],
     humanTurns: 2,
   });
-  assert.equal(isBlocked(stopOn(transcriptPath)), false);
+  assert.doesNotMatch(stopOn(transcriptPath), /session grounding/i);
 });
 
 // --- idempotency / anti-loop ---------------------------------------------------------------------

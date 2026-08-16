@@ -381,7 +381,20 @@ export function compassViolations({ payload = {}, entries = [], turnEntries = []
   // The anchor comes FIRST, ahead of every other compass check, because it is the thing Russell
   // reads before anything else. Without it he cannot tell a legitimate sub-step from a rabbit hole
   // and has to stop and ask -- which costs far more energy than the three lines ever do.
-  if (!hasNarrativeAnchor(reply)) {
+  // SCOPED 2026-08-16. Russell's rule says every WORKING message opens with the anchor — not
+  // every message. Shipped unscoped, it fired on one-line factual answers and on the session-open
+  // grounding reply, which already carries the same information under different headings. Seven
+  // of this file's own tests went red on exactly those shapes.
+  //
+  // Two exemptions, both already established for the sibling session-grounding check below:
+  //   - a reply under MIN_GROUNDING_REPLY_WORDS is an answer, not a work update
+  //   - a grounding status or a roadmap brief states goal, position and next step already, so
+  //     demanding the anchor on top of it is two asks for one paragraph
+  const anchorRequired = replyWordCount(reply) >= MIN_GROUNDING_REPLY_WORDS
+    && !hasGroundingStatus(reply)
+    && !hasRoadmapBrief(reply);
+
+  if (anchorRequired && !hasNarrativeAnchor(reply)) {
     violations.push({
       kind: 'missing the Goal / Task / Doing now anchor',
       measure: 'the reply does not open with all three anchor lines',
