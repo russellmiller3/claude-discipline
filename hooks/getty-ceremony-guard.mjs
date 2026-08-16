@@ -277,7 +277,24 @@ function isRepairDiagnosticRead(record) {
 // admitted only a byte-exact replay of the very command the commit guard would refuse again, with
 // no legal move left in the turn. The same principle already governs priorHasMutation below: a
 // denial from this or any sibling guard proves nothing about what the model was doing.
-const GUARD_REFUSAL_RE = /(?:^|\n)\s*(?:[A-Z][A-Z0-9 -]{2,}(?:BLOCKED|REQUIRED)\b|BLOCKED\b|STOP\b)|\bnot\s+requested\s+and\s+does\s+not\s+advance\b|\bOverride\s+for\s+deliberate\b/;
+//
+// CASE-SENSITIVITY FIX 2026-08-17 (live lockup, CodeServo session, todo/002 recurrence). The
+// BLOCKED/STOP alternatives below are case-SENSITIVE, but not every sibling guard shouts in caps --
+// bash-json-default-guard opens its refusal with title-case "Blocked -- portable shell work runs in
+// Bash", which matched none of the three alternatives. That refusal was then scored as a genuine
+// failed live-proof action (its command was a PowerShell call, and the human's "go ..." message hit
+// the CONTINUATION_TASK_RE fallback in isLiveProofFailure), arming a lease on a command that never
+// actually ran. Every later action -- including totally unrelated, legitimate ones -- was then
+// refused as a sidequest for the rest of the turn, because replaying the "locked proof" could only
+// ever hit the same sibling refusal again: no legal move existed.
+//
+// Chasing every guard's individual capitalization is the whack-a-mole this class of bug keeps
+// producing (see todo/002). The robust fix is structural: pretooluse-arbiter.mjs prints the fixed,
+// invariant string "TOOL CALL REFUSED" at the top of EVERY refusal it assembles, regardless of which
+// guard fired or how that guard capitalizes its own reason text. Matching that literal marker
+// recognizes any sibling refusal by construction, closing the whole wording-mismatch class at once
+// instead of one guard's phrasing at a time.
+const GUARD_REFUSAL_RE = /(?:^|\n)\s*(?:[A-Z][A-Z0-9 -]{2,}(?:BLOCKED|REQUIRED)\b|BLOCKED\b|STOP\b)|\bnot\s+requested\s+and\s+does\s+not\s+advance\b|\bOverride\s+for\s+deliberate\b|\bTOOL CALL REFUSED\b/;
 
 function isGuardRefusal(record) {
   return GUARD_REFUSAL_RE.test(String(record?.resultText || ''));
