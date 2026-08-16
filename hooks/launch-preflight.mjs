@@ -170,6 +170,73 @@ function isShellTool(toolName) {
     || name === 'Exec' || name === 'exec';
 }
 
+const LIVE_WATCH_PAGE_RE = /(?:^|[\\/\s'"=])[^\s'"<>]*[-_]live\.html\b/i;
+const DIRECT_FILE_MUTATION_TOOLS = new Set([
+  'write',
+  'edit',
+  'multiedit',
+  'notebookedit',
+  'apply_patch',
+  'applypatch',
+]);
+const SHELL_FILE_WRITE_RE = /\b(?:copy-item|set-content|add-content|out-file|move-item|rename-item|new-item|cp|mv|tee|sed\s+-i|writefile(?:sync)?|write_text)\b|(?:>|>>)/i;
+
+// A `>` only redirects when the SHELL sees it. Inside a quoted span or a heredoc body it is
+// ordinary DATA — a Python format spec (`{len(body):>8}`), an HTML fragment, prose in a doc
+// being written, a comparison in an inline script. Both misreads fired for real on
+// 2026-07-30: first a read-only HTTP check of an already-served watcher page was blocked by
+// its own format spec, then a heredoc writing HOOKBOOK prose ABOUT this gate was blocked by
+// the example redirects inside that prose. Same root cause both times — data read as code.
+// long-running-script-guard.mjs owns the battle-tested `stripHeredocBodies`, but this gate is
+// synchronous and that module is only reachable through this file's deliberate ASYNC dynamic
+// import (kept async so a mid-edit sibling can never crash the hook). This mirrors it locally
+// for the sync path, the same resilience pattern this file already uses for the keyword list.
+const HEREDOC_BODY_RE = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1[\s\S]*?^\s*\2\s*$/gm;
+
+export function shellWriteIntent(command) {
+  const executable = String(command || '')
+    .replace(HEREDOC_BODY_RE, ' ')
+    .replace(/'''[\s\S]*?'''|"""[\s\S]*?"""/g, ' ')
+    .replace(/'[^']*'|"[^"]*"/g, ' ');
+  return SHELL_FILE_WRITE_RE.test(executable);
+}
+
+/**
+ * Keep experiment pages generated from one compact spec. Manual copies and
+ * page-by-page edits are the exact ceremony the global generator removes.
+ */
+export function evaluateLiveWatchBuildGate(toolName, toolInput = {}) {
+  const name = String(toolName || '').toLowerCase();
+  const input = toolInput && typeof toolInput === 'object' ? toolInput : {};
+  const command = String(input.command || input.cmd || '');
+  if (/\bbuild_watch\.py\b/i.test(command)) return { block: false, reason: null };
+
+  const fileTarget = [
+    input.file_path,
+    input.filePath,
+    input.path,
+    input.target_file,
+    input.targetFile,
+  ].filter(Boolean).join('\n');
+  const patchText = String(input.patch || input.input || '');
+  const directMutation = DIRECT_FILE_MUTATION_TOOLS.has(name)
+    && LIVE_WATCH_PAGE_RE.test(`${fileTarget}\n${patchText}`);
+  const shellMutation = isShellTool(toolName)
+    && LIVE_WATCH_PAGE_RE.test(command)
+    && shellWriteIntent(command);
+  if (!directMutation && !shellMutation) return { block: false, reason: null };
+
+  return {
+    block: true,
+    reason: `LIVE-WATCH GENERATOR REQUIRED — do not copy or hand-edit a per-experiment *-live.html page.
+
+Write one compact JSON spec, then run:
+py -3 -X utf8 C:/Users/rmill/.agents/skills/live-watch/scripts/build_watch.py --repo <repo> --spec <spec.json> --rehearsal
+
+Fix shared layout or behavior in watch-template.html once, then regenerate. This keeps live proof pages to one spec plus one command instead of repeated HTML surgery.`,
+  };
+}
+
 // Fallback long-run heuristic — intentionally minimal, used ONLY if
 // long-running-script-guard.mjs can't be imported (e.g. mid-edit by the
 // concurrent fix in this session). Flagged as a known duplication, not a design
@@ -184,9 +251,15 @@ function hasOwnLongRunHeuristic(command) {
 // looksLikeLongScript — duplicated here only because the list itself isn't
 // exported; the SCANNING logic (quote/flag stripping, word-boundary matching) is
 // the real reused primitive, imported below, not reimplemented.
+//
+// 'generate' RETIRED 2026-08-04: too generic (report/config/asset generators are
+// ordinary utility scripts, not experiments) — it matched a brand-new, unrelated
+// `generate.py` craft-pattern PDF script by filename alone and denied it "THREE
+// DISTINCT SEEDS REQUIRED". Kept in sync with the same removal in
+// long-running-script-guard.mjs; see HOOKBOOK.
 const LONG_RUN_KEYWORDS = [
   'bench', 'benchmark', 'sweep', 'eval', 'backfill', 'migrate', 'migration',
-  'import', 'export', 'crawl', 'scrape', 'train', 'batch', 'bulk', 'generate',
+  'import', 'export', 'crawl', 'scrape', 'train', 'batch', 'bulk',
   'reindex', 'recompute', 'ingest', 'sync', 'harvest', 'rebuild',
 ];
 
@@ -539,7 +612,19 @@ function distinctSeedValues(command) {
     if (!foundSeeds.includes(parsedSeed)) foundSeeds.push(parsedSeed);
   };
 
-  for (const match of String(command || '').matchAll(/--seed(?:=|\s+)(-?\d+)\b/g)) {
+  // DRY_OK: this is the pre-existing single-seed loop, unchanged except for the
+  // optional `replicate-` prefix; the loop below it parses a comma/space LIST from
+  // `--seeds` and shares no body with this one.
+  //
+  // `--replicate-seed` is the SAME declaration under a different spelling: it is how
+  // codeservo's daily-driver names its per-replicate seed, repeated once per seed.
+  // Matching only `--seed` read a genuine three-seed launch as seedless and demanded
+  // the operator either invent a `--seed` the launcher does not accept, or mark a real
+  // durability run `pilot` -- a false label on real evidence, which is worse than the
+  // gap this gate exists to close. Found live 2026-08-17 on a 3-seed paired benchmark.
+  for (const match of String(command || '').matchAll(
+    /--(?:replicate-)?seed(?:=|\s+)(-?\d+)\b/g,
+  )) {
     appendSeed(match[1]);
   }
   for (const match of String(command || '').matchAll(
@@ -809,6 +894,13 @@ async function main() {
       return;
     }
     clearLaunchClaim(sessionId);
+    process.exit(0);
+    return;
+  }
+
+  const liveWatchBuildVerdict = evaluateLiveWatchBuildGate(toolName, toolInput);
+  if (liveWatchBuildVerdict.block) {
+    emitDenial(eventName, liveWatchBuildVerdict.reason);
     process.exit(0);
     return;
   }
