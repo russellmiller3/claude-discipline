@@ -293,8 +293,21 @@ function isGuardRefusal(record) {
 // fix caught it exempting `pytest && git commit` — the commonest shape there is — which would
 // have silently removed lease protection from every test-then-commit chain. So every segment
 // must be bookkeeping (or inert glue); one real proof verb anywhere keeps the lease armable.
+// WIDENED 2026-08-16 (third occurrence of this deadlock class — see todo/002).
+// The list above enumerated only the verbs that WRITE to git and forgot every verb that READS
+// from it. `isSourceControlBookkeeping` requires EVERY segment to match, so a single
+// `git status --short` inside an otherwise pure chain made `.every()` fail, the chain stopped
+// counting as bookkeeping, LIVE_PROOF_RE matched the bare word `commit`, and a failed
+// `git add <gitignored file>` armed a live-behavior lease on pure bookkeeping.
+//
+// The locked proof then contained `git add HANDOFF.md`, which is gitignored in ~/.claude, so
+// the one command the lease would accept could never exit 0 — no legal move remained in the
+// turn, and roughly two of every three tool calls were refused for the rest of the session.
+//
+// Reading git state is never evidence about whether the PRODUCT works, so it belongs here for
+// exactly the same reason committing does.
 const SOURCE_CONTROL_BOOKKEEPING_RE =
-  /^\s*git\s+(?:commit|add|stage|checkout|switch|restore|branch|worktree|stash|tag|remote|config|rev-parse|for-each-ref)\b/i;
+  /^\s*git\s+(?:commit|add|stage|checkout|switch|restore|branch|worktree|stash|tag|remote|config|rev-parse|for-each-ref|status|log|diff|show|ls-files|check-ignore|describe|blame|shortlog|rev-list|symbolic-ref|name-rev|cat-file)\b/i;
 const INERT_GLUE_RE = /^\s*(?:cd|echo|true|set\s|export\s|\$?\{?[A-Za-z_]\w*=)/i;
 
 function isSourceControlBookkeeping(record) {
@@ -331,6 +344,48 @@ function repairProofLabel(record) {
     .replace(/\s+/g, ' ')
     .trim();
   return label.slice(0, 220) || 'the failed proof';
+}
+
+// `normalizePath` already exists above (line ~183) and lower-cases as well as slash-normalizing;
+// `isInfraPath` and `isNonSourcePath` now call it too, so there is one canonicalizer rather than
+// three copies that can drift apart. Every path regex here is case-insensitive, so the added
+// lower-casing changes no verdict.
+
+// The working set of a turn: every file path the turn has already touched. Two paths belong to
+// one task when they sit in the same directory, or when one filename is the other's stem plus a
+// suffix — `invoice.py` and `invoice.test.mjs`, `feature.py` and `test_feature.py`. That is the
+// narrowest rule that admits the write-code-then-write-its-test loop while still refusing an
+// edit in an unrelated repository, which is the anti-disarm rail todo/002 requires.
+function pathStem(filePath) {
+  return basename(normalizePath(filePath))
+    .replace(/\.[^.]+$/, '')
+    .replace(/\.(?:test|spec)$/i, '')
+    .replace(/^test_/i, '')
+    .replace(/_test$/i, '')
+    .toLowerCase();
+}
+
+function pathDirectory(filePath) {
+  const normalized = normalizePath(filePath);
+  const cut = normalized.lastIndexOf('/');
+  return cut === -1 ? '' : normalized.slice(0, cut).toLowerCase();
+}
+
+function sharesWorkingSet(current, prior) {
+  const currentPaths = actionPaths(current);
+  if (!currentPaths.length) return false;
+  const touched = (prior || []).flatMap((record) => actionPaths(record));
+  if (!touched.length) return false;
+
+  return currentPaths.some((candidate) => {
+    const stem = pathStem(candidate);
+    const directory = pathDirectory(candidate);
+    return touched.some((seen) => {
+      if (directory && pathDirectory(seen) === directory) return true;
+      const seenStem = pathStem(seen);
+      return Boolean(stem) && Boolean(seenStem) && stem === seenStem;
+    });
+  });
 }
 
 function repairLeaseReason(detail, target) {
@@ -376,6 +431,14 @@ export function detectRepairLease({ userText = '', completedTools = [], toolName
 
   if (!lease) return { block: false };
   const current = toolRecord(toolName, toolInput);
+
+  // todo/002 defect 3, the most expensive one, and the ONLY bypass that outranks the exhausted
+  // freeze below. Refusing a commit strands finished, passing work in the tree — exactly the loss
+  // `commit-cadence-guard` and the No Dirt Handoffs rule exist to prevent. On 2026-08-16 both
+  // fired in one turn: one demanded the commit, this one called the commit a sidequest, and no
+  // legal move remained. Saving work is never wandering off, at any phase.
+  if (isSourceControlBookkeeping(current)) return { block: false };
+
   const exactReplay = actionSignature(current.name, current.input)
     === actionSignature(lease.target.name, lease.target.input);
 
@@ -395,6 +458,16 @@ export function detectRepairLease({ userText = '', completedTools = [], toolName
       reason: repairLeaseReason('two diagnostic reads already consumed the inspection budget; repair the proven cause or replay the proof now', lease.target),
     };
   }
+
+  // todo/002 defect 2, applied only AFTER the repair pass is spent. Writing `feature.py`, then
+  // `test_feature.py`, then running that test is ONE task, but the lease scored each as separate
+  // and unrelated. A read, or a write sharing a directory or filename stem with something this
+  // turn already touched, is continuation of the same job.
+  //
+  // Deliberately NOT hoisted above the `repair` branch: that branch enforces the two-diagnostic-
+  // read budget, and a blanket read bypass would silently repeal it. Continuation is a question
+  // about the phase where the model would otherwise be frozen out entirely.
+  if (isRepairDiagnosticRead(current) || sharesWorkingSet(current, prior)) return { block: false };
 
   return {
     block: true,
@@ -585,7 +658,16 @@ export function detectEfficiencyKernel({ userText = '', completedTools = [], too
   // LOOSENED 2026-08-05: an attempt that ERRORED proved nothing, so retrying it after fixing the
   // cause is progress, not spinning. Counting failures as repeats made the retry illegal while other
   // guards demanded it. Successful repeats still block at two; a stuck loop still blocks at four.
-  const sameAction = prior.filter((record) => actionSignature(record.name, record.input) === actionSignature(current.name, current.input));
+  // A refusal printed by THIS or any sibling guard is not an attempt the model made and lost —
+  // nothing ran. Counting one as a retry lets a false positive manufacture its own lockout by
+  // inflating the very number that blocks the next call. `isGuardRefusal` already encodes this
+  // for the repair lease and for `successfulOrientation` below; these counters were the three
+  // places it had not been applied, and on 2026-08-16 they blocked live sessions for it: a call
+  // refused four times by a sibling read as a "stuck retry loop", and 26 refused edit attempts to
+  // one file read as thrashing.
+  const sameAction = prior
+    .filter((record) => actionSignature(record.name, record.input) === actionSignature(current.name, current.input))
+    .filter((record) => !isGuardRefusal(record));
   const succeededRepeats = sameAction.filter((record) => !record.isError).length;
   const spinning = succeededRepeats >= 2 || sameAction.length >= EFFICIENCY_STUCK_RETRY_LIMIT;
   if (spinning && !ITERATION_REQUEST_RE.test(request)) {
@@ -601,7 +683,8 @@ export function detectEfficiencyKernel({ userText = '', completedTools = [], too
     const currentRegion = editRegion(current);
     let thrashDetail = '';
     for (const path of currentPaths) {
-      const edits = editsTo(path);
+      // Same principle as `sameAction` above: a sibling guard's refusal is not a failed edit.
+      const edits = editsTo(path).filter((record) => !isGuardRefusal(record));
       const erroredSameRegion = edits.filter((record) => record.isError && editRegion(record) === currentRegion).length;
       if (erroredSameRegion >= 2) {
         thrashDetail = 'this same passage already failed to edit twice; fix the blocker instead of retrying the same change';
@@ -746,7 +829,7 @@ const DOTFILE = /(?:^|\/)\.[^/]+$/;                   // .gitignore / .editorcon
 // True when a changed path is INFRA (not the CORE deliverable). Anything else — a real source file with
 // a code extension outside a meta dir — is CORE.
 export function isInfraPath(filePath) {
-  const normalized = String(filePath || '').replace(/\\/g, '/');
+  const normalized = normalizePath(filePath);
   if (!normalized) return false;
   if (META_DIR.test(normalized)) return true;
   if (DASHBOARD.test(normalized)) return true;
@@ -1206,7 +1289,7 @@ const matchesSingleSiteScope = (text) => SINGLE_SITE_SCOPE_PATTERNS.some((p) => 
 const TEST_OR_NON_SOURCE_RE = /(?:^|\/)(?:test|tests|__tests__|spec|specs)\//i;
 const TEST_EXT_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/i;
 const isNonSourcePath = (filePath) => {
-  const normalized = String(filePath || '').replace(/\\/g, '/');
+  const normalized = normalizePath(filePath);
   if (!normalized) return true;
   if (TEST_OR_NON_SOURCE_RE.test(normalized)) return true;
   if (TEST_EXT_RE.test(normalized)) return true;

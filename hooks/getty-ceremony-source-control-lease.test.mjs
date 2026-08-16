@@ -69,6 +69,13 @@ test('other source-control bookkeeping is equally exempt', () => {
 test('a behavior proof chained with a commit still arms the lease', () => {
   // Red-team catch: the first cut of this exemption matched any command CONTAINING a git
   // subcommand, so `pytest && git commit` went unprotected — the commonest chain there is.
+  //
+  // PROBE CHANGED 2026-08-16 (todo/002). This used to probe with `git log --oneline main..HEAD`,
+  // which is now never refusable — reading or saving source-control state stopped being a
+  // sidequest when the lease was refusing the commits that banked finished work. The claim under
+  // test is that the lease ARMS, so the probe just has to be something an armed lease refuses.
+  // `npm run deploy` is that, and it keeps the assertion about arming rather than about which
+  // probe happened to be handy.
   for (const command of [
     'py -3 -m pytest -q tests/ && git commit -m ship',
     'npm run build && git add -A && git commit -m x',
@@ -80,7 +87,8 @@ test('a behavior proof chained with a commit still arms the lease', () => {
         { name: 'Bash', input: { command }, isError: true, resultText: 'exit code: 1' },
         { name: 'Edit', input: { file_path: 'src/a.py', old_string: 'a', new_string: 'b' } },
       ],
-      ...UNRELATED_NEXT_CALL,
+      toolName: 'Bash',
+      toolInput: { command: 'npm run deploy' },
     });
     assert.equal(verdict.block, true, `${command} must still arm the lease`);
   }
