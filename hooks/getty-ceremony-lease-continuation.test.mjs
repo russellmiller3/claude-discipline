@@ -79,6 +79,13 @@ test('every read-only git verb is bookkeeping, not a behavior proof', () => {
     'git ls-files --error-unmatch HANDOFF.md',
     'git check-ignore -v HANDOFF.md',
     'cd ~/.claude && git add -A && git status && git commit -m x',
+    // Found live, hours after the read-verb fix: segments split on `|` too, so a pipeline's
+    // output filter becomes its own segment. `tail` was unlisted, `.every()` failed, and the
+    // guard re-armed on pure bookkeeping. A formatter that reads stdin and writes stdout can
+    // never be the thing a lease is proving.
+    'git add hooks/a.mjs 2>&1 | tail -1',
+    'git commit --no-verify -q -m "x" | head -3',
+    'cd ~/.claude && git status --short | grep hooks',
   ]) {
     const verdict = detectRepairLease({
       userText: 'go',

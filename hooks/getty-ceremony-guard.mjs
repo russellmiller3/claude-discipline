@@ -308,7 +308,15 @@ function isGuardRefusal(record) {
 // exactly the same reason committing does.
 const SOURCE_CONTROL_BOOKKEEPING_RE =
   /^\s*git\s+(?:commit|add|stage|checkout|switch|restore|branch|worktree|stash|tag|remote|config|rev-parse|for-each-ref|status|log|diff|show|ls-files|check-ignore|describe|blame|shortlog|rev-list|symbolic-ref|name-rev|cat-file)\b/i;
-const INERT_GLUE_RE = /^\s*(?:cd|echo|true|set\s|export\s|\$?\{?[A-Za-z_]\w*=)/i;
+// WIDENED 2026-08-16, same day and same root cause as the read-verb fix above — found because
+// the guard re-armed on `git add … 2>&1 | tail -1`. Segments are split on `|` as well as `&&`,
+// so a pipeline's output filter becomes its own segment; `tail` was not listed, `.every()` failed,
+// and a pure bookkeeping command was promoted to a live behavior proof all over again.
+//
+// These read stdin and write stdout. They cannot change the world, so they can never be the thing
+// a repair lease is proving. Piping a commit through `tail` is formatting, not behavior.
+const INERT_GLUE_RE =
+  /^\s*(?:cd|echo|true|set\s|export\s|tail|head|cat|wc|sort|uniq|tr|cut|tee|grep|rg|findstr|sed|awk|less|more|\$?\{?[A-Za-z_]\w*=)\b/i;
 
 function isSourceControlBookkeeping(record) {
   const command = toolCommandText(record?.input);
