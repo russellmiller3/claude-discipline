@@ -36,7 +36,12 @@ import { join } from 'node:path';
 
 export const HANDOFF_MAX_BYTES = 20000;
 export const RECENT_COMMIT_COUNT = 20;
-export const RECENT_WORK_MAX_COMMITS_BEHIND = 25;
+// Russell, 2026-08-17: tighten this. Four commits of grace, not twenty-five —
+// a work log a whole session behind is already fiction to the next reader.
+// Still satisfiable, which is the constraint that matters: regenerate once and
+// the next four commits stay green, so the gate can never demand an action that
+// re-falsifies it.
+export const RECENT_WORK_MAX_COMMITS_BEHIND = 4;
 const SUBJECT_MAX = 96;
 const DETAILED_BRANCH_LIMIT = 12;
 const UNIT = String.fromCharCode(31);
