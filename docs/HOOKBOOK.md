@@ -407,3 +407,42 @@ The same class appeared in `require-learnings-ack`: where a repo's own learnings
 global one, a `[project]`-tagged lesson had no reachable acknowledgement and permanently blocked
 code edits. Fixed by crediting both scopes when the two paths resolve to one file, with an
 anti-disarm test proving genuinely distinct files keep distinct scopes.
+
+---
+
+## `soft-reset-merge-base-guard` — a soft reset must anchor on the fork point (added 2026-08-17)
+
+Blocks `git reset --soft <ref>` when `<ref>` has moved AHEAD of this branch's fork point, and
+names the exact files at risk.
+
+**The mechanism.** The reset moves HEAD to `<ref>` but leaves the INDEX at this branch's old tip.
+When `<ref>` has gained work since the fork, everything it gained stages as a DELETION — a revert
+wearing the clothes of a squash, and the resulting commit looks like ordinary work. It cost a
+whole feature once and came within one read of doing it again, when a stale branch staged deletion
+of a fairness gate committed hours earlier.
+
+**Why the written rule was not enough.** The correct recipe was already in the operator's
+learnings file — and sitting immediately beside it was a squash RECIPE that said to reset onto
+`main` directly. Two entries, in one file, contradicting each other. A written rule only helps if
+someone reads it at the exact second it matters, and the entry that gets followed is whichever one
+reads as an instruction rather than a warning.
+
+**The check.** Safe iff `rev-parse <ref>` equals `merge-base <ref> HEAD`. Squashing your own WIP
+onto an ancestor is untouched — that is the legitimate everyday use, and a guard that blocked it
+would be routed around within the hour. `git reset --soft $(git merge-base <ref> HEAD)`, the
+correct recipe printed in the denial, is recognised and passed straight through.
+
+**Two defects were found by self-review and a live probe, neither by its tests.** A quoted ref
+(`--soft "main"`) matched zero characters and was never extracted. Worse, the entry guard compared
+FULL paths — the harness invokes hooks with a forward-slash path while `fileURLToPath` returns
+backslashes, so `main()` never ran and the hook was **completely dead** while all 13 unit tests
+passed. **Always compare basenames in a hook's entry guard, and verify the INSTALLED file with a
+real payload in both directions.** Tests import the pure helpers; they never execute the module
+the way the harness does.
+
+**And the fixture bites before the hook does.** The live probe returned silence twice more before
+it worked, because `mktemp -d` hands back an MSYS path that a Windows-native `node` cannot use as
+a working directory — `git` failed, the guard fail-opened, and it looked exactly like a dead hook.
+
+Escape: `SOFT_RESET_ANCHOR_OK` in the command. Fails open on any git failure, non-repo, or
+unresolvable ref. Locked by `soft-reset-merge-base-guard.test.mjs` (13 tests) plus a live probe.
