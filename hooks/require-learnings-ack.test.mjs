@@ -199,6 +199,46 @@ test('a session that never read the matched section still gets blocked (no cross
 	}
 });
 
+// SELF-HOSTING REPO (2026-08-17). In `~/.claude` the project learnings.md IS the global
+// learnings.md — one physical file. learnings-error-match tags the same bullet under BOTH
+// "[global] ..." and "[project] ...", but scopeForLearningsPath returns exactly ONE scope per
+// path, so the "[project]" tag had no reachable acknowledgement: reading the only file that
+// exists could never clear it, and every code edit in this repo stayed blocked for the session.
+test('SELF-HOSTING: when project learnings IS global learnings, one read acks BOTH scope tags', () => {
+	const { repoRoot, nestedRoot, editTarget, env } = makeSessionRepo();
+	// The defining condition: the global path resolves to this repo's own learnings.md.
+	const selfHostedEnv = { ...env, LEARNINGS_GLOBAL_PATH: join(repoRoot, 'learnings.md') };
+	const markerFile = dropSectionedMarker(nestedRoot, ['[project] Alpha Gotchas', '[global] Alpha Gotchas']);
+	try {
+		runHook({ tool_name: 'Read', tool_input: { file_path: join(repoRoot, 'learnings.md') }, cwd: repoRoot, session_id: 'sess-selfhost' }, selfHostedEnv);
+		assert.equal(existsSync(markerFile), false, 'reading the one physical file must clear both scope tags');
+		const hookStdout = runHook({ tool_name: 'Write', tool_input: { file_path: editTarget }, cwd: repoRoot, session_id: 'sess-selfhost' }, selfHostedEnv);
+		assert.equal(hookStdout.trim(), '', 'the edit must proceed once the only learnings file has been read');
+	} finally {
+		rmSync(repoRoot, { recursive: true, force: true });
+	}
+});
+
+// ANTI-DISARM: the collapse above must apply ONLY when the two paths are genuinely the same
+// file. Where a repo has its own learnings.md separate from the global one, reading the project
+// copy must still leave a [global] section unacknowledged — otherwise this fix would silently
+// void the scope separation the test below defends.
+test('SELF-HOSTING collapse does NOT apply when the two learnings files are distinct', () => {
+	const { repoRoot, nestedRoot, editTarget, env } = makeSessionRepo();
+	const separateGlobal = join(repoRoot, 'elsewhere-learnings.md');
+	writeFileSync(separateGlobal, '# Global\n\n## Alpha Gotchas\n\n- global bullet\n');
+	const distinctEnv = { ...env, LEARNINGS_GLOBAL_PATH: separateGlobal };
+	try {
+		runHook({ tool_name: 'Read', tool_input: { file_path: join(repoRoot, 'learnings.md') }, cwd: repoRoot, session_id: 'sess-distinct' }, distinctEnv);
+		dropSectionedMarker(nestedRoot, ['[global] Alpha Gotchas']);
+		const hookStdout = runHook({ tool_name: 'Write', tool_input: { file_path: editTarget }, cwd: repoRoot, session_id: 'sess-distinct' }, distinctEnv);
+		const verdict = JSON.parse(hookStdout || '{}');
+		assert.equal(verdict.hookSpecificOutput?.permissionDecision, 'deny', 'distinct files must keep distinct scopes');
+	} finally {
+		rmSync(repoRoot, { recursive: true, force: true });
+	}
+});
+
 test('reading the PROJECT learnings does not acknowledge a [global] section', () => {
 	const { repoRoot, nestedRoot, editTarget, env } = makeSessionRepo();
 	try {

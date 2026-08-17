@@ -243,6 +243,24 @@ function main() {
 			const acks = loadSessionAcks(sessionId);
 			for (const title of coveredTitles) acks[scope][title.toLowerCase()] = true;
 			if (isFullFile) acks[scope]['*'] = true;
+			// SELF-HOSTING REPO FIX (2026-08-17). In `~/.claude` the "project" learnings.md IS the
+			// global learnings.md — one physical file, no separate project copy. learnings-error-match
+			// tags the identical bullet under BOTH "[global] ..." and "[project] ...", but
+			// scopeForLearningsPath can only ever return ONE scope for one path, so the "[project]" tag
+			// had no reachable acknowledgement: a permanent block on every code edit in this repo once
+			// such a bullet surfaced. Same class as the commit guard's handoff demand — a gate whose
+			// satisfying action does not exist. When the two paths resolve to the same file, reading it
+			// credits both scopes; there was only ever one file to have read.
+			const projectLearnings = projectRoot ? joinPath(projectRoot, 'learnings.md') : null;
+			if (projectLearnings
+				&& normalizePathForCompare(projectLearnings) === normalizePathForCompare(globalLearningsPath())
+				&& normalizePathForCompare(targetPath) === normalizePathForCompare(globalLearningsPath())) {
+				for (const title of coveredTitles) {
+					acks.global[title.toLowerCase()] = true;
+					acks.project[title.toLowerCase()] = true;
+				}
+				if (isFullFile) { acks.global['*'] = true; acks.project['*'] = true; }
+			}
 			saveSessionAcks(sessionId, acks);
 
 			// Reconcile the marker at the read-file's project root, then sweep the ENTIRE

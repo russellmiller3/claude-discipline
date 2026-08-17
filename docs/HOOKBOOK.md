@@ -334,3 +334,76 @@ it → name the surprise → map to real names).
 
 Escape: `style-override: <why>`. Locked by `wall-text-guard.test.mjs` (23 tests, 5 of them pinning
 the teaching lift in both directions).
+
+---
+
+## `lib/guard-turn-budget` — a PreToolUse guard may insist, but it may not imprison (added 2026-08-17)
+
+The shared release valve every PreToolUse denial should pass through. Operator's verdict that
+prompted it: *"refactor getty ceremony guard, too many mistakes."*
+
+**The pattern it fixes is not a bug, it is a shape.** `getty-ceremony-guard` had accumulated FIVE
+separate deadlock repairs. Each one correctly diagnosed and fixed whichever detector had locked a
+live session that week. Every fix was right, and the file kept locking sessions, because all five
+shared a defect none of them touched: **every detector could decide to DENY, and not one ever
+asked whether anything was still ALLOWED.** A sixth patch was always coming.
+
+**The diagnostic, generalized:** when you are about to write patch N+1 to a file that already has
+N patches of the same shape, stop and ask what all N had to route through. That chokepoint is the
+bug. Fixing it once ends the class; patching detector N+1 buys one week.
+
+**Why an existing same-call circuit breaker does not cover this.** A breaker keyed on the tool
+ARGUMENTS catches a model retrying one call into a wall. It is structurally blind to
+**oscillation**: guard A demands a commit, guard B refuses the commit, the model tries a third
+thing, detector C calls that a sidequest. Every call is different, so no per-call key ever repeats
+and no per-call budget ever trips. The turn dies with the breaker idle. **Ask what your counter is
+keyed on, then construct the loop that never repeats that key.**
+
+**The rule.** Count the denials this guard has already issued in the current turn. Past the budget
+(3) with no completed work since, the guard emits `allow` carrying its objection as advice.
+Enforcement degrades; the session does not stop. This terminates by construction regardless of
+which detector is wrong — the property all five previous patches individually failed to give.
+
+**It counts the guard's OWN deny prefixes, never the model's attempts.** A denial is something the
+guard did, so counting it is counting our own output. That is what keeps the budget honest, and it
+is the same fact behind the earlier lesson that a refused call is not a failed attempt. **A new
+deny path must register its prefix**, or its refusals stay invisible to the valve and the file
+grows a sixth deadlock. Any completed (non-error) call after the last denial resets the budget,
+because a call that ran proves the session is not wedged.
+
+Stop-side hooks have had this rule since 2026-08-02. PreToolUse never got it, and it matters more
+there: a blocked Stop costs one regenerated reply and the turn still ends, while a blocked
+PreToolUse costs the ACTION and can repeat forever.
+
+Locked by `lib/guard-turn-budget.test.mjs` (12 tests, both directions — the oscillation shape plus
+four must-NOT-yield rails: below budget, work completed since, fresh turn, malformed input) and a
+live proof against the INSTALLED hook.
+
+---
+
+## `commit-cadence-guard` — refresh the handoff, never commit it (updated 2026-08-17)
+
+Four defects, one family: **a gate whose satisfying action does not exist.**
+
+1. It demanded the handoff be COMMITTED. The handoff is gitignored in many repos, so `git add`
+   refuses it — the demand named an action git will not perform.
+2. Its staleness check compared the handoff's mtime against the newest commit's timestamp. A
+   commit always lands AFTER the file you refreshed to prepare it, so refresh-then-commit made it
+   instantly stale again — **an infinite loop whose satisfying action re-falsifies the predicate**,
+   even where the file IS tracked. Deleted, not tuned: no threshold fixes that shape.
+3. The handoff-edit exemption covered the pending-checkpoint deny and then fell through to the
+   bottom deny anyway, so **the guard blocked the exact action it was demanding**. An exemption
+   covering one of two exits is not an exemption.
+4. Its own advertised escape token was tested BELOW the pending deny, so the moment a checkpoint
+   armed the only sanctioned way out was unreachable — it printed instructions for a door it had
+   locked. Observed blocking on *"0 file(s) / 0 line(s) are ready to bank"*.
+
+**Three checks before shipping any gate:** name the exact command that clears it and confirm that
+command can succeed in this repo; confirm the clearing action is reachable from every deny path,
+not just one; confirm the clearing action does not itself re-arm the gate. The tell is a guard
+whose message you cannot obey by following its own instructions verbatim.
+
+The same class appeared in `require-learnings-ack`: where a repo's own learnings file IS the
+global one, a `[project]`-tagged lesson had no reachable acknowledgement and permanently blocked
+code edits. Fixed by crediting both scopes when the two paths resolve to one file, with an
+anti-disarm test proving genuinely distinct files keep distinct scopes.

@@ -53,6 +53,14 @@ import { readFileSync, existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { contentBlocks, effectiveHumanTask, humanSafetyApproval, isHumanPrompt, lastAssistantText, readTranscript, textOf, toolResultText, toolUsesOf } from './lib/transcript.mjs';
+import { shouldYieldInsteadOfDenying } from './lib/guard-turn-budget.mjs';
+
+// The prefixes this guard stamps on its own refusals. The release valve counts THESE — our own
+// output — never the model's attempts, which is what keeps the budget honest (learnings.md:61).
+// A new deny path must add its prefix here, or its refusals stay invisible to the valve and this
+// file grows a sixth deadlock.
+const GETTY_DENY_SIGNATURES = ['REPAIR LEASE —', 'EFFICIENCY —', 'SIMPLE EDIT —'];
+const GETTY_TURN_DENY_BUDGET = 3;
 
 const OVERRIDE_RE = /\bceremony-ok\s*:/i;
 const INFRA_STREAK_THRESHOLD = 4; // ≥4 trailing infra-only commits, no core since
@@ -1587,6 +1595,40 @@ function main() {
       });
     } catch { process.exit(0); }
     if (!earlyVerdict.block) process.exit(0);
+
+    // THE RELEASE VALVE (2026-08-17, Russell: "refactor getty ceremony guard, too many mistakes").
+    // Every detector above can decide to DENY; until now not one of them asked whether anything
+    // was still ALLOWED. That gap is why this file carries five separate deadlock repairs — each
+    // patched whichever detector locked a session that week, and a sixth was always coming.
+    // Routing every denial through one budget fixes the CLASS: past it the objection is reported
+    // as advice and the call proceeds, so the turn terminates by construction regardless of which
+    // detector is wrong. Stop has had this rule since 2026-08-02 (lib/stop-deadlock-breaker.mjs,
+    // "may insist, may not imprison"); PreToolUse never got it, and here it matters more — a
+    // blocked Stop costs one reply, a blocked PreToolUse costs the action and can repeat forever.
+    const release = shouldYieldInsteadOfDenying({
+      completedTools: latestTurn.completedTools,
+      signatures: GETTY_DENY_SIGNATURES,
+      budget: GETTY_TURN_DENY_BUDGET,
+    });
+    if (release.yield) {
+      process.stdout.write(JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+          permissionDecisionReason: [
+            `getty-ceremony-guard STOOD DOWN after ${release.spent} refusals this turn with no`,
+            'completed work since the last one. Standing objection, reported as advice:',
+            '',
+            earlyVerdict.reason,
+            '',
+            'Enforcement degrades here on purpose — a guard that cannot be satisfied is',
+            'contradicting a sibling rule, not teaching. Read the objection, then proceed.',
+          ].join('\n'),
+        },
+      }));
+      process.exit(0);
+    }
+
     process.stdout.write(JSON.stringify({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
