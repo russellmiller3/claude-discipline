@@ -85,6 +85,21 @@ test('committing UNRELATED work is not evidence the defect was handled', () => {
   );
 });
 
+test('DOCUMENTING the rule does not trip it', () => {
+  // Found by red-teaming this hook: explaining it quotes its own trigger words
+  // beside a defect word, so the clearer the explanation the more certainly it
+  // fired. ross-perot-guard hit the identical trap in 2026-06-25.
+  const reply = 'The guard blocks phrases like `is a separate issue` when the '
+    + 'reply also names something `broken`. Here is the shape it catches:\n'
+    + '```\nThe suite is broken. That is a separate issue.\n```\n'
+    + 'Everything else passes through untouched.';
+  assert.equal(
+    findBuckPassing(reply),
+    null,
+    'quoted triggers in code spans and fences must not fire the guard',
+  );
+});
+
 test('the refusal quotes the offending phrase back', () => {
   const quote = findBuckPassing('The suite is broken. That is a separate issue.');
   assert.match(String(quote), /separate issue/i, 'the operator must see which sentence tripped it');

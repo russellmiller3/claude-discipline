@@ -158,7 +158,16 @@ export function runGitHygiene({ commandCwd, eventName, toolName, command, env = 
   // a cached "behind main" count is wrong again the next time main moves.
   if (eventName === 'SessionStart' && outcome.durable.length) {
     const trunk = integrationRefs[0];
-    outcome.durableDetail = outcome.durable.map((branch) => {
+    // BOUNDED, found by red-teaming this change: each branch costs three git
+    // subprocesses (two rev-list, one log), and a repository that has drifted to
+    // fifty branches would spawn a hundred and fifty of them at every session
+    // start — on Windows that is seconds, against this hook's 30s ceiling, on
+    // the exact path that must never delay a session. The cap is well above the
+    // two-branch policy, so it only bites a repo already in trouble; the overflow
+    // is reported by count rather than silently dropped.
+    const DETAILED_BRANCH_LIMIT = 12;
+    outcome.durableOverflow = Math.max(0, outcome.durable.length - DETAILED_BRANCH_LIMIT);
+    outcome.durableDetail = outcome.durable.slice(0, DETAILED_BRANCH_LIMIT).map((branch) => {
       const count = (range) => {
         try { return git(['rev-list', '--count', range], repoRoot).trim(); }
         catch { return '?'; }
@@ -223,8 +232,11 @@ export function formatNote(outcome) {
         : '';
       return `- ${entry.branch}  (+${entry.ahead}/-${entry.behind})  ${entry.lastCommit}${verdict}`;
     });
+    const overflow = outcome.durableOverflow
+      ? `\n- ...and ${outcome.durableOverflow} more branch(es), not detailed`
+      : '';
     lines.push(
-      `Work parked outside ${outcome.integrationRefs[0]}:\n${parked.join('\n')}\n` +
+      `Work parked outside ${outcome.integrationRefs[0]}:\n${parked.join('\n')}${overflow}\n` +
       'A branch far behind is a decision waiting, not a branch. Landing it or deleting it are both fine; leaving it is what costs.',
     );
   }

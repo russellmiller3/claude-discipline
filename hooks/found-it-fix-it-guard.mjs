@@ -75,8 +75,25 @@ const LEGITIMATE = [
   /\$\s*\d/,
 ];
 
+/**
+ * Strip fenced blocks and code spans before matching.
+ *
+ * Found by red-teaming this hook: DOCUMENTING it trips it. A reply explaining
+ * the rule quotes `is a separate issue` and says the word "broken" in the same
+ * breath, so writing about the guard sets the guard off — and the more clearly
+ * you explain it, the more certainly it fires. `ross-perot-guard` learned this
+ * exact lesson on 2026-06-25 and its matchers already run on code-span-stripped
+ * text; this now matches that precedent instead of rediscovering it a third time.
+ */
+function withoutQuotedCode(reply) {
+  return reply
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/~~~[\s\S]*?~~~/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ');
+}
+
 export function findBuckPassing(replyText) {
-  const reply = String(replyText || '');
+  const reply = withoutQuotedCode(String(replyText || ''));
   if (!reply.trim()) return null;
   const disowning = DISOWNING.find((pattern) => pattern.test(reply));
   if (!disowning) return null;
