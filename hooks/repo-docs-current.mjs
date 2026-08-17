@@ -39,19 +39,32 @@ import { findDocProblems, git } from '../scripts/repo-truth-doc.mjs';
 
 const STATE_DIR = join(process.env.REPO_DOCS_STATE_DIR || tmpdir(), 'repo-docs-current');
 
-/** Once per repository per session: the same nag every turn is noise, not a gate. */
-function alreadyToldThisSession(repositoryRoot, sessionId) {
+/**
+ * Once per repository per session: the same nag every turn is noise, not a gate.
+ *
+ * Reading and marking are SEPARATE on purpose, found by red-teaming this hook.
+ * A single check-and-mark call writes the marker as a side effect of asking, so
+ * a crash between the mark and the write to stdout loses the notice for the
+ * whole session — silently, because a hook that says nothing and a hook that
+ * died look identical from outside. Mark only after the notice is actually out.
+ */
+function markerPathFor(repositoryRoot, sessionId) {
   const key = createHash('sha256')
     .update(`${repositoryRoot.toLowerCase()}::${sessionId}`)
     .digest('hex')
     .slice(0, 24);
-  const marker = join(STATE_DIR, `${key}.seen`);
-  if (existsSync(marker)) return true;
+  return join(STATE_DIR, `${key}.seen`);
+}
+
+function alreadyToldThisSession(markerPath) {
+  return existsSync(markerPath);
+}
+
+function recordTold(markerPath) {
   try {
     mkdirSync(STATE_DIR, { recursive: true });
-    writeFileSync(marker, new Date().toISOString(), 'utf8');
-  } catch { /* unwritable state must not silence the finding */ }
-  return false;
+    writeFileSync(markerPath, new Date().toISOString(), 'utf8');
+  } catch { /* unwritable state must not silence a future finding */ }
 }
 
 export function buildNotice(problems) {
@@ -83,11 +96,13 @@ function main() {
   const notice = buildNotice(problems);
   if (!notice) return;
 
-  if (alreadyToldThisSession(repositoryRoot, event.session_id || 'no-session')) return;
+  const markerPath = markerPathFor(repositoryRoot, event.session_id || 'no-session');
+  if (alreadyToldThisSession(markerPath)) return;
 
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: event.hook_event_name || 'SessionStart', additionalContext: notice },
   }));
+  recordTold(markerPath); // only after the notice is genuinely out
 }
 
 if (process.argv[1] && process.argv[1].endsWith('repo-docs-current.mjs')) main();
