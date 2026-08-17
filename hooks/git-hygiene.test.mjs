@@ -9,7 +9,7 @@
  */
 
 import { execSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,7 +42,8 @@ function test(label, runCase) {
 }
 
 function run(command, workingDir) {
-  return execSync(command, { cwd: workingDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const isolated = command.replace(/^git /, 'git -c core.hooksPath=C:/Users/rmill/.claude/test-no-hooks ');
+  return execSync(isolated, { cwd: workingDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 function branchExists(repoRoot, name) {
@@ -252,11 +253,177 @@ test('Stop: warns when durable branches exceed the cap', () => {
   assert.match(formatNote(outcome) || '', /durable local branches/);
 });
 
+test('SessionStart: reports ONE parked branch, which the cap warning misses', () => {
+  // The gap Russell found 2026-08-17: the cap warning only fires on too MANY
+  // branches, so a single branch abandoned for weeks stayed silent. CodeServo
+  // had 50 commits parked 581 behind main and nothing anywhere said so.
+  const repoRoot = makeRepo();
+  run('git switch -c feature/parked', repoRoot);
+  run('git commit --allow-empty -m "parked work"', repoRoot);
+  run('git switch integration', repoRoot);
+  run('git commit --allow-empty -m "trunk moved on"', repoRoot);
+
+  const outcome = runGitHygiene({ commandCwd: repoRoot, eventName: 'SessionStart', env: STALE_ENV });
+
+  assert.ok(outcome.durable.length <= outcome.branchCap, 'this must be UNDER the cap, or it proves nothing');
+  const note = formatNote(outcome) || '';
+  assert.match(note, /Work parked outside/, 'a parked branch must be named at session start');
+  assert.match(note, /feature\/parked/);
+  assert.match(note, /\+1\/-1/, 'the drift in both directions must be shown');
+});
+
+test('SessionStart: says nothing when no branch is parked', () => {
+  // Silence on a clean repository, or the report becomes noise you learn to skip.
+  const repoRoot = makeRepo();
+  const outcome = runGitHygiene({ commandCwd: repoRoot, eventName: 'SessionStart', env: STALE_ENV });
+
+  assert.ok(!outcome.durableDetail?.length, 'nothing parked means nothing to detail');
+  assert.doesNotMatch(formatNote(outcome) || '', /Work parked outside/);
+});
+
 test('Stop: agent worktree branches do NOT count toward the durable cap', () => {
   const repoRoot = makeRepo();
   addAgentWorktree(repoRoot, 'capagent', { merge: false });
   const outcome = runGitHygiene({ commandCwd: repoRoot, eventName: 'Stop', env: STALE_ENV });
   assert.ok(!outcome.durable.some((name) => name.startsWith('worktree-agent-')), 'agent branch excluded from durable set');
+});
+
+test('PreToolUse: blocks a third active branch before sprawl begins', () => {
+  const repoRoot = makeRepo();
+  run('git switch -c feature/active', repoRoot);
+  run('git commit --allow-empty -m active', repoRoot);
+  run('git switch -c feature/second', repoRoot);
+  run('git commit --allow-empty -m second', repoRoot);
+  run('git switch integration', repoRoot);
+  const outcome = runGitHygiene({
+    commandCwd: repoRoot, eventName: 'PreToolUse', toolName: 'Bash',
+    command: 'git switch -c feature/third',
+  });
+  assert.strictEqual(outcome.reason, 'branch-sprawl');
+  assert.strictEqual(outcome.blocked, true);
+  assert.deepStrictEqual(outcome.durable, ['feature/active', 'feature/second']);
+});
+
+test('PreToolUse: merged branch labels never consume active-work slots', () => {
+  const repoRoot = makeRepo();
+  for (const suffix of ['one', 'two', 'three', 'four', 'five', 'six']) {
+    run(`git branch feature/spent-${suffix}`, repoRoot);
+  }
+  run('git switch -c feature/active', repoRoot);
+  run('git commit --allow-empty -m active', repoRoot);
+  run('git switch integration', repoRoot);
+  const outcome = runGitHygiene({
+    commandCwd: repoRoot, eventName: 'PreToolUse', toolName: 'Bash',
+    command: 'git worktree add -b feature/second ../feature-two',
+  });
+  assert.strictEqual(outcome.reason, 'pretool-allowed');
+  assert.deepStrictEqual(outcome.durable, ['feature/active']);
+});
+
+test('PreToolUse: temporary fix branches stay creatable beside two active features', () => {
+  const repoRoot = makeRepo();
+  for (const suffix of ['active', 'second']) {
+    run(`git switch -c feature/${suffix}`, repoRoot);
+    run(`git commit --allow-empty -m ${suffix}`, repoRoot);
+  }
+  run('git switch integration', repoRoot);
+  const outcome = runGitHygiene({
+    commandCwd: repoRoot, eventName: 'PreToolUse', toolName: 'Bash',
+    command: 'git worktree add -b fix/anthropic-http-400 ../repair',
+  });
+  assert.strictEqual(outcome.reason, 'pretool-allowed');
+  assert.deepStrictEqual(outcome.durable, ['feature/active', 'feature/second']);
+});
+
+test('PreToolUse: GOAP branches count toward the two active branch cap', () => {
+  const repoRoot = makeRepo();
+  run('git switch -c feature/goap-planner', repoRoot);
+  run('git commit --allow-empty -m goap', repoRoot);
+  run('git switch -c feature/active', repoRoot);
+  run('git commit --allow-empty -m active', repoRoot);
+  run('git switch integration', repoRoot);
+  const outcome = runGitHygiene({
+    commandCwd: repoRoot, eventName: 'PreToolUse', toolName: 'Bash',
+    command: 'git worktree add -b feature/goap-launcher ../active',
+  });
+  assert.strictEqual(outcome.reason, 'branch-sprawl');
+});
+
+test('PreToolUse: a branch-list command never false-blocks', () => {
+  const repoRoot = makeRepo();
+  for (const suffix of ['one', 'two']) {
+    run(`git switch -c feature/${suffix}`, repoRoot);
+    run(`git commit --allow-empty -m ${suffix}`, repoRoot);
+  }
+  run('git switch integration', repoRoot);
+  const outcome = runGitHygiene({
+    commandCwd: repoRoot, eventName: 'PreToolUse', toolName: 'Bash',
+    command: 'git branch --list',
+  });
+  assert.strictEqual(outcome.reason, 'pretool-allowed');
+});
+
+test('PreToolUse end-to-end: emits a real permission denial for branch sprawl', () => {
+  const repoRoot = makeRepo();
+  run('git switch -c feature/active', repoRoot);
+  run('git commit --allow-empty -m active', repoRoot);
+  run('git switch -c feature/second', repoRoot);
+  run('git commit --allow-empty -m second', repoRoot);
+  run('git switch integration', repoRoot);
+  const event = JSON.stringify({
+    hook_event_name: 'PreToolUse', cwd: repoRoot, tool_name: 'Bash',
+    tool_input: { command: 'git checkout -b feature/third' },
+  });
+  const emitted = JSON.parse(execFileSync(process.execPath, [hookPath], { input: event, encoding: 'utf8' }));
+  assert.strictEqual(emitted.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(emitted.hookSpecificOutput.permissionDecisionReason, /Branch sprawl guard/);
+});
+
+test('live settings register git-hygiene for the whole lifecycle with no dangling cleaners', () => {
+  const settings = JSON.parse(readFileSync(join(here, '..', 'settings.json'), 'utf8'));
+  const registrations = [];
+  for (const [eventName, groups] of Object.entries(settings.hooks || {})) {
+    for (const group of groups || []) {
+      for (const hook of group.hooks || []) {
+        registrations.push({ eventName, matcher: group.matcher || '*', command: hook.command || '' });
+      }
+    }
+  }
+  const gitHygieneEvents = registrations
+    .filter((entry) => entry.command.includes('git-hygiene.mjs'))
+    .map((entry) => entry.eventName)
+    .sort();
+  // PreToolUse moved BEHIND the arbiter: settings.json now registers only
+  // pretooluse-arbiter.mjs there, and the arbiter runs each guard from a
+  // registry GENERATED from settings.json. So a direct PreToolUse entry no
+  // longer exists for any guard, and asserting one here was checking the
+  // pre-arbiter shape rather than whether the guard actually runs.
+  //
+  // The invariant is unchanged and still enforced: git-hygiene must cover the
+  // whole lifecycle. Only the place PreToolUse coverage LIVES has moved, so
+  // that is where it is now read from.
+  assert.deepStrictEqual(
+    gitHygieneEvents,
+    ['PostToolUse', 'SessionEnd', 'SessionStart'],
+  );
+  const preToolUseRegistry = readFileSync(join(here, 'lib', 'pretooluse-registry.mjs'), 'utf8');
+  assert.match(
+    preToolUseRegistry,
+    /"label":\s*"git-hygiene"/,
+    'git-hygiene must still run at PreToolUse — the branch-sprawl blocker is dead code otherwise',
+  );
+  assert.ok(
+    !registrations.some((entry) => /clean-(?:merged-)?worktrees\.mjs/.test(entry.command)),
+    'deleted cleaner filenames must never remain registered',
+  );
+  const stopRegistry = readFileSync(join(here, 'lib', 'stop-registry.mjs'), 'utf8');
+  assert.match(stopRegistry, /repoHook\('git-hygiene'/);
+  const kimiConfig = readFileSync(join(here, '..', '..', '.kimi-code', 'config.toml'), 'utf8');
+  const kimiRegistrations = kimiConfig.split('[[hooks]]').filter((block) => (
+    block.includes('command = "node ~/.claude/hooks/git-hygiene.mjs"')
+  ));
+  assert.ok(kimiRegistrations.some((block) => block.includes('event = "PreToolUse"')));
+  assert.ok(kimiRegistrations.some((block) => block.includes('event = "Stop"')));
 });
 
 // ---- EVENT ROUTING ----

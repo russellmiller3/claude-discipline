@@ -34,7 +34,8 @@ import {
 import { reapWorktrees } from './lib/gitHygieneWorktrees.mjs';
 import { pruneMergedLocalBranches, pruneMergedRemoteBranches, countDurableBranches, sweepSiblingReposLocalBranches } from './lib/gitHygieneBranches.mjs';
 
-const DEFAULT_BRANCH_CAP = 3;
+const DEFAULT_BRANCH_CAP = 2;
+const DEFAULT_ACTIVE_BRANCH_CAP = 2;
 
 // PostToolUse fires for EVERY shell call; this decides whether the command was a "work just landed" moment.
 function isIntegrationCommand(command) {
@@ -42,6 +43,27 @@ function isIntegrationCommand(command) {
   const isMerge = /\bgit\s+merge\b/.test(triggerCommand);
   const isPushMain = /\bgit\s+push\b/.test(triggerCommand) && /\bmain\b/.test(triggerCommand);
   return isMerge || isPushMain;
+}
+
+function createdBranchName(command) {
+  const text = String(command || '').replace(/\s+/g, ' ').trim();
+  const patterns = [
+    /\bgit\s+switch\s+(?:-c|--create)\s+([^\s]+)/,
+    /\bgit\s+checkout\s+-b\s+([^\s]+)/,
+    /\bgit\s+worktree\s+add\b[\s\S]*?(?:\s-b\s+|\s--branch(?:=|\s))([^\s]+)/,
+    /\bgit\s+branch\s+(?!-)([^\s]+)/,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[1].replace(/^['"]|['"]$/g, '');
+  }
+  return null;
+}
+
+function activeBranches({ repoRoot, integrationRefs }) {
+  return countDurableBranches({ repoRoot, integrationRefs }).durable.filter((branch) => (
+    branch.startsWith('feature/') && !integrationRefs.includes(branch)
+  ));
 }
 
 /**
@@ -73,6 +95,16 @@ export function runGitHygiene({ commandCwd, eventName, toolName, command, env = 
 
   const integrationRefs = resolveIntegrationRefs(repoRoot, env);
   if (!integrationRefs.length) return { reason: 'no-integration-ref', eventName };
+
+  if (eventName === 'PreToolUse' && ['Bash', 'PowerShell'].includes(toolName)) {
+    const durable = activeBranches({ repoRoot, integrationRefs });
+    const branchCap = Number(env.GIT_HYGIENE_ACTIVE_BRANCH_CAP ?? DEFAULT_ACTIVE_BRANCH_CAP);
+    const requestedBranch = createdBranchName(command);
+    if (requestedBranch?.startsWith('feature/') && durable.length >= branchCap) {
+      return { reason: 'branch-sprawl', eventName, blocked: true, durable, branchCap };
+    }
+    return { reason: 'pretool-allowed', eventName, durable, branchCap };
+  }
 
   const graceMs = resolveGraceMs(env);
   const staleMs = resolveStaleMs(env);
@@ -115,7 +147,33 @@ export function runGitHygiene({ commandCwd, eventName, toolName, command, env = 
   }
   if (wantCapWarn) {
     outcome.branchCap = Number(env.GIT_HYGIENE_BRANCH_CAP ?? DEFAULT_BRANCH_CAP);
-    outcome.durable = countDurableBranches({ repoRoot }).durable;
+    outcome.durable = countDurableBranches({ repoRoot, integrationRefs }).durable;
+  }
+  // What SURVIVED the reap, and how far it has drifted. The cap warning below
+  // only fires when there are too MANY branches, so a single branch parked for
+  // weeks stayed completely silent: CodeServo had 50 commits of
+  // feature/goap-planner sitting 581 behind main and nothing ever said so.
+  // Russell, 2026-08-17: "so how does next session learn about branches and
+  // whats on them? strucucrually". Read live at session start, never stored —
+  // a cached "behind main" count is wrong again the next time main moves.
+  if (eventName === 'SessionStart' && outcome.durable.length) {
+    const trunk = integrationRefs[0];
+    outcome.durableDetail = outcome.durable.map((branch) => {
+      const count = (range) => {
+        try { return git(['rev-list', '--count', range], repoRoot).trim(); }
+        catch { return '?'; }
+      };
+      let lastCommit = '';
+      try {
+        lastCommit = git(['log', '-1', '--date=short', '--format=%ad %s', branch], repoRoot).trim().slice(0, 88);
+      } catch { /* a branch we cannot read still deserves its name reported */ }
+      return {
+        branch,
+        ahead: count(`${trunk}..${branch}`),
+        behind: count(`${branch}..${trunk}`),
+        lastCommit,
+      };
+    });
   }
   return outcome;
 }
@@ -154,6 +212,23 @@ export function formatNote(outcome) {
     lines.push(`git-hygiene: ${verb} ${siblingLines.length} merged branch(es) in sibling repo(s):\n${siblingLines.join('\n')}`);
   }
 
+  // What is parked outside the trunk, said out loud at session start even when
+  // it is only ONE branch. The cap warning below fires on too MANY branches; a
+  // single branch abandoned for weeks slipped under it and stayed invisible.
+  if (outcome.eventName === 'SessionStart' && outcome.durableDetail?.length) {
+    const parked = outcome.durableDetail.map((entry) => {
+      const behind = Number(entry.behind);
+      const verdict = Number.isFinite(behind) && behind >= 100
+        ? '   <- far behind: rebase and land it, or archive and delete it'
+        : '';
+      return `- ${entry.branch}  (+${entry.ahead}/-${entry.behind})  ${entry.lastCommit}${verdict}`;
+    });
+    lines.push(
+      `Work parked outside ${outcome.integrationRefs[0]}:\n${parked.join('\n')}\n` +
+      'A branch far behind is a decision waiting, not a branch. Landing it or deleting it are both fine; leaving it is what costs.',
+    );
+  }
+
   // Branch-cap WARNING (Russell's choice: warn on Stop, never hard-block).
   if (outcome.durable.length > outcome.branchCap) {
     lines.push(
@@ -186,6 +261,17 @@ function main() {
     });
   } catch {
     process.exit(0); // fail open — never wedge Claude
+  }
+
+  if (outcome.blocked) {
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: eventName,
+        permissionDecision: 'deny',
+        permissionDecisionReason: `Branch sprawl guard: ${outcome.durable.join(', ')} already fills the two active branch slots. Merge or remove one before creating another branch.`,
+      },
+    }));
+    process.exit(0);
   }
 
   const note = formatNote(outcome);
